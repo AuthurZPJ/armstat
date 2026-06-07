@@ -1,0 +1,473 @@
+.TH ARMSTAT 8 "March 2026" "armstat" "System Administration"
+.SH NAME
+armstat \- ARM server monitoring tool in the style of turbostat
+.SH SYNOPSIS
+.B armstat
+[\fIoptions\fR]
+.SH DESCRIPTION
+.B armstat
+collects interval-based CPU, idle, power, temperature, PMU, and topology data
+on ARM64 servers.
+
+It uses Linux interfaces such as
+.BR /proc/stat ,
+.BR sysfs ,
+.BR hwmon ,
+.BR thermal_zone ,
+and
+.BR perf_event_open (2).
+
+The current output model is:
+.IP \(bu 2
+default mode: per-package aggregation rows followed by per-CPU rows
+.IP \(bu 2
+summary mode (\fB-S\fR): one \fBSUM\fR row per interval
+.IP \(bu 2
+in text/JSON mode, explicitly enabling summary-scope groups (for example via
+\fB-a\fR or \fB-s sysstat,membw,energy\fR) prints a \fBSUM\fR section in
+addition to CPU rows
+
+.PP
+When \fB--cpu\fR is active, tracked-CPU-derived summary fields are based on the
+filtered tracked CPU set, while platform/global fields keep their natural
+summary scope. The automatic mixed \fBSUM\fR section is suppressed in that mode
+to avoid surprising mixed-scope output.
+.PP
+The first visible line always represents one complete sampling interval, not an
+instantaneous snapshot at process start.
+.PP
+If armstat rebuilds runtime state after CPU topology change, that sample
+becomes a new baseline and is not printed as a normal interval row.
+
+.SH OPTIMIZATION STRATEGY
+The implementation is optimized around interval sampling overhead:
+
+.IP \(bu 2
+static / rebuild work handles CPU inventory, topology, sensor discovery, and
+cpuidle state metadata
+.IP \(bu 2
+slow-changing CPU attributes such as min/max frequency, governor, boost, and
+cpuidle disable flags are refreshed with a rolling budget instead of full
+machine sweeps
+.IP \(bu 2
+\fB/proc/stat\fR is parsed once per interval and reused for idle, iowait,
+\fBCtxSw\fR, \fBIRQs\fR, and \fBSoftIRQs\fR
+.IP \(bu 2
+cpuidle state time is refreshed only when \fBLPI-*\fR columns are visible
+.IP \(bu 2
+power, energy, and temperature sensors are only sampled when a visible field
+depends on them
+.IP \(bu 2
+PMU counters are opened as perf groups per tracked CPU and multiplexed
+intervals are scaled using \fBtime_enabled\fR / \fBtime_running\fR
+.IP \(bu 2
+before normal interval sampling, armstat makes a best-effort attempt to lower
+its own nice value, matching turbostat's intent to reduce monitor-induced
+scheduling jitter; failure is non-fatal
+.IP \(bu 2
+the default Busy/Idle policy is \fBauto\fR: use \fB/proc/stat\fR on ordinary
+CPUs and prefer \fB/proc/schedstat\fR runtime accounting on CPUs listed in
+\fB/sys/devices/system/cpu/nohz_full\fR. The \fBtask-clock\fR mode is retained
+as a compatibility alias and currently resolves to the same implementation as
+\fBschedstat\fR
+
+.SH OPTIONS
+.TP
+.BI \-i ", " \-\-interval " seconds"
+Sampling interval in finite positive seconds. Default: 1.0
+.TP
+.BI \-n ", " \-\-num_iterations " n"
+Number of iterations to run. Default: unlimited
+.TP
+.BI \-N ", " \-\-header_iterations " n"
+Reprint the text header every N iterations
+.TP
+.BI \-c ", " \-\-cpu " cpu-list"
+Monitor only the specified real CPU IDs. Accepts comma-separated values and
+ranges such as \fB0,1,4-7\fR. This is a sampling filter: only online matching
+CPUs become tracked CPUs, so per-CPU rows, summary averages, PMU groups, and
+per-CPU Busy/Idle/sysfs readers are based on the filtered tracked set. Invalid
+tokens, reversed ranges, empty tokens, and filters that match no online CPU are
+startup errors
+.TP
+.BI \-B ", " \-\-busy-source " auto|procstat|schedstat|task-clock"
+Select the authoritative Busy/Idle source. Default: \fBauto\fR
+.TP
+.BI \-o ", " \-\-output " file"
+Write output to file
+.TP
+.BI \-O ", " \-\-export " file"
+Export text, JSON, or CSV output to file. This is an explicit alias of
+\fB-o\fR / \fB--output\fR and is especially convenient for machine-readable
+formats. Current JSON/CSV exports carry \fBschema_version=4\fR. The detailed
+export contract is documented in \fBEXPORTS.md\fR and \fBEXPORTS.zh-CN.md\fR
+.TP
+.B \-q, \-\-quiet
+Suppress the interval banner and text headers
+.TP
+.B \-D, \-\-Dump
+Collect one interval and exit
+.TP
+.B \-S, \-\-Summary
+Summary-only mode. Output one \fBSUM\fR row/object per interval
+.TP
+.B \-a, \-\-all
+Enable all supported base column groups. PMU and IPC remain explicit and are
+not auto-enabled by \fB-a\fR
+.TP
+.BI \-f ", " \-\-format " text|json|csv"
+Select output format. Default: text
+.TP
+.BI \-s ", " \-\-show " items"
+Show only the specified column groups or exact field names
+.TP
+.BI \-H ", " \-\-hide " items"
+Hide the specified column groups or exact field names
+.TP
+.BI \-p ", " \-\-pmu-events " events"
+Enable PMU events. Events are comma-separated. Unknown named events and lists
+longer than \fBMAX_PMU_EVENTS\fR are startup errors; known events that cannot
+be opened because of perf permissions remain visible as unavailable values
+.TP
+.B \-I, \-\-IPC
+Enable PMU \fBcycles,instructions\fR and show IPC columns
+.TP
+.B \-J, \-\-Joules
+Show interval energy in Joules
+.TP
+.B \-l, \-\-list
+List built-in column groups and built-in PMU event names
+.TP
+.B \-\-probe
+Print a one-shot capability summary for the current platform, including CPU
+topology, effective busy-source policy, cpuidle/LPI availability,
+power/temperature sources, memory bandwidth support, and basic PMU availability
+.TP
+.B \-d, \-\-debug
+Enable debug output
+.TP
+.B \-v, \-\-version
+Show version information
+.TP
+.B \-?, \-\-help
+Show help
+
+.SH COLUMN GROUPS
+The following aliases are understood by
+.B --show
+and
+.BR --hide :
+
+.IP \(bu 2
+\fBcpu\fR
+.IP \(bu 2
+\fBpkg\fR, \fBpackage\fR
+.IP \(bu 2
+\fBcore\fR
+.IP \(bu 2
+\fBnuma\fR, \fBnode\fR
+.IP \(bu 2
+\fBfreq\fR
+.IP \(bu 2
+\fBidle\fR
+.IP \(bu 2
+\fBpower\fR
+.IP \(bu 2
+\fBtemp\fR
+.IP \(bu 2
+\fBpmu\fR
+.IP \(bu 2
+\fBsysstat\fR, \fBirq\fR
+.IP \(bu 2
+\fBmembw\fR, \fBmem\fR
+.IP \(bu 2
+\fBipc\fR
+.IP \(bu 2
+\fBenergy\fR, \fBjoules\fR
+
+.PP
+\fB--show\fR and \fB--hide\fR also accept exact field names such as
+\fBIdle%\fR, \fBBusy%\fR, \fBIOWait%\fR, \fBSoftIRQs\fR, \fBLPI-0\fR, or
+\fBPower\fR.
+
+.SH PMU EVENTS
+Built-in PMU names include:
+
+.IP \(bu 2
+\fBcycles\fR
+.IP \(bu 2
+\fBinstructions\fR
+.IP \(bu 2
+\fBcache-references\fR
+.IP \(bu 2
+\fBcache-misses\fR
+.IP \(bu 2
+\fBbranches\fR
+.IP \(bu 2
+\fBbranch-misses\fR
+.IP \(bu 2
+\fBmem-access\fR
+.IP \(bu 2
+\fBmem-read\fR
+.IP \(bu 2
+\fBmem-write\fR
+.IP \(bu 2
+\fBl1d-cache\fR
+.IP \(bu 2
+\fBl1d-cache-refill\fR
+.IP \(bu 2
+\fBl1i-cache\fR
+.IP \(bu 2
+\fBl1i-cache-refill\fR
+.IP \(bu 2
+\fBl2d-cache\fR
+.IP \(bu 2
+\fBl2d-cache-refill\fR
+.IP \(bu 2
+\fBl3d-cache\fR
+.IP \(bu 2
+\fBl3d-cache-refill\fR
+
+PMU counters are opened per tracked CPU. Events on the same CPU are grouped
+with perf group semantics, and multiplexed intervals are scaled using
+\fBtime_enabled\fR / \fBtime_running\fR when available. PMU file descriptor
+use scales with the tracked CPU count; use \fB--cpu\fR to reduce that count on
+large systems.
+
+Raw ARM PMU event configs can also be requested as hexadecimal values such as
+\fB0x11\fR.
+
+Busy/Idle percentages are not produced by a hidden backend object. Raw
+authoritative counters are captured once per interval, then converted into
+interval deltas in the aggregation layer, using the selected busy-source policy
+to choose between \fB/proc/stat\fR and \fB/proc/schedstat\fR per CPU.
+
+.SH OUTPUT MODEL
+.SS Summary-scope fields
+Typical summary fields include:
+
+.IP \(bu 2
+\fBAvgFreq\fR
+.IP \(bu 2
+\fBUncoreFreq\fR
+.IP \(bu 2
+\fBIdle%\fR and \fBBusy%\fR derived from the selected busy-source policy
+.IP \(bu 2
+\fBIOWait%\fR derived from \fB/proc/stat\fR iowait accounting
+.IP \(bu 2
+idle-state residency columns labelled from cpuidle \fBstateN/name\fR (for
+example \fBLPI-0\fR, \fBLPI-1\fR) when cpuidle data is available
+.IP \(bu 2
+up to eight \fBLPI-*\fR columns are visible; deeper or unavailable states are
+folded into the deepest visible usable residual bucket
+.IP \(bu 2
+\fBBusy%\fR is calculated from the selected busy-source policy
+.IP \(bu 2
+visible \fBLPI-*\fR columns are display-oriented: shallower usable states keep
+their raw cpuidle residency, while the deepest visible usable state becomes a
+residual bucket so that visible \fBLPI-*\fR columns sum to \fBIdle%\fR
+.IP \(bu 2
+if a deeper state is disabled, unavailable, or beyond the visible column limit,
+the residual is assigned to the deepest remaining visible usable state
+.IP \(bu 2
+\fBPower\fR
+.IP \(bu 2
+\fBTemp0\fR ... \fBTemp3\fR when available
+.IP \(bu 2
+\fBEnergy\fR
+.IP \(bu 2
+\fBMemBW\fR
+.IP \(bu 2
+\fBCtxSw\fR
+.IP \(bu 2
+\fBIRQs\fR
+.IP \(bu 2
+\fBSoftIRQs\fR
+.IP \(bu 2
+\fBIPC\fR
+.IP \(bu 2
+aggregated PMU counters
+.IP \(bu 2
+summary \fBLPI-*\fR values are averages of the displayed per-CPU idle-state
+columns, not a separate whole-machine residual calculation
+
+.SS CPU-scope fields
+Typical CPU fields include:
+
+.IP \(bu 2
+\fBCPU\fR
+.IP \(bu 2
+\fBPkg\fR, \fBCore\fR, \fBNode\fR
+.IP \(bu 2
+\fBFreq\fR, \fBMin\fR, \fBMax\fR, \fBGovernor\fR, \fBBoost\fR
+.IP \(bu 2
+\fBIdle%\fR and \fBBusy%\fR derived from the selected busy-source policy
+.IP \(bu 2
+idle-state residency columns labelled from cpuidle \fBstateN/name\fR when
+cpuidle data is available
+.IP \(bu 2
+the deepest visible \fBLPI-*\fR column may therefore be residual-adjusted
+rather than a pure raw cpuidle percentage
+.IP \(bu 2
+\fBIPC\fR when requested
+.IP \(bu 2
+\fBTemp\fR
+.IP \(bu 2
+per-CPU PMU counters
+
+.SH DATA SOURCES AND FORMULAS
+.IP \(bu 2
+\fBFreq\fR: \fBscaling_cur_freq / 1000\fR
+.IP \(bu 2
+\fBMin\fR / \fBMax\fR: \fBscaling_min_freq\fR and \fBscaling_max_freq\fR,
+converted from kHz to MHz
+.IP \(bu 2
+\fBAvgFreq\fR: per-CPU midpoint of previous and current frequency, then averaged
+across tracked CPUs for summary output
+.IP \(bu 2
+\fBUncoreFreq\fR: a unique readable
+\fB/sys/class/devfreq/<device>/cur_freq\fR whose device name looks like an
+uncore/interconnect/fabric clock source, converted from Hz to MHz and exported
+as \fBuncore_freq\fR. If the devfreq layout is ambiguous, armstat hides
+\fBuncore_freq\fR instead of guessing
+.IP \(bu 2
+\fBIdle%\fR: from the selected busy-source policy; with \fBprocstat\fR it is
+\fB/proc/stat idle delta / interval delta * 100\fR, while with
+\fBschedstat\fR it is \fB100 - Busy%\fR from per-CPU runtime accounting, and
+\fBtask-clock\fR is a compatibility alias for the same formula. \fBIdle%\fR is
+the authoritative total idle budget for the interval
+.IP \(bu 2
+\fBIOWait%\fR: \fB/proc/stat iowait delta / interval delta * 100\fR
+.IP \(bu 2
+\fBBusy%\fR: with \fBprocstat\fR it is \fB100 - Idle%\fR; with
+\fBschedstat\fR it is \fBsched_runtime_delta_ns / wall_clock_delta_ns * 100\fR;
+\fBtask-clock\fR is a compatibility alias for the same formula
+.IP \(bu 2
+\fBIOWait%\fR is reported independently and is not subtracted from
+\fBBusy%\fR in the current model
+.IP \(bu 2
+\fBLPI-*\fR: cpuidle \fBstateN/time\fR delta divided by interval time; the
+deepest visible usable state may be residual-adjusted so visible
+\fBLPI-*\fR columns sum to \fBIdle%\fR. Raw cpuidle residency is used as the
+idle-state breakdown input, while \fBIdle%\fR remains the authoritative total
+idle budget. At most eight LPI columns are printed.
+.IP \(bu 2
+\fBPower\fR: package power from \fBpower_meter/power1_average\fR
+.IP \(bu 2
+\fBEnergy\fR: interval average power multiplied by interval duration
+.IP \(bu 2
+\fBMemBW\fR: delta of a platform-specific raw byte counter divided by interval
+time, reported as MB/s
+.IP \(bu 2
+\fBCtxSw\fR: \fB/proc/stat ctxt\fR delta
+.IP \(bu 2
+\fBIRQs\fR: \fB/proc/stat intr\fR delta
+.IP \(bu 2
+\fBSoftIRQs\fR: \fB/proc/stat softirq\fR delta
+.IP \(bu 2
+\fBIPC\fR: \fBinstructions / cycles\fR
+
+.SH PLATFORM NOTES
+The current implementation assumes a platform model where:
+
+.IP \(bu 2
+package power comes from \fBpower_meter/power1_average\fR
+.IP \(bu 2
+\fBthermal_zoneN/temp\fR maps directly to \fBTempN\fR and NUMA/Vdie node
+\fBN\fR under the current \fBthermal-zone-index\fR summary-temperature policy
+
+As a result:
+
+.IP \(bu 2
+\fBPower\fR is a summary/package field
+.IP \(bu 2
+CPU-row \fBTemp\fR is derived from the CPU's NUMA node temperature
+.IP \(bu 2
+\fBTemp0\fR through \fBTemp3\fR are summary fields shown for discovered
+NUMA/Vdie zones
+.IP \(bu 2
+\fB--probe\fR reports the effective \fBsummary_temp_policy\fR
+.IP \(bu 2
+\fBARMSTAT_TEMP_POLICY=none\fR disables summary \fBTempN\fR discovery when the
+platform does not follow the direct \fBthermal_zoneN -> TempN -> NUMA/Vdie N\fR
+mapping
+.IP \(bu 2
+per-core power is not currently exposed
+
+.SH LIMITATIONS
+.IP \(bu 2
+The current layout is \fBSUM + CPU rows\fR; there are no dedicated package/core
+aggregate rows yet
+.IP \(bu 2
+Per-state idle columns require cpuidle support; when cpuidle is unavailable,
+\fBIdle%\fR / \fBBusy%\fR fall back to \fB/proc/stat\fR
+.IP \(bu 2
+The deepest visible idle-state column is a display-adjusted residual bucket
+when needed, so it should not always be interpreted as a raw \fBstateN/time\fR
+percentage
+.IP \(bu 2
+Requested PMU / IPC fields may render as unavailable when perf access is not
+possible; this is intentional and preferable to silently reporting zero
+.IP \(bu 2
+Per-core power is not implemented
+.IP \(bu 2
+PMU monitoring usually requires root privileges or permissive perf settings
+
+.SH EXAMPLES
+.TP
+Default per-CPU output:
+.B armstat
+.TP
+5-second interval:
+.B armstat -i 5
+.TP
+10 iterations:
+.B armstat -n 10
+.TP
+Summary-only:
+.B armstat -S
+.TP
+Show package/core/node/frequency/idle:
+.B armstat -s pkg,core,node,freq,idle
+.TP
+Enable PMU counters:
+.B armstat -p cycles,instructions
+.TP
+Enable IPC:
+.B armstat -I
+.TP
+JSON output:
+.B armstat -f json
+.TP
+Export JSON to file:
+.B armstat -f json -O armstat.json
+.TP
+Export CSV to file:
+.B armstat -f csv -O armstat.csv
+.TP
+List built-in column groups and PMU event names:
+.B armstat -l
+.TP
+Probe the current platform:
+.B armstat --probe
+
+.PP
+Helper plotting scripts are documented separately in
+\fBPLOTTING.md\fR and \fBPLOTTING.zh-CN.md\fR.
+When installed with \fBmake install\fR, helper scripts and plotting docs are
+also installed under \fBshare/doc/armstat/\fR.
+
+.PP
+Machine-readable export fields and structure are documented separately in
+\fBEXPORTS.md\fR and \fBEXPORTS.zh-CN.md\fR.
+
+.PP
+Testing guidance is documented separately in
+\fBTESTING.md\fR and \fBTESTING.zh-CN.md\fR.
+
+.SH SEE ALSO
+.BR turbostat (8),
+.BR perf (1)
+
+.SH LICENSE
+GPL-2.0
