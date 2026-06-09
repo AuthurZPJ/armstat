@@ -1,5 +1,12 @@
 # CLAUDE.md
 
+<p align="center">
+  <a href="README.md">← Back to README</a> |
+  <a href="DESIGN.md">Design</a> |
+  <a href="TESTING.md">Testing</a> |
+  <a href="QWEN.md">Project Context</a>
+</p>
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview

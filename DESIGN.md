@@ -1,5 +1,12 @@
 # ARMSTAT Design
 
+<p align="center">
+  <a href="README.md">← Back to README</a> |
+  <a href="TESTING.md">Testing</a> |
+  <a href="EXPORTS.md">Exports</a> |
+  <a href="PLOTTING.md">Plotting</a>
+</p>
+
 This document describes the current implementation, not an aspirational one.
 If behavior differs from older notes, the code wins and this file should be
 updated.

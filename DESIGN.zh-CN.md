@@ -1,5 +1,12 @@
 # ARMSTAT 设计文档
 
+<p align="center">
+  <a href="README.zh-CN.md">← 返回 README</a> |
+  <a href="TESTING.zh-CN.md">测试</a> |
+  <a href="EXPORTS.zh-CN.md">导出</a> |
+  <a href="PLOTTING.zh-CN.md">画图</a>
+</p>
+
 本文描述的是**当前实现**，不是过去版本或未来设想。如果旧说明与代码不一致，
 以代码和本文为准。
 

@@ -1,5 +1,12 @@
 # armstat 导出契约说明
 
+<p align="center">
+  <a href="README.zh-CN.md">← 返回 README</a> |
+  <a href="DESIGN.zh-CN.md">设计</a> |
+  <a href="PLOTTING.zh-CN.md">画图</a> |
+  <a href="TESTING.zh-CN.md">测试</a>
+</p>
+
 本文档说明 `armstat` 产生的机器可读导出格式。
 
 适用场景：

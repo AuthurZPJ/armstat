@@ -1,5 +1,10 @@
 # armstat
 
+<p align="center">
+  <a href="README.md">English</a> |
+  <b>简体中文</b>
+</p>
+
 `armstat` 是一个面向 ARM 服务器的性能监控工具，风格上接近
 `turbostat`，重点观察以下区间统计：
 
@@ -13,6 +18,13 @@
 它依赖 ARM 平台常见的 `sysfs`、`/proc/stat`、`hwmon`、
 `thermal_zone` 和 `perf_event_open()`，而不是 x86 上统一的
 MSR/RAPL/TSC 模型。
+
+## 文档导航
+
+- **[DESIGN.zh-CN.md](DESIGN.zh-CN.md)** - 架构与实现细节
+- **[TESTING.zh-CN.md](TESTING.zh-CN.md)** - 测试流程与验证方法
+- **[EXPORTS.zh-CN.md](EXPORTS.zh-CN.md)** - JSON/CSV 导出格式规范
+- **[PLOTTING.zh-CN.md](PLOTTING.zh-CN.md)** - 画图脚本使用说明
 
 ## 当前输出模型
 
@@ -308,8 +320,8 @@ CSV 导出现在会在每行前面附带 `schema_version`、`interval`、`timest
 `timestamp_iso` 四列，方便后处理脚本直接按真实时间对齐样本，并识别当前
 导出契约版本。
 
-更完整的 JSON/CSV 字段与结构说明已经单独整理到 `EXPORTS.zh-CN.md`
-（中文）和 `EXPORTS.md`（英文）。
+更完整的 JSON/CSV 字段与结构说明已经单独整理到 [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md)
+（中文）和 [EXPORTS.md](EXPORTS.md)（英文）。
 
 ### 摘要模式
 
@@ -404,17 +416,17 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
 
 ### 画图
 
-附带的画图脚本说明已经单独整理到 `PLOTTING.zh-CN.md`
-（中文）和 `PLOTTING.md`（英文）。
+附带的画图脚本说明已经单独整理到 [PLOTTING.zh-CN.md](PLOTTING.zh-CN.md)
+（中文）和 [PLOTTING.md](PLOTTING.md)（英文）。
 
 ### 导出契约
 
-机器可读导出的字段和结构说明已经单独整理到 `EXPORTS.zh-CN.md`
-（中文）和 `EXPORTS.md`（英文）。
+机器可读导出的字段和结构说明已经单独整理到 [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md)
+（中文）和 [EXPORTS.md](EXPORTS.md)（英文）。
 
 ### 测试
 
-测试说明已经单独整理到 `TESTING.zh-CN.md`（中文）和 `TESTING.md`
+测试说明已经单独整理到 [TESTING.zh-CN.md](TESTING.zh-CN.md)（中文）和 [TESTING.md](TESTING.md)
 （英文）。
 
 ## 字段与作用域

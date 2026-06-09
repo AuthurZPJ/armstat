@@ -1,5 +1,11 @@
 # armstat Testing Guide
 
+<p align="center">
+  <a href="README.md">← Back to README</a> |
+  <a href="DESIGN.md">Design</a> |
+  <a href="EXPORTS.md">Exports</a>
+</p>
+
 This document describes the current testing workflow for `armstat`.
 
 ## Goals

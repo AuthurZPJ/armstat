@@ -19,8 +19,17 @@ mix of `sysfs`, `/proc/stat`, `hwmon`, `thermal_zone`, and `perf_event_open()`.
 **Key differentiator**: armstat produces machine-readable JSON and CSV exports
 with per-sample timestamps and a stable `schema_version`. Helper plotting
 scripts are included, so you can go from `armstat -f json -O data.json` to
-time-series charts without manual data wrangling. See `EXPORTS.md` and
-`PLOTTING.md`.
+time-series charts without manual data wrangling. See [EXPORTS.md](EXPORTS.md) and
+[PLOTTING.md](PLOTTING.md).
+
+## Documentation
+
+- **[DESIGN.md](DESIGN.md)** - Architecture and implementation details
+- **[TESTING.md](TESTING.md)** - Testing workflow and validation procedures
+- **[EXPORTS.md](EXPORTS.md)** - JSON/CSV export format specification
+- **[PLOTTING.md](PLOTTING.md)** - Helper plotting scripts usage
+- **[CLAUDE.md](CLAUDE.md)** - AI assistant guidelines
+- **[QWEN.md](QWEN.md)** - Project context and technical overview
 
 ## Current Output Model
 
@@ -378,8 +387,8 @@ CSV exports include `schema_version`, `interval`, `timestamp`, and
 `timestamp_iso` columns at the front of each row so downstream tools can align
 samples in time and identify the current export contract.
 
-Detailed JSON/CSV field and structure documentation lives in `EXPORTS.md`
-(English) and `EXPORTS.zh-CN.md` (Chinese).
+Detailed JSON/CSV field and structure documentation lives in [EXPORTS.md](EXPORTS.md)
+(English) and [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md) (Chinese).
 
 ### Summary mode
 
@@ -492,18 +501,18 @@ availability probe.
 
 ### Plotting
 
-Helper plotting scripts are documented separately in `PLOTTING.md`
-(English) and `PLOTTING.zh-CN.md` (Chinese).
+Helper plotting scripts are documented separately in [PLOTTING.md](PLOTTING.md)
+(English) and [PLOTTING.zh-CN.md](PLOTTING.zh-CN.md) (Chinese).
 
 ### Export Contract
 
 The machine-readable export contract is documented separately in
-`EXPORTS.md` (English) and `EXPORTS.zh-CN.md` (Chinese).
+[EXPORTS.md](EXPORTS.md) (English) and [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md) (Chinese).
 
 ### Testing
 
-Testing guidance is documented separately in `TESTING.md` (English) and
-`TESTING.zh-CN.md` (Chinese).
+Testing guidance is documented separately in [TESTING.md](TESTING.md) (English) and
+[TESTING.zh-CN.md](TESTING.zh-CN.md) (Chinese).
 
 ## Columns and Scope
 

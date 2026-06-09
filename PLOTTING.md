@@ -1,5 +1,10 @@
 # armstat Plotting Guide
 
+<p align="center">
+  <a href="README.md">← Back to README</a> |
+  <a href="EXPORTS.md">Export Format</a>
+</p>
+
 This document covers the helper plotting scripts shipped with `armstat`.
 
 These scripts are intentionally separate from the main `armstat` command:

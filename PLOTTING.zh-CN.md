@@ -1,5 +1,10 @@
 # armstat 画图说明
 
+<p align="center">
+  <a href="README.zh-CN.md">← 返回 README</a> |
+  <a href="EXPORTS.zh-CN.md">导出格式</a>
+</p>
+
 本文档专门说明 `armstat` 附带的画图脚本。
 
 这部分内容和 `armstat` 主命令刻意分离：

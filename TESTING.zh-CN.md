@@ -1,5 +1,11 @@
 # armstat 测试说明
 
+<p align="center">
+  <a href="README.zh-CN.md">← 返回 README</a> |
+  <a href="DESIGN.zh-CN.md">设计</a> |
+  <a href="EXPORTS.zh-CN.md">导出</a>
+</p>
+
 本文档说明当前 `armstat` 的测试方式。
 
 ## 目标

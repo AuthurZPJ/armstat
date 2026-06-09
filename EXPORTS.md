@@ -1,5 +1,12 @@
 # armstat Export Contract
 
+<p align="center">
+  <a href="README.md">← Back to README</a> |
+  <a href="DESIGN.md">Design</a> |
+  <a href="PLOTTING.md">Plotting</a> |
+  <a href="TESTING.md">Testing</a>
+</p>
+
 This document describes the machine-readable export formats produced by
 `armstat`.
 

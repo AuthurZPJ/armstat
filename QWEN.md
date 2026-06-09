@@ -1,5 +1,12 @@
 # QWEN.md — armstat Project Context
 
+<p align="center">
+  <a href="README.md">← Back to README</a> |
+  <a href="DESIGN.md">Design</a> |
+  <a href="TESTING.md">Testing</a> |
+  <a href="CLAUDE.md">AI Guidelines</a>
+</p>
+
 ## Project Overview
 
 `armstat` is an ARM64 server monitoring tool in the style of `turbostat`. It provides interval-based observation of CPU frequency, busy/idle time, package power/energy, NUMA temperature, PMU counters (IPC), memory bandwidth, and topology metadata. It targets ARM servers where telemetry comes from `sysfs`, `/proc/stat`, `hwmon`, `thermal_zone`, and `perf_event_open()`.
