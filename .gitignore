@@ -1,0 +1,40 @@
+# Compiled object files
+*.o
+*.obj
+
+# Linked binaries
+armstat
+tests/test_column_selection
+tests/test_runtime_smoke
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Build output
+build/
+dist/
+*.egg-info/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Coverage reports
+htmlcov/
+.coverage
+*.cover
+
+# Debug files
+*.dSYM/
+*.pdb

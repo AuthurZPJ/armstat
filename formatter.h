@@ -285,11 +285,6 @@ void set_summary_mode(int summary);
 void set_default_summary_output(int enable);
 
 /*
- * Set number of iterations (for footer control)
- */
-void set_iterations(int iter);
-
-/*
  * Set header print interval
  */
 void set_header_interval(int interval);

@@ -98,6 +98,8 @@ MSR/RAPL/TSC 模型。
 - 百分比类字段更接近 tracked CPU 的平均视角
 - 当启用 `--cpu` 过滤时，默认不会再自动混出 `SUM`，避免把过滤后的 CPU 行和
   全系统 summary 混在一起
+- 当启用 `--cpu` 过滤时，per-package 聚合行也会被抑制，因为它们会聚合
+  过滤器之外的 CPU
 
 ### nohz_full 与 Busy/Idle
 
@@ -547,7 +549,7 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
     `Idle%` 表示“这个采样窗口里，该 CPU 总体有多 idle”。armstat 会把
     它当作分 `LPI-*` 展示时要解释清楚的基准值。
 
-- **IOWait%**
+- **IOWait%**（默认关闭；可通过 `-s iowait` 或 `-s IOWait%` 开启）
   - 来源：
     `/proc/stat` 的 per-CPU `iowait`
   - 公式：

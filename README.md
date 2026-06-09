@@ -131,6 +131,8 @@ So when reading `SUM`:
   keep their natural summary scope
 - the automatic mixed `SUM` section is still suppressed when `--cpu` is used,
   so filtered CPU rows are not silently shown beside a summary section
+- per-package aggregation rows are also suppressed when `--cpu` is used, since
+  they would aggregate across CPUs outside the filter
 
 ### Power and temperature
 
@@ -647,7 +649,7 @@ display-oriented adjustments.
     it as the reference value that the displayed `LPI-*` breakdown should
     explain.
 
-- **IOWait%**
+- **IOWait%** (off by default; enable with `-s iowait` or `-s IOWait%`)
   - source:
     `/proc/stat` per-CPU `iowait`
   - implementation path:

@@ -27,7 +27,7 @@
 #include "cpuidle.h"
 
 #define MAX_PMU_EVENTS    16
-#define MAX_CPUS         4096
+#define MAX_CPUS         1024
 #define PROC_LINE_MAX     512  /* /proc line buffer; 256 is tight on large machines */
 
 #include <stdio.h>

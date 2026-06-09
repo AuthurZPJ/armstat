@@ -103,8 +103,6 @@ struct slow_data {
 	int *boost;
 	char (*governors)[32];
 	int per_core_power_available;
-	int per_core_temp_available;
-	int temp_sensor_count;
 	int last_cpu_count;
 } slow_data;
 
@@ -218,8 +216,6 @@ static void slow_refresh_cpu(int tracked_idx)
 
 static void slow_refresh_sensor_caps(void)
 {
-	slow_data.temp_sensor_count = get_temp_sensor_count();
-	slow_data.per_core_temp_available = (slow_data.temp_sensor_count > 0);
 	slow_data.per_core_power_available = get_per_core_power_support();
 }
 
@@ -377,7 +373,7 @@ static void collect_power_and_temp_snapshot(struct sys_snapshot *snapshot, int t
 
 	/* ---- Per-interval: sensor availability ---- */
 	snapshot->has_per_core_power = slow_data.per_core_power_available;
-	snapshot->has_per_core_temp = slow_data.per_core_temp_available;
+	snapshot->has_per_core_temp = 0;  /* Per-core temp not supported */
 
 	/* ---- Per-interval: power and temp ---- */
 	snapshot->powers = powers_pool;

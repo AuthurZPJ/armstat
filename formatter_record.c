@@ -36,7 +36,7 @@
 int show_cpu = 1;
 int show_freq = 1;
 int show_idle = 1;
-int show_iowait = 1;
+int show_iowait = 0;
 int show_power = 1;
 int show_temp = 1;
 int show_pmu = 0;
@@ -57,15 +57,16 @@ static int show_idle_state[8] = {1, 1, 0, 0, 0, 0, 0, 0};
 static int show_summary_idle_state[8] = {1, 1, 0, 0, 0, 0, 0, 0};
 
 /*
- * Idle state override state:
- *   -1: no explicit override
- *    0: explicitly hidden
- *    1: explicitly shown
+ * Idle state override bitmasks:
+ *   idle_show_mask: bit set → explicitly shown
+ *   idle_hide_mask: bit set → explicitly hidden
+ *   both clear    → inherit (available → visible)
  *
- * When whitelist mode is active, only explicitly shown states remain visible.
+ * If any show bit is set, whitelist semantics apply: only explicitly
+ * shown states are visible.
  */
-static int idle_state_override[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-static int idle_state_whitelist_mode;
+static unsigned int idle_show_mask;
+static unsigned int idle_hide_mask;
 
 /* Idle state labels - updated from cpuidle state names when available */
 static char idle_state_labels[8][16] = {
@@ -112,9 +113,8 @@ static void clear_idle_state_columns(void)
 
 static void reset_idle_state_overrides_internal(void)
 {
-	for (int i = 0; i < ARRAY_SIZE(idle_state_override); i++)
-		idle_state_override[i] = -1;
-	idle_state_whitelist_mode = 0;
+	idle_show_mask = 0;
+	idle_hide_mask = 0;
 }
 
 void clear_idle_state_overrides(void)
@@ -124,13 +124,20 @@ void clear_idle_state_overrides(void)
 
 void set_idle_state_override(int state_idx, int enable, int whitelist)
 {
-	if (state_idx < 0 || state_idx >= ARRAY_SIZE(idle_state_override))
+	unsigned int bit;
+
+	(void)whitelist;
+	if (state_idx < 0 || state_idx >= 8)
 		return;
 
-	if (whitelist)
-		idle_state_whitelist_mode = 1;
-
-	idle_state_override[state_idx] = enable ? 1 : 0;
+	bit = 1U << state_idx;
+	if (enable) {
+		idle_show_mask |= bit;
+		idle_hide_mask &= ~bit;
+	} else {
+		idle_hide_mask |= bit;
+		idle_show_mask &= ~bit;
+	}
 }
 
 /* ============================================================================
@@ -741,6 +748,10 @@ static double get_summary_ipc(const struct interval_record *rec, int cpu)
 	  group_mask, FIELD_SERIES_NONE, -1,				\
 	  enabled_ptr, .getter.get_string = getter_fn }
 
+/* ============================================================================
+ * SECTION 4: FIELD DESCRIPTOR TABLE
+ * ============================================================================ */
+
 struct field_desc all_fields[] = {
 	
 #define PACKAGE_DOUBLE_FIELD(id, label, json_label, group_mask, enabled_ptr, getter_fn) \
@@ -854,38 +865,21 @@ struct field_desc all_fields[] = {
 };
 
 #define NUM_FIELDS (int)(sizeof(all_fields) / sizeof(all_fields[0]))
+_Static_assert(NUM_FIELDS <= 64,
+	       "NUM_FIELDS exceeds uint64_t bitmask capacity");
 
 /*
- * Field overrides refine the coarse group flags.
+ * Field override bitmasks.
  *
- * Most formatter flags are group-level (for example show_freq controls
- * Freq/Min/Max/Governor/Boost/AvgMHz/UncoreMHz together). That is convenient
- * for normal group toggles, but users can also pass exact field names via
- * -s/-H. These overrides let exact-field selection stay exact without
- * redesigning the whole field table around per-field booleans.
+ * field_show_mask: bit set → explicitly show this field
+ * field_hide_mask: bit set → explicitly hide this field
+ * both clear: inherit from group flag (show_* variable)
  *
- * Semantics:
- *   field_override_whitelist_mode == 0
- *     -1: inherit the group flag
- *      0: explicitly hidden
- *      1: explicitly shown (currently only relevant for completeness)
- *
- *   field_override_whitelist_mode == 1
- *      1: visible
- *   all other states: hidden
+ * If any show bit is set, whitelist semantics apply: only fields with
+ * their show bit set are visible.
  */
-/*
- * Exact-field overrides default to "inherit group visibility".
- *
- * Keep the static initializer at -1 so the formatter behaves correctly even
- * before reset_columns() is called. The default CLI path relies on the
- * show_* group flags alone and should not start with every field implicitly
- * hidden.
- */
-static signed char field_override_state[NUM_FIELDS] = {
-	[0 ... NUM_FIELDS - 1] = -1
-};
-static int field_override_whitelist_mode;
+static uint64_t field_show_mask;
+static uint64_t field_hide_mask;
 
 #undef SUMMARY_IDLE_FIELD
 #undef TEMP_VDIE_FIELD
@@ -929,30 +923,37 @@ static int field_is_effectively_enabled(int field_index)
 	    get_temp_numa_count() <= 0)
 		return 0;
 
-	if (field_override_whitelist_mode)
-		return field_override_state[field_index] == 1;
-
-	if (field_override_state[field_index] == 0)
+	if (field_hide_mask & (1ULL << field_index))
 		return 0;
-
+	if (field_show_mask & (1ULL << field_index))
+		return 1;
+	if (field_show_mask)
+		return 0;  /* whitelist: only explicitly shown fields */
 	return *field->enabled_ptr;
 }
 
 void clear_field_overrides(void)
 {
-	memset(field_override_state, -1, sizeof(field_override_state));
-	field_override_whitelist_mode = 0;
+	field_show_mask = 0;
+	field_hide_mask = 0;
 }
 
 void set_field_override_by_index(int field_index, int enable, int whitelist)
 {
+	uint64_t bit;
+
+	(void)whitelist;
 	if (field_index < 0 || field_index >= NUM_FIELDS)
 		return;
 
-	if (whitelist)
-		field_override_whitelist_mode = 1;
-
-	field_override_state[field_index] = enable ? 1 : 0;
+	bit = 1ULL << field_index;
+	if (enable) {
+		field_show_mask |= bit;
+		field_hide_mask &= ~bit;
+	} else {
+		field_hide_mask |= bit;
+		field_show_mask &= ~bit;
+	}
 }
 
 /*
@@ -1171,7 +1172,7 @@ void setup_formatter_pool(int max_cpus)
 }
 
 /* ============================================================================
- * SECTION 8: COLUMN ENABLE/DISABLE
+ * SECTION 7: COLUMN ENABLE/DISABLE
  * ============================================================================ */
 
 /*
@@ -1205,10 +1206,12 @@ void update_idle_state_visibility(void)
 
 		if (!available) {
 			enabled = 0;
-		} else if (idle_state_whitelist_mode) {
-			enabled = (idle_state_override[i] == 1);
-		} else if (idle_state_override[i] != -1) {
-			enabled = idle_state_override[i];
+		} else if (idle_hide_mask & (1U << i)) {
+			enabled = 0;
+		} else if (idle_show_mask & (1U << i)) {
+			enabled = 1;
+		} else if (idle_show_mask) {
+			enabled = 0;  /* whitelist: only explicitly shown states */
 		} else {
 			enabled = 1;
 		}

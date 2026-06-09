@@ -307,8 +307,15 @@ static int should_emit_cpu_identity(void)
 	return should_emit_cpu_section();
 }
 
-int should_emit_package_section(void)
+static int should_emit_package_section(void)
 {
+	/*
+	 * Package rows aggregate across all CPUs in a package, which conflicts
+	 * with explicit CPU filtering. When --cpu is active, suppress package
+	 * rows just like we suppress the automatic SUM section.
+	 */
+	if (cpu_inventory_filter_is_active())
+		return 0;
 	return any_fields_enabled(FIELD_SCOPE_PACKAGE);
 }
 

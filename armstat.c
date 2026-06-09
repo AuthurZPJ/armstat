@@ -215,7 +215,6 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 		fprintf(stderr, "Error: Failed to init formatter\n");
 		return -1;
 	}
-	set_iterations(opts->iterations);
 
 	/* Initialize PMU if requested */
 	if (opts->pmu_events) {

@@ -275,6 +275,8 @@ Package 行按 socket 聚合 per-CPU 的 MHz、Idle%、Busy% 和 IOWait%。Core 
   全机 residual 计算
 - 当启用 `--cpu` 过滤时，默认不会再自动混出 `SUM`，避免把过滤后的 CPU 行
   和全系统 summary 混在一起
+- 当启用 `--cpu` 过滤时，per-package 聚合行也会被抑制，因为它们会聚合
+  过滤器之外的 CPU
 
 ## Idle 模型
 
@@ -399,7 +401,7 @@ serializer 不应再编码采样假设；采样语义属于 builder 和 getter�
     - `schedstat`：先从 `/proc/schedstat` 的 per-CPU 运行时间得到
       `Busy%`，再由 `Idle% = 100 - Busy%`
     - `task-clock`：兼容别名，当前等价于 `schedstat`
-- `IOWait%`
+- `IOWait%`（默认关闭；可通过 `-s iowait` 或 `-s IOWait%` 开启）
   - 来源：`/proc/stat iowait`
   - 公式：`iowait_delta_us / interval_delta_us * 100`
 - `Busy%`
@@ -550,12 +552,12 @@ cpuidle fd 缓存被刻意限制在 32，防止 LPI 分状态报告消耗全部�
 预算。PMU fd 不做限制，因为 PMU 是显式 opt-in 的——在大机器上启用 PMU
 的用户隐式接受了 fd 成本。
 
-### MAX_CPUS = 4096
+### MAX_CPUS = 1024
 
 `MAX_CPUS` 是 `collector.h` 中的编译期常量，设定了同时可跟踪的最大 CPU
-数量。4096 的选取原则是超过当前最大的单系统 ARM 服务器（约 512 核），
-并为 SMT 和未来增长留出余量。如果系统超过此限制，armstat 会截断到 4096，
-打印警告，并继续监视前 4096 个 CPU。调高此值会增大整个代码库中所有
+数量。1024 的选取原则是超过当前最大的单系统 ARM 服务器（约 512 核），
+并为 SMT 和未来增长留出余量。如果系统超过此限制，armstat 会截断到 1024，
+打印警告，并继续监视前 1024 个 CPU。调高此值会增大整个代码库中所有
 `MAX_CPUS` 尺寸的静态数组；修改前务必检查所有栈和堆分配。
 
 ## 文档维护规则

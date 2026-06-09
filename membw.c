@@ -23,7 +23,6 @@
 /* Memory bandwidth state */
 static int mem_bw_support;
 static FILE *mem_bw_read_fp;
-static FILE *mem_bw_write_fp;
 static char mem_bw_read_path[POWER_SYSFS_PATH_LEN];
 static unsigned long long prev_mem_read;
 static unsigned long long interval_mem_bw;
@@ -210,10 +209,6 @@ void close_mem_bw(void)
 	if (mem_bw_read_fp) {
 		fclose(mem_bw_read_fp);
 		mem_bw_read_fp = NULL;
-	}
-	if (mem_bw_write_fp) {
-		fclose(mem_bw_write_fp);
-		mem_bw_write_fp = NULL;
 	}
 	reset_mem_bw();
 	mem_bw_support = 0;

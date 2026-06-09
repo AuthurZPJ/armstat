@@ -36,9 +36,6 @@ int read_all_numa_temps(int *temps, int max_numas);
 
 /* Capability / inventory queries */
 
-/* Number of thermal zones discovered (summary-level TempN columns). */
-int get_temp_sensor_count(void);
-
 /* Number of NUMA nodes with temperature sensors. */
 int get_temp_numa_count(void);
 

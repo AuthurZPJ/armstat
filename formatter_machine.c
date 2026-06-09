@@ -23,10 +23,18 @@
 /* Machine formatter state */
 static int summary_mode = 0;
 static int json_first_interval = 1;
+static int csv_header_printed = 0;
 static int default_summary_output = 0;
 
 static int should_emit_package_section(void)
 {
+	/*
+	 * Package rows aggregate across all CPUs in a package, which conflicts
+	 * with explicit CPU filtering. When --cpu is active, suppress package
+	 * rows just like we suppress the automatic SUM section.
+	 */
+	if (cpu_inventory_filter_is_active())
+		return 0;
 	return any_fields_enabled(FIELD_SCOPE_PACKAGE);
 }
 
@@ -667,7 +675,6 @@ static void serialize_csv_mixed_summary_row(const struct interval_record *rec,
 
 void serialize_csv(const struct interval_record *rec)
 {
-	static int csv_header_printed;
 	int cpu_section = should_emit_cpu_section();
 	int system_section = any_fields_enabled(FIELD_SCOPE_SYSTEM);
 	int mixed_scope = should_emit_mixed_csv_section();
@@ -732,4 +739,5 @@ void set_machine_default_summary_output(int enable)
 void reset_machine_state(void)
 {
 	json_first_interval = 1;
+	csv_header_printed = 0;
 }

@@ -76,8 +76,10 @@ static void refresh_nohz_full_mask(void)
 	nohz_full_count = 0;
 
 	fp = fopen("/sys/devices/system/cpu/nohz_full", "r");
-	if (!fp)
+	if (!fp) {
+		nohz_full_valid = 1;
 		return;
+	}
 
 	if (fgets(line, sizeof(line), fp)) {
 		char *nl = strchr(line, '\n');

@@ -412,6 +412,10 @@ static void cleanup_cpuidle_runtime_allocations(int total_cpus)
 		free(prev_state_times);
 		prev_state_times = NULL;
 	}
+	if (prev_state_usages) {
+		free(prev_state_usages);
+		prev_state_usages = NULL;
+	}
 
 	free_idle_state_matrix(total_cpus);
 }
@@ -468,6 +472,14 @@ int init_cpuidle(void)
 				 sizeof(unsigned long long));
 	if (!prev_state_times) {
 		free_idle_state_matrix(total_cpus);
+		return -1;
+	}
+
+	/* Allocate per-CPU previous state usage counters (for wakeup deltas) */
+	prev_state_usages = calloc(total_cpus * max_idle_states,
+				  sizeof(unsigned long long));
+	if (!prev_state_usages) {
+		cleanup_cpuidle_runtime_allocations(total_cpus);
 		return -1;
 	}
 
@@ -732,10 +744,14 @@ void close_cpuidle(void)
 		idle_states = NULL;
 	}
 
-	/* Free previous state times */
+	/* Free previous state times and usage counters */
 	if (prev_state_times) {
 		free(prev_state_times);
 		prev_state_times = NULL;
+	}
+	if (prev_state_usages) {
+		free(prev_state_usages);
+		prev_state_usages = NULL;
 	}
 
 	if (cpu_idle_state_counts) {

@@ -55,7 +55,6 @@ static struct power_info package_power_sensor;
 static struct temp_info numa_temp_sensors[MAX_NUMA_TEMP_SENSORS];
 static int package_power_available;
 static int power_sensor_count;
-static int temp_sensor_count;
 static int numa_temp_sensor_count;
 static enum summary_temp_policy summary_temp_policy;
 static int package_power_fd = -1;
@@ -265,7 +264,6 @@ static void reset_sensor_state(void)
 
 	package_power_available = 0;
 	power_sensor_count = 0;
-	temp_sensor_count = 0;
 	numa_temp_sensor_count = 0;
 	summary_temp_policy = SUMMARY_TEMP_POLICY_NONE;
 }
@@ -446,15 +444,6 @@ int read_all_cpu_temp(int *temps, int max_cpus)
 /* ============================================================================
  * QUERY FUNCTIONS
  * ============================================================================ */
-
-int get_temp_sensor_count(void)
-{
-	/*
-	 * Report per-core temperature capability only.
-	 * NUMA/die temperatures are tracked separately via get_temp_numa_count().
-	 */
-	return temp_sensor_count;
-}
 
 int get_temp_numa_count(void)
 {

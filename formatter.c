@@ -112,11 +112,6 @@ void set_default_summary_output(int enable)
 	set_machine_default_summary_output(enable);
 }
 
-void set_iterations(int iter)
-{
-	(void)iter;
-}
-
 void set_header_interval(int interval)
 {
 	header_interval = interval;

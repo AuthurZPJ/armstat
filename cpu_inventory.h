@@ -2,10 +2,7 @@
 #ifndef ARMSTAT_CPU_INVENTORY_H
 #define ARMSTAT_CPU_INVENTORY_H
 
-/* Maximum CPUs we track */
-#ifndef MAX_CPUS
-#define MAX_CPUS 4096
-#endif
+#include "collector.h"
 
 #define MAX_PRESENT_CPUS MAX_CPUS
 

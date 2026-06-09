@@ -293,6 +293,8 @@ Important summary semantics:
 - when `--cpu` filtering is active, the automatic mixed `SUM` section is
   suppressed so CPU rows are not shown beside a surprising implicit summary
   section
+- per-package aggregation rows are also suppressed when `--cpu` is active, since
+  they would aggregate across CPUs outside the filter
 
 ## Idle Model
 
@@ -437,7 +439,7 @@ This is the implementation-facing summary of "where each number comes from".
     - `schedstat`: `100 - Busy%`, where `Busy%` comes from `/proc/schedstat`
       per-CPU runtime
     - `task-clock`: legacy alias for the `schedstat` formula
-- `IOWait%`
+- `IOWait%` (off by default; enable with `-s iowait` or `-s IOWait%`)
   - source: `/proc/stat iowait`
   - implementation path:
     raw cumulative jiffies are captured in `sample_cache.c`; the interval
@@ -616,13 +618,13 @@ reporting from consuming the entire process fd budget. PMU fds are not capped
 because PMU is opt-in and the user who enables PMU on a large machine
 implicitly accepts the fd cost.
 
-### MAX_CPUS = 4096
+### MAX_CPUS = 1024
 
 `MAX_CPUS` is a compile-time constant in `collector.h`. It sets the maximum
-number of simultaneously tracked CPUs. 4096 was chosen to exceed the largest
+number of simultaneously tracked CPUs. 1024 was chosen to exceed the largest
 single-system ARM server available at the time (~512 cores), with headroom for
-SMT and growth. If a system exceeds this limit, armstat caps at 4096, prints a
-warning, and continues with the first 4096 CPUs. Raising this value increases
+SMT and growth. If a system exceeds this limit, armstat caps at 1024, prints a
+warning, and continues with the first 1024 CPUs. Raising this value increases
 static array sizes throughout the codebase; check all `MAX_CPUS`-sized stack
 and heap allocations before changing it.
 

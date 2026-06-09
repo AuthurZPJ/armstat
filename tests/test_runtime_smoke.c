@@ -523,6 +523,206 @@ static void test_empty_json_stream_closes_as_empty_array(void)
 	free(output);
 }
 
+/* ============================================================================
+ * TEST COVERAGE: Text serializer content validation
+ * ============================================================================ */
+
+static void test_text_serializer_emits_column_headers_and_values(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[1];
+	struct cpu_freq_info freqs[1];
+	struct serializer_args args;
+	char *output;
+
+	reset_test_state();
+	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	args.rec = &rec;
+
+	output = capture_stdout(emit_text_record, &args);
+
+	/* Header row should contain the selected column names */
+	assert(strstr(output, "Freq") != NULL);
+	assert(strstr(output, "Idle%") != NULL);
+	assert(strstr(output, "Busy%") != NULL);
+
+	/* Data row should contain the actual frequency value (2200 MHz) */
+	assert(strstr(output, "2200") != NULL);
+
+	free(output);
+}
+
+/* ============================================================================
+ * TEST COVERAGE: Multi-CPU CSV serializer
+ * ============================================================================ */
+
+static void seed_multi_cpu_inventory(void)
+{
+	memset(&cpu_catalog, 0, sizeof(cpu_catalog));
+	memset(&cpu_inv, 0, sizeof(cpu_inv));
+
+	cpu_catalog.present_count = 3;
+	cpu_catalog.online_count = 3;
+	cpu_catalog.tracked_count = 3;
+	for (int i = 0; i < 3; i++) {
+		cpu_catalog.cpus[i].cpu_id = i;
+		cpu_catalog.cpus[i].present = 1;
+		cpu_catalog.cpus[i].online = 1;
+		cpu_catalog.cpus[i].numa_node = 0;
+		cpu_catalog.cpus[i].package_id = 0;
+		cpu_catalog.cpus[i].core_id = i;
+	}
+
+	cpu_inv.present_count = 3;
+	cpu_inv.online_count = 3;
+	cpu_inv.tracked_count = 3;
+	for (int i = 0; i < 3; i++) {
+		cpu_inv.present_cpus[i] = i;
+		cpu_inv.online_cpus[i] = i;
+		cpu_inv.tracked_cpus[i] = i;
+	}
+}
+
+static void make_multi_cpu_synthetic_record(struct interval_record *rec,
+					    struct sys_snapshot *raw,
+					    struct interval_stats *stats,
+					    struct cpu_row *cpu_rows,
+					    struct cpu_freq_info *freqs)
+{
+	memset(rec, 0, sizeof(*rec));
+	memset(raw, 0, sizeof(*raw));
+	memset(stats, 0, sizeof(*stats));
+	memset(cpu_rows, 0, 3 * sizeof(*cpu_rows));
+	memset(freqs, 0, 3 * sizeof(*freqs));
+
+	seed_multi_cpu_inventory();
+
+	for (int i = 0; i < 3; i++) {
+		freqs[i].cpu_id = i;
+		freqs[i].cur_freq = (2000 + i * 100) * 1000;
+		freqs[i].min_freq = 1700000;
+		freqs[i].max_freq = 2500000;
+		freqs[i].boost = 1;
+		snprintf(freqs[i].governor, sizeof(freqs[i].governor),
+			 "performance");
+
+		cpu_rows[i].cpu_idx = i;
+		stats->per_cpu_idle[i] = 90.0 + i;
+		stats->per_cpu_iowait[i] = 0.5;
+		stats->per_cpu_ipc[i] = 1.0 + i * 0.1;
+	}
+
+	raw->cpu_count = 3;
+	raw->effective_cpu_count = 3;
+	raw->freqs = freqs;
+	raw->interval_delta_us = 1000000ULL;
+	raw->numa_temp_count = 0;
+
+	stats->avg_mhz = 2100.0;
+	stats->busy_percent = 10.0;
+	stats->avg_idle_percent = 90.0;
+	stats->avg_iowait_percent = 0.5;
+	stats->per_cpu_idle[0] = 90.0;
+	stats->per_cpu_idle[1] = 91.0;
+	stats->per_cpu_idle[2] = 92.0;
+
+	rec->interval = 1;
+	rec->timestamp = 1774665600;
+	rec->cpu_count = 3;
+	rec->cpu_count_filtered = 3;
+	rec->cpu_row_count = 3;
+	rec->cpu_rows = cpu_rows;
+	rec->raw = raw;
+	rec->stats = stats;
+	rec->summary.avg_mhz = stats->avg_mhz;
+	rec->summary.busy_percent = stats->busy_percent;
+	rec->summary.idle_percent = stats->avg_idle_percent;
+	rec->summary.iowait_percent = stats->avg_iowait_percent;
+}
+
+static void test_multi_cpu_csv_serializer_emits_all_cpu_rows(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[3];
+	struct cpu_freq_info freqs[3];
+	struct serializer_args args;
+	char *output;
+
+	reset_test_state();
+	set_format(FORMAT_CSV);
+	set_default_summary_output(1);
+	parse_column_option("freq,idle", 1);
+	reset_machine_state();
+	make_multi_cpu_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	args.rec = &rec;
+
+	output = capture_stdout(emit_csv_mixed_scope, &args);
+
+	/* Header should contain Scope and CPU columns */
+	assert(strstr(output, "Scope") != NULL);
+	assert(strstr(output, "CPU") != NULL);
+	assert(strstr(output, "schema_version") != NULL);
+
+	/* Should contain data rows for all 3 CPUs */
+	assert(strstr(output, ",CPU,0,") != NULL);
+	assert(strstr(output, ",CPU,1,") != NULL);
+	assert(strstr(output, ",CPU,2,") != NULL);
+
+	/* Should contain a summary row */
+	assert(strstr(output, ",SUM,") != NULL);
+
+	free(output);
+}
+
+/* ============================================================================
+ * TEST COVERAGE: Summary CSV serializer (-S -f csv)
+ * ============================================================================ */
+
+static void test_summary_csv_serializer_emits_metadata_and_summary_fields(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[1];
+	struct cpu_freq_info freqs[1];
+	struct serializer_args args;
+	char *output;
+
+	reset_test_state();
+	set_format(FORMAT_CSV);
+	set_summary_mode(1);
+	set_default_summary_output(1);
+	parse_column_option("freq,power", 1);
+	reset_machine_state();
+	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	args.rec = &rec;
+
+	output = capture_stdout(emit_csv_mixed_scope, &args);
+
+	/* Header should contain metadata columns */
+	assert(strstr(output, "schema_version") != NULL);
+	assert(strstr(output, "interval") != NULL);
+	assert(strstr(output, "timestamp") != NULL);
+
+	/* Header should contain summary-scoped field labels */
+	assert(strstr(output, "AvgFreq") != NULL);
+	assert(strstr(output, "Power") != NULL);
+
+	/* Data row should have the schema_version value */
+	assert(strstr(output, "4,") != NULL);
+
+	/* Should contain a summary row */
+	assert(strstr(output, ",SUM,") != NULL);
+
+	free(output);
+
+	set_summary_mode(0);
+}
+
 int main(void)
 {
 	test_invalid_interval_args_fail();
@@ -539,5 +739,8 @@ int main(void)
 	test_default_json_package_has_unique_package_key();
 	test_empty_json_selection_has_no_dangling_comma();
 	test_empty_json_stream_closes_as_empty_array();
+	test_text_serializer_emits_column_headers_and_values();
+	test_multi_cpu_csv_serializer_emits_all_cpu_rows();
+	test_summary_csv_serializer_emits_metadata_and_summary_fields();
 	return 0;
 }

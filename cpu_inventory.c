@@ -504,11 +504,9 @@ int init_cpu_inventory(void)
 
 int get_cpu_id_by_tracked_idx(int tracked_idx)
 {
-	struct cpu_desc *desc = cpu_catalog_get_by_tracked_idx(tracked_idx);
-
-	if (!desc)
+	if (tracked_idx < 0 || tracked_idx >= cpu_inv.tracked_count)
 		return -1;
-	return desc->cpu_id;
+	return cpu_inv.tracked_cpus[tracked_idx];
 }
 
 int get_tracked_cpu_count(void)

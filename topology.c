@@ -153,7 +153,7 @@ static void populate_cpu_topology_attrs(struct cpu_desc *cpu)
 
 static int compute_socket_count(int present)
 {
-	int package_ids[MAX_CPUS];
+	static int package_ids[MAX_CPUS];
 	int count = 0;
 
 	for (int i = 0; i < present; i++) {
@@ -171,7 +171,7 @@ static int compute_socket_count(int present)
 
 static int compute_cores_per_socket(int present)
 {
-	int package_ids[MAX_CPUS];
+	static int package_ids[MAX_CPUS];
 	int package_count = 0;
 	int max_core_count = 0;
 
@@ -186,7 +186,7 @@ static int compute_cores_per_socket(int present)
 	}
 
 	for (int pkg_idx = 0; pkg_idx < package_count; pkg_idx++) {
-		int core_ids[MAX_CPUS];
+		static int core_ids[MAX_CPUS];
 		int core_count = 0;
 
 		for (int i = 0; i < present; i++) {
@@ -221,7 +221,7 @@ static void update_cpu_summary_attrs(int present, int cores, int threads)
 
 static int compute_numa_node_count(int present)
 {
-	int node_ids[MAX_CPUS];
+	static int node_ids[MAX_CPUS];
 	int count = 0;
 
 	for (int i = 0; i < present; i++) {

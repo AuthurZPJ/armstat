@@ -23,6 +23,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from plot_utils import (  # noqa: E402
+    SUPPORTED_SCHEMA_VERSION,
+    flatten_dict,
+    normalize_field_name,
+    is_number,
+    to_float,
+    validate_schema_version,
+    parse_sample_range,
+    smooth_series,
+    compute_legend_columns,
+    legend_font_size,
+    finalize_figure_layout,
+    load_plotting_modules,
+)
 
 FIELD_ALIASES = {
     "freq": "avg_freq",
@@ -82,7 +100,6 @@ for idx in range(8):
     FIELD_ALIASES[f"sum_idle_state{idx}"] = f"lpi{idx}"
 
 PRESET_NAMES = ("freq", "power", "temp", "power-temp", "idle-lpi", "sysstat")
-SUPPORTED_SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -91,55 +108,6 @@ class SeriesData:
     x_label: str
     rows: List[Dict[str, object]]
     numeric_fields: List[str]
-
-
-def load_plotting_modules():
-    try:
-        import matplotlib.dates as mdates
-        import matplotlib.pyplot as plt
-    except ModuleNotFoundError as exc:
-        raise SystemExit(
-            "matplotlib is required for plotting. Install it with:\n"
-            "  python3 -m pip install matplotlib"
-        ) from exc
-
-    return plt, mdates
-
-
-def flatten_dict(prefix: str, value: object, out: Dict[str, object]) -> None:
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            name = f"{prefix}.{key}" if prefix else key
-            flatten_dict(name, nested, out)
-        return
-
-    out[prefix] = value
-
-
-def normalize_field_name(name: str) -> str:
-    return name.strip().lower()
-
-
-def is_number(value: object) -> bool:
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float)):
-        return True
-    if not isinstance(value, str):
-        return False
-    try:
-        float(value)
-        return True
-    except ValueError:
-        return False
-
-
-def to_float(value: object) -> float:
-    if value is None or value == "":
-        return math.nan
-    if isinstance(value, (int, float)):
-        return float(value)
-    return float(str(value))
 
 
 def collect_numeric_fields(rows: Iterable[Dict[str, object]]) -> List[str]:
@@ -151,21 +119,6 @@ def collect_numeric_fields(rows: Iterable[Dict[str, object]]) -> List[str]:
             if is_number(value):
                 seen.setdefault(key, None)
     return sorted(seen.keys())
-
-
-def validate_schema_version(value: object, source: Path) -> None:
-    if value in (None, ""):
-        return
-
-    if not is_number(value):
-        raise SystemExit(f"{source} has a non-numeric schema_version field.")
-
-    version = int(to_float(value))
-    if version != SUPPORTED_SCHEMA_VERSION:
-        raise SystemExit(
-            f"{source} uses schema_version={version}, "
-            f"but this script expects {SUPPORTED_SCHEMA_VERSION}."
-        )
 
 
 def load_json_summary(path: Path) -> SeriesData:
@@ -211,7 +164,33 @@ def load_json_summary(path: Path) -> SeriesData:
     )
 
 
-def load_csv_summary(path: Path) -> SeriesData:
+def count_csv_data_lines(path: Path) -> int:
+    """Quick scan to count data lines (excluding header) in a CSV file."""
+    count = 0
+    with path.open("r", encoding="utf-8") as handle:
+        next(handle, None)  # Skip header
+        for _ in handle:
+            count += 1
+    return count
+
+
+def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesData:
+    """
+    Load summary CSV data.
+    
+    When sample_range is provided, uses streaming to only load the requested
+    range, reducing memory usage from O(total_samples) to O(selected_samples).
+    """
+    # Determine range if specified
+    start_sample = 1
+    end_sample = None
+    
+    if sample_range:
+        total_lines = count_csv_data_lines(path)
+        parsed = parse_sample_range(sample_range, total_lines)
+        if parsed:
+            start_sample, end_sample = parsed
+
     rows: List[Dict[str, object]] = []
     x_values: List[object] = []
 
@@ -240,6 +219,12 @@ def load_csv_summary(path: Path) -> SeriesData:
             )
 
         for sample_index, item in enumerate(reader, start=1):
+            # Streaming: skip samples outside the requested range
+            if sample_index < start_sample:
+                continue
+            if end_sample is not None and sample_index > end_sample:
+                break
+
             if is_mixed_scope:
                 if item.get("Scope") != "SUM":
                     continue
@@ -289,39 +274,24 @@ def load_csv_summary(path: Path) -> SeriesData:
     )
 
 
-def load_summary_series(path: Path) -> SeriesData:
+def load_summary_series(path: Path, sample_range: Optional[str] = None) -> SeriesData:
+    """
+    Load summary data from JSON or CSV.
+    
+    For CSV files with sample_range, uses streaming to reduce memory usage.
+    For JSON files, sample_range is ignored here and should be applied via
+    slice_summary_series() after loading.
+    """
     suffix = path.suffix.lower()
     if suffix == ".json":
         return load_json_summary(path)
     if suffix == ".csv":
-        return load_csv_summary(path)
+        return load_csv_summary(path, sample_range)
 
     raise SystemExit(
         f"Unsupported input format for {path}. "
         "Use summary JSON or summary CSV exported by armstat."
     )
-
-
-def parse_sample_range(expr: Optional[str], total: int) -> Optional[Tuple[int, int]]:
-    if not expr:
-        return None
-
-    sep = ":" if ":" in expr else "-"
-    if sep not in expr:
-        raise SystemExit("Use --sample-range START:END, for example 10:100.")
-
-    start_str, end_str = expr.split(sep, 1)
-    start = int(start_str) if start_str else 1
-    end = int(end_str) if end_str else total
-
-    if start < 1 or end < start:
-        raise SystemExit("Invalid --sample-range. Expected one-based START:END.")
-    if total <= 0:
-        raise SystemExit("No samples available in the selected input.")
-
-    start = min(start, total)
-    end = min(end, total)
-    return start, end
 
 
 def slice_summary_series(series: SeriesData,
@@ -447,85 +417,6 @@ def extract_series(rows: List[Dict[str, object]], field: str) -> List[float]:
     return [to_float(row.get(field)) for row in rows]
 
 
-def smooth_series(values: Sequence[float], window: int) -> List[float]:
-    if window <= 1:
-        return list(values)
-
-    smoothed: List[float] = []
-    for end in range(len(values)):
-        start = max(0, end - window + 1)
-        bucket = [value for value in values[start:end + 1] if not math.isnan(value)]
-        if not bucket:
-            smoothed.append(math.nan)
-        else:
-            smoothed.append(sum(bucket) / len(bucket))
-    return smoothed
-
-
-def compute_legend_columns(label_count: int) -> int:
-    if label_count <= 4:
-        return label_count
-    if label_count <= 8:
-        return 2
-    if label_count <= 12:
-        return 3
-    return 4
-
-
-def legend_font_size(label_count: int) -> str:
-    if label_count <= 6:
-        return "medium"
-    if label_count <= 12:
-        return "small"
-    return "x-small"
-
-
-def finalize_figure_layout(fig,
-                           handles,
-                           labels: Sequence[str],
-                           title: Optional[str]) -> None:
-    title_text = title or "armstat summary"
-    fig.suptitle(title_text, y=0.99)
-
-    if handles and labels:
-        if len(labels) > 12:
-            fig.legend(
-                handles,
-                labels,
-                loc="center left",
-                bbox_to_anchor=(1.01, 0.5),
-                ncol=1,
-                frameon=False,
-                fontsize=legend_font_size(len(labels)),
-                handlelength=2.2,
-                labelspacing=0.6,
-                borderaxespad=0.0,
-            )
-            fig.tight_layout(rect=(0, 0, 0.76, 0.94))
-            return
-
-        legend_cols = compute_legend_columns(len(labels))
-        legend_rows = math.ceil(len(labels) / legend_cols)
-        fig.legend(
-            handles,
-            labels,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.948),
-            ncol=legend_cols,
-            frameon=False,
-            fontsize=legend_font_size(len(labels)),
-            handlelength=2.2,
-            columnspacing=1.4,
-            labelspacing=0.6,
-            borderaxespad=0.0,
-        )
-        top_reserved = 0.90 - (0.065 * legend_rows)
-        fig.tight_layout(rect=(0, 0, 1, max(0.56, top_reserved)))
-        return
-
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-
-
 def list_fields(series: SeriesData) -> None:
     print("Available numeric summary fields:")
     for field in series.numeric_fields:
@@ -644,8 +535,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     input_path = Path(args.input)
-    series = load_summary_series(input_path)
-    series = slice_summary_series(series, args.sample_range)
+    
+    # Load data with optional sample_range for CSV streaming optimization
+    series = load_summary_series(input_path, args.sample_range)
+    
+    # For JSON files (which load fully), apply sample_range slicing
+    # For CSV files, sample_range was already applied during streaming load
+    if input_path.suffix.lower() == ".json":
+        series = slice_summary_series(series, args.sample_range)
 
     if args.list_fields:
         list_fields(series)

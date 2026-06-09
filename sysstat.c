@@ -102,8 +102,8 @@ static void refresh_proc_stat(void)
 	unsigned long long next_ctxt = 0;
 	unsigned long long next_intr = 0;
 	unsigned long long next_softirq = 0;
-	unsigned long long next_cpu_idle[MAX_CPUS];
-	unsigned long long next_cpu_iowait[MAX_CPUS];
+	static unsigned long long next_cpu_idle[MAX_CPUS];
+	static unsigned long long next_cpu_iowait[MAX_CPUS];
 	int next_highest_cpu_idx = -1;
 	int saw_data = 0;
 
@@ -221,7 +221,7 @@ static void refresh_schedstat(void)
 {
 	FILE *fp = get_sysstat_fp("/proc/schedstat");
 	char line[PROC_LINE_MAX];
-	unsigned long long next_runtime[MAX_CPUS];
+	static unsigned long long next_runtime[MAX_CPUS];
 	int next_highest_cpu_idx = -1;
 	int saw_data = 0;
 
