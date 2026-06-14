@@ -436,14 +436,7 @@ struct cpu_desc *cpu_catalog_get_by_tracked_idx(int idx)
 
 int cpu_catalog_online_count(void)
 {
-	int count = 0;
-
-	for (int i = 0; i < cpu_catalog.present_count; i++) {
-		if (cpu_catalog.cpus[i].online)
-			count++;
-	}
-	cpu_catalog.online_count = count;
-	return count;
+	return cpu_catalog.online_count;
 }
 
 int cpu_catalog_present_count(void)

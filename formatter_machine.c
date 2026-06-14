@@ -652,7 +652,7 @@ static void serialize_csv_mixed_summary_row(const struct interval_record *rec,
 	get_enabled_fields(FIELD_SCOPE_SYSTEM, system_fields, &system_count);
 
 	print_csv_metadata_prefix(rec);
-	printf("SUM,");
+	printf("SUM,,");
 
 	for (int i = 0; i < system_count; i++) {
 		char tmp[64];

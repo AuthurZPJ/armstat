@@ -6,7 +6,7 @@ DESTDIR		?=
 DAY		:= $(shell date +%Y.%m.%d)
 SNAPSHOT	= armstat-$(DAY)
 COMMON_CFLAGS	:= -Wall -Wextra -I../../../include \
-		   -D_FILE_OFFSET_BITS=64
+		   -D_FILE_OFFSET_BITS=64 -MMD -MP
 DEFAULT_CFLAGS	:= -O2 $(COMMON_CFLAGS) -D_FORTIFY_SOURCE=2
 DEBUG_CFLAGS	:= $(COMMON_CFLAGS) -g -O0 \
 		   -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -22,6 +22,8 @@ SRCS = armstat.c armstat_cli.c cpufreq.c cpuidle.c power.c pmu.c topology.c syss
 OBJS = $(SRCS:.c=.o)
 TEST_OBJS = $(filter-out armstat.o,$(OBJS))
 
+-include $(BUILD_OUTPUT)/*.d
+
 armstat : $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) -o $(BUILD_OUTPUT)/armstat $(LDFLAGS)
 
@@ -36,6 +38,7 @@ clean :
 	@rm -f $(BUILD_OUTPUT)/armstat
 	@rm -f $(OBJS)
 	@rm -f *.o
+	@rm -f $(BUILD_OUTPUT)/*.d
 	@rm -f $(SNAPSHOT).tar.gz
 	@rm -rf scripts/__pycache__
 	@rm -f tests/test_column_selection
