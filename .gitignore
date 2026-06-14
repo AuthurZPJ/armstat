@@ -5,6 +5,7 @@
 # Linked binaries
 armstat
 tests/test_column_selection
+tests/test_core_logic
 tests/test_runtime_smoke
 
 # Python cache
@@ -38,3 +39,7 @@ htmlcov/
 # Debug files
 *.dSYM/
 *.pdb
+
+# Editor / tool config
+.claude/
+.deepseek/
