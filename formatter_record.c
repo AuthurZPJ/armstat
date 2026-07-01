@@ -9,6 +9,20 @@
  * This file contains the field table and all getter functions.
  * Serializers (text/json/csv) consume interval_record without knowing
  * about show_* flags or how data is retrieved.
+ *
+ * Internal structure map (sections are delimited by === markers):
+ *
+ *   S1  Column visibility flags    - show_* globals + idle-state masks
+ *   S2  Helper functions           - clamp/lookup utilities used by S3
+ *   S3  Field getter functions     - per-field value extractors
+ *   S4  Field table macros         - SUMMARY_*_FIELD / *_FIELD macros
+ *   S5  Field descriptor table     - all_fields[] array tying S3 to S1
+ *   S6  Record build/free          - build_interval_record / fill_*
+ *   S7  Pool management            - rec_pool / cpu_rows_pool lifecycle
+ *   S8  Column enable/disable API  - enable, reset, clear for CLI -s/-H
+ *
+ * Shared file-static state: show_* flags (S1), field_show/hide_mask (S5),
+ * idle_show/hide_mask (S1). These are the reason the file is not split.
  */
 
 #include <stdio.h>
@@ -749,7 +763,7 @@ static double get_summary_ipc(const struct interval_record *rec, int cpu)
 	  enabled_ptr, .getter.get_string = getter_fn }
 
 /* ============================================================================
- * SECTION 4: FIELD DESCRIPTOR TABLE
+ * SECTION 5: FIELD DESCRIPTOR TABLE
  * ============================================================================ */
 
 struct field_desc all_fields[] = {
@@ -1007,7 +1021,7 @@ void get_enabled_fields(enum field_scope scope, struct field_desc **fields, int 
 }
 
 /* ============================================================================
- * SECTION 5: RECORD BUILD/FREE
+ * SECTION 6: RECORD BUILD/FREE
  * ============================================================================ */
 
 static struct interval_record *allocate_interval_record(int tracked_count)
@@ -1150,7 +1164,7 @@ void free_interval_record(struct interval_record *rec)
 }
 
 /* ============================================================================
- * SECTION 6: POOL MANAGEMENT
+ * SECTION 7: POOL MANAGEMENT
  * ============================================================================ */
 
 void setup_formatter_pool(int max_cpus)
@@ -1197,7 +1211,7 @@ void cleanup_formatter_pool(void)
 }
 
 /* ============================================================================
- * SECTION 7: COLUMN ENABLE/DISABLE
+ * SECTION 8: COLUMN ENABLE/DISABLE
  * ============================================================================ */
 
 /*

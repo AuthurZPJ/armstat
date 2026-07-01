@@ -111,9 +111,11 @@ armstat.c 职责：
 - 后续 interval 则走 `slow_update_budgeted()`
 - `slow_budget_for_interval()` 按下面的近似关系计算本轮预算：
   `budget ~= tracked_cpus * delta_us / target_sweep_us`
-  其中 `target_sweep_us` 来自 `SLOW_TARGET_SWEEP_MS`
+  其中 `target_sweep_us` 来自 `SLOW_TARGET_SWEEP_MS_DEFAULT`
 - 算出的 budget 会被限制在
   `SLOW_MIN_CPU_BUDGET .. SLOW_MAX_CPU_BUDGET` 范围内
+- 扫描窗口可通过 `ARMSTAT_SLOW_SWEEP_MS` 环境变量自定义
+  （范围 100-60000 ms，默认 5000）
 - `slow_cursor` 指向“下一次该从哪个 tracked CPU 开始刷新”，因此每轮只更新
   一个连续片段，然后推进游标
 - cpuidle 的 `disable` 缓存通过
@@ -191,6 +193,8 @@ armstat.c 职责：
 - 内部数组一律使用 `tracked_idx`
 - topology 查询一律接受 `cpu_id`
 - CPU filter 一律按真实 `cpu_id` 表达
+- `--cpu` 过滤在运行时采样开始前应用，影响 PMU/cpufreq/cpuidle/Busy-Idle 的 tracked CPU 集合
+- 无效过滤 token（非法值、反向区间、无匹配）是启动错误
 
 这样可以避免稀疏编号和 hotplug 把拓扑或输出语义搞乱。
 
@@ -238,6 +242,7 @@ hotplug 检测基于真实成员变化，而不是只看 CPU 数量。
 - 原始 PMU 计数
 - 原始系统计数
 - 统一 interval 微秒数
+- per-tracked-CPU schedstat 有效性标志，允许在 `/proc/schedstat` 缺少某 CPU 数据时逐 CPU 回退到 `/proc/stat`
 
 ### 区间统计（`interval_stats`）
 
@@ -284,6 +289,7 @@ Package 行按 socket 聚合 per-CPU 的 MHz、Idle%、Busy% 和 IOWait%。Core 
   和全系统 summary 混在一起
 - 当启用 `--cpu` 过滤时，per-package 聚合行也会被抑制，因为它们会聚合
   过滤器之外的 CPU
+- 当 `--cpu` 过滤激活时，tracked-CPU-derived 的 summary 字段基于过滤后的 tracked CPU 集，而平台/全局字段保持其自然 summary scope
 
 ## Idle 模型
 
@@ -312,7 +318,7 @@ Package 行按 socket 聚合 per-CPU 的 MHz、Idle%、Busy% 和 IOWait%。Core 
   共享同一 wall-clock 采样区间，但数据源不同
 - 最深的“可用” state 会作为 residual bucket，用于补齐剩余 idle，
   使显示出来的 `LPI-*` 之和贴近权威的 `Idle%`
-- 如果最深层 state 被 disable，residual 会上移到最后一个仍可用的 state
+- 如果更深的 state 被 disable、不可用或超出可见列上限，residual 会上移到最深仍可见且可用的 state
 
 这意味着：
 
@@ -359,6 +365,9 @@ Package 行按 socket 聚合 per-CPU 的 MHz、Idle%、Busy% 和 IOWait%。Core 
 - 收集 `time_enabled` / `time_running`
 - 多路复用时，先对 interval 值做 scaling，再累计成虚拟累计值
 - 聚合层再从这些累计值导出 per-CPU 和 summary delta
+- 事件名校验和 `MAX_PMU_EVENTS` 长度限制是硬错误
+- 已知事件因 perf 权限或运行时限制无法打开时降级为 unavailable
+- PMU 值是缩放后累计计数器模型的区间 delta，不是一次性原始读取
 
 输出语义：
 
@@ -409,15 +418,18 @@ serializer 不应再编码采样假设；采样语义属于 builder 和 getter�
     - `schedstat`：先从 `/proc/schedstat` 的 per-CPU 运行时间得到
       `Busy%`，再由 `Idle% = 100 - Busy%`
     - `task-clock`：兼容别名，当前等价于 `schedstat`
+  - 实现路径：sample_cache.c 采集原始累计 idle/runtime 计数器，aggregator.c 导出区间百分比
 - `IOWait%`（默认关闭；可通过 `-s iowait` 或 `-s IOWait%` 开启）
   - 来源：`/proc/stat iowait`
   - 公式：`iowait_delta_us / interval_delta_us * 100`
+  - 实现路径：sample_cache.c 采集原始累计 iowait jiffies，aggregator.c 导出区间百分比
 - `Busy%`
   - 公式：
     - `procstat`：`100 - Idle%`
     - `schedstat`：`sched_runtime_delta_ns / wall_clock_delta_ns * 100`
     - `task-clock`：兼容别名，当前等价于 `schedstat`
   - 备注：`IOWait%` 独立记录，不会再从 `Busy%` 中额外扣除
+  - 实现路径：始终在 aggregator.c 中从与 Idle% 相同的区间 delta 计算
 - `LPI-*`
   - 来源：`cpuidle/stateN/time`
   - 原始公式：`state_delta_us / interval_delta_us * 100`
@@ -430,6 +442,7 @@ serializer 不应再编码采样假设；采样语义属于 builder 和 getter�
   - 含义：
     最终显示出来的 `LPI-*` 主要服务于解释权威的 `Idle%`，不保证保持
     原始 cpuidle 百分比完全不变
+  - 实现路径：cpuidle.c 读取 stateN/time 计算原始 state delta，formatter 调整展示
 - `Power`
   - 来源：`power_meter/power1_average`
 - `Energy`
@@ -463,7 +476,7 @@ serializer 不应再编码采样假设；采样语义属于 builder 和 getter�
 
 ## 当前已知且接受的限制
 
-- 还没有 package/core 聚合行
+- 还没有 core 聚合行（per-package 聚合已实现）
 - 没有 per-core power 模型
 - CPU 行温度是 NUMA/die 映射，不是 core-local sensor
 - ARM 平台的硬件语义天然平台化，不可能逐列等价复刻 x86 `turbostat`
@@ -509,7 +522,7 @@ formatter 层的残差调整正是为了弥合这一差距：
 
 这样得到的可见 `LPI-*` 列之和等于权威的 `Idle%`，同时在 cpuidle 最可靠
 的层面保留了 ARM 特有的分状态 idle 信息。formatter 最多暴露八列 LPI。
-残差归入最深的**可用**状态；如果该状态被禁用（`stateN/disable = 1`），
+残差归入最深的**可见且可用**状态；如果该状态被禁用（`stateN/disable = 1`），
 残差上移到次深可用状态。
 
 没有这个调整，在短采样 interval 下 `sum(LPI-*)` 会系统性地低估 `Idle%`，
@@ -550,7 +563,7 @@ armstat 为了性能在 interval 之间保持文件描述符打开：
 |----------|---------------------------|---------------|
 | cpuidle  | 每 CPU × 每 state         | ≤ 32（硬上限） |
 | sysstat  | 2（`/proc/stat`、`/proc/schedstat`） | 2    |
-| cpufreq  | 每 CPU 1 个（`scaling_cur_freq`）   | 无显式上限    |
+| cpufreq  | 每 CPU 1 个（`scaling_cur_freq`）   | ≤ 16（硬上限，超出回退慢路径） |
 | PMU      | 每 tracked CPU 1 个 group fd        | 无显式上限    |
 
 在 256 个 tracked CPU 配 3 个 PMU 事件的机器上，总 fd 可能超过 500。

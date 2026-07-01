@@ -19,12 +19,20 @@
 `thermal_zone` 和 `perf_event_open()`，而不是 x86 上统一的
 MSR/RAPL/TSC 模型。
 
+**关键差异点**：armstat 产出机器可读的 JSON 和 CSV 导出，带每样本
+时间戳和稳定的 `schema_version`（当前为 4）。内置画图脚本，可以从
+`armstat -f json -O data.json` 直接生成时序图表，无需手动数据处理。
+详见 [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md) 和
+[PLOTTING.zh-CN.md](PLOTTING.zh-CN.md)。
+
 ## 文档导航
 
 - **[DESIGN.zh-CN.md](DESIGN.zh-CN.md)** - 架构与实现细节
 - **[TESTING.zh-CN.md](TESTING.zh-CN.md)** - 测试流程与验证方法
 - **[EXPORTS.zh-CN.md](EXPORTS.zh-CN.md)** - JSON/CSV 导出格式规范
 - **[PLOTTING.zh-CN.md](PLOTTING.zh-CN.md)** - 画图脚本使用说明
+- **[CLAUDE.md](CLAUDE.md)** - AI 助手指引（英文）
+- **[QWEN.md](QWEN.md)** - 项目上下文与技术概览（英文）
 
 ## 当前输出模型
 
@@ -68,6 +76,8 @@ MSR/RAPL/TSC 模型。
 - 内部数组使用连续的 tracked index
 - 输出时按真实 CPU ID 升序排序
 - `--cpu` 过滤接受真实 CPU ID 和区间，例如 `0,1,4-7`
+- `--cpu` 是采样过滤器，不只是输出过滤器：只有匹配列表的在线 CPU 才成为 tracked CPU，cpufreq、cpuidle、PMU、per-CPU Busy/Idle 输入以及 tracked-CPU 均值都基于该过滤集
+- 非法 token、反向区间、匹配不到任何在线 CPU 的过滤器都是启动错误
 
 ### Idle / Busy
 
@@ -115,6 +125,7 @@ MSR/RAPL/TSC 模型。
   全系统 summary 混在一起
 - 当启用 `--cpu` 过滤时，per-package 聚合行也会被抑制，因为它们会聚合
   过滤器之外的 CPU
+- 使用 `--cpu` 时，tracked-CPU-derived 的 SUM 字段（如 frequency、idle、LPI、PMU）基于过滤后的 tracked CPU 集；平台/全局字段保持其自然 summary scope
 
 ### nohz_full 与 Busy/Idle
 
@@ -156,6 +167,8 @@ PMU 通过 `perf_event_open()` 实现：
 - 多路复用事件会在导出 interval 值前做 scaling
 - `-I` 会启用 `cycles,instructions` 并打开 IPC 列
 - `-p ...` 只启用 PMU 计数器，不自动显示 IPC
+- 未知 PMU 事件名和超过 `MAX_PMU_EVENTS` 的事件列表立即失败；perf 权限/打开失败仍降级为不可用值
+- PMU 文件描述符使用量与 tracked CPU 数量成正比，`--cpu` 是降低 fd 压力的主要手段
 
 PMU 一般需要 root 权限，或者较宽松的
 `/proc/sys/kernel/perf_event_paranoid`。
@@ -205,6 +218,21 @@ sysstat.c              /proc/stat 与 /proc/schedstat 读取
   cpuidle `stateN/time`
 
 这样“平台上有什么”这类慢变化工作就不会落到每轮热路径里。
+
+### 1.5. Busy/Idle 执行路径
+
+当前 Busy/Idle 路径是显式的：
+
+1. `sample_cache.c` 每轮采集一次原始累计计数器
+2. 选定的 busy-source 策略决定每个 CPU 用哪一组原始计数器作为权威：
+   - `/proc/stat idle/iowait`
+   - 或 `/proc/schedstat` runtime（选定 CPU 上）
+3. `aggregator.c` 将累计计数器换算为区间 delta
+4. `Idle%`、`Busy%`、`IOWait%` 均从该 delta 导出
+
+这一设计意味着 armstat 不再维护一个带私有“上一次样本”状态的隐藏
+idle backend 对象。Busy/Idle 与 PMU、功耗、系统计数器共享同一显式
+delta 时间线。
 
 ### 2. 预算式 slow refresh
 
@@ -287,9 +315,13 @@ delta。
 ## 构建
 
 ```bash
-cd tools/power/armstat
 make
 ```
+
+armstat 可以从本仓库独立构建，也可以放入 Linux 源码树
+`tools/power/armstat` 后用同样的 `make` 命令构建。交叉编译通过
+`CROSS_COMPILE` 支持（例如 `CROSS_COMPILE=aarch64-linux-gnu-`），
+外部构建通过 `make O=/path/to/output` 支持。
 
 ## 用法
 
@@ -305,6 +337,13 @@ armstat --busy-source procstat
 armstat --busy-source schedstat
 armstat --busy-source task-clock
 ```
+
+### 其他选项
+
+- `-N, --header-iterations N` — 每 N 个 interval 重印一次 text 表头
+- `-J, --joules` — 显示区间能量（焦耳）
+- `-q, --quiet` — 抑制 interval banner 和 text 表头
+- `-v, --version` — 显示版本并退出
 
 ### 输出格式
 
@@ -336,7 +375,7 @@ armstat -S -a
 `-S` 表示只输出摘要行，`-a` 表示打开所有支持的基础列组，并且不会
 隐式启用 PMU/IPC。
 在 text/JSON 模式下，如果使用 `-a`，或者通过 `-s` 显式选择了
-summary 级列组，那么启用了 system 字段时会额外打印 `SUM` 区域。
+summary 级列组，那么启用了 system 或 package 级字段时会额外打印 `SUM` 区域。
 
 当启用了 `--cpu` 过滤时，为避免“过滤后的 CPU 行”和“全系统 SUM”
 混在一起，默认不会再自动附加这个 `SUM` 区域；如果确实要只看摘要，
@@ -347,6 +386,16 @@ summary 级列组，那么启用了 system 字段时会额外打印 `SUM` 区域
 ```bash
 armstat -c 0,1,2-5
 ```
+
+`--cpu` 接受真实 Linux CPU ID 和范围，在运行时采样开始前应用该列表。
+过滤后的运行只追踪匹配的在线 CPU，因此 per-CPU 行、summary 均值、
+PMU group、cpufreq 读取、cpuidle 刷新以及 per-CPU Busy/Idle 记账
+都基于过滤后的 tracked 集合。纯平台/全局 summary 字段仍保持
+summary scope。
+
+解析器是严格的：非法 token（如 `bad`）、反向区间（如 `3-1`）、空
+token（如 `0,,2`）以及匹配不到任何在线 CPU 的过滤器都会作为启动
+错误报出。
 
 ### 列控制
 
@@ -375,6 +424,7 @@ armstat -H temp
 - `membw`, `mem`
 - `ipc`
 - `energy`, `joules`
+- `all`
 
 `-s` / `-H` 现在也支持精确字段名，例如 `Idle%`、`Busy%`、`IOWait%`、
 `SoftIRQs`、`LPI-0`、`Power`。
@@ -406,6 +456,10 @@ armstat -I
 - `l2d-cache`
 - `l3d-cache-refill`
 - `l3d-cache`
+
+原始 ARM PMU 事件配置也可以用十六进制值指定，例如 `0x11`。未知事件名和超过
+`MAX_PMU_EVENTS` 的列表在采样开始前失败。如果事件已知但当前机器上 perf
+不可用，请求的 PMU 列保留可见并渲染为不可用，而非报告假零。
 
 ### 辅助输出
 
@@ -745,7 +799,7 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
 ## 当前限制
 
 - 输出模型仍是 `SUM + CPU 行`，还没有像成熟 `turbostat` 那样的独立
-  package/core 聚合行
+  core 聚合行（per-package 聚合已实现）
 - per-core power 尚未实现
 - CPU 行温度是 NUMA/die 温度映射，不是 per-core 传感器
 - PMU scaling 已接入，但仍需要在真实目标机上继续验证

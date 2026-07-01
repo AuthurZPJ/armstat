@@ -65,12 +65,12 @@ Key design decisions:
 | Field | Source | Formula |
 |-------|--------|---------|
 | Freq | scaling_cur_freq | khz / 1000 |
-| Idle% | selected busy-source policy | idle_delta_us / interval_delta_us * 100 |
-| Busy% | derived | 100 - Idle% |
+| Idle% | selected busy-source policy | idle_delta_us / interval_delta_us × 100 (procstat); 100 - Busy% (schedstat) |
+| Busy% | derived | 100 - Idle% (procstat); sched_runtime_delta_ns / wall_clock_delta_ns × 100 (schedstat) |
 | IOWait% | /proc/stat iowait | iowait_delta_us / interval_delta_us * 100 |
 | LPI-* | cpuidle/stateN/time | state_delta_us / interval_delta_us * 100 (display-adjusted) |
 | Power(mW) | power_meter/power1_average | raw hwmon reading |
-| Joules | derived | interval_avg_power_mw * interval_seconds / 1000 |
+| Energy | derived | interval_avg_power_mw * interval_seconds / 1000 |
 | MemBW | platform-specific | (counter_now - counter_prev) / interval_seconds |
 | IPC | derived | instructions / cycles |
 

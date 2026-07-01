@@ -152,7 +152,7 @@ JSON 输出的顶层是一个数组。数组中的每个元素都是一个区间
 ### JSON summary 对象
 
 `summary` 对象包含当前启用的 summary 级字段。  
-如果启用了 PMU，并且存在聚合后的摘要 PMU 值，还可能包含：
+启用 PMU 输出时还可能包含（未配置事件或 PMU 未激活时值为 `null`）：
 
 - `pmu`
 
@@ -160,9 +160,11 @@ JSON 输出的顶层是一个数组。数组中的每个元素都是一个区间
 
 JSON 对不可用值使用 `null`，例如：
 
-- 不可用的温度
-- 不可用的 PMU 值
-- 被 disable 或不支持的 split idle state
+- PMU 未激活时的 IPC（CPU 和 summary）
+- 不可用的 split idle state（`lpi0`-`lpi7`）
+- 未配置 PMU 事件或 PMU 未激活时的 `pmu` 对象
+
+注意：不可用的温度渲染为 `0.00`，而非 `null`。
 
 ## CSV 格式
 

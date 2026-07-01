@@ -114,9 +114,11 @@ Slow refresh mechanics in `sample_cache.c`:
 - later intervals call `slow_update_budgeted()`
 - `slow_budget_for_interval()` computes:
   `budget ~= tracked_cpus * delta_us / target_sweep_us`
-  where `target_sweep_us` is derived from `SLOW_TARGET_SWEEP_MS`
+  where `target_sweep_us` is derived from `SLOW_TARGET_SWEEP_MS_DEFAULT`
 - the budget is clamped between `SLOW_MIN_CPU_BUDGET` and
   `SLOW_MAX_CPU_BUDGET`
+- the sweep window can be customized via the `ARMSTAT_SLOW_SWEEP_MS`
+  environment variable (range 100-60000 ms; default 5000)
 - `slow_cursor` identifies the next tracked CPU to refresh, so each interval
   updates only a contiguous slice and then advances the cursor
 - the cpuidle `disable` cache is refreshed with the same budgeted model via
@@ -511,7 +513,7 @@ The implementation is intentionally explicit about partial capability:
 
 ## Current Intentional Limitations
 
-- no package/core aggregate rows yet
+- no core aggregate rows yet (per-package aggregation is implemented)
 - no per-core power model
 - CPU-row temperature is NUMA-derived, not core-local
 - ARM hardware semantics are platform-dependent; not every x86 `turbostat`
@@ -610,7 +612,7 @@ armstat keeps file descriptors open across intervals for performance:
 |-----------|----------|-----|
 | cpuidle  | 1 per CPU × per state | ≤ 32 (hard cap) |
 | sysstat  | 2 (`/proc/stat`, `/proc/schedstat`) | 2 |
-| cpufreq  | 1 per CPU (`scaling_cur_freq`) | no explicit cap |
+| cpufreq  | 1 per CPU (`scaling_cur_freq`) | ≤ 16 (hard cap, fallback to slow path) |
 | PMU      | 1 group fd per tracked CPU | no explicit cap |
 
 On a machine with 256 tracked CPUs and 3 PMU events, the total can exceed 500

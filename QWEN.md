@@ -110,7 +110,7 @@ armstat -l                     # List built-in column groups and PMU events
 ## Important Semantics
 
 - **First output is after one full interval**, not at startup.
-- `Idle% + Busy% = 100`; `IOWait%` is independent, not subtracted from `Busy%` (off by default, enable with `-s iowait`).
+- `Idle% + Busy% = 100`; `IOWait%` is independent, not subtracted from `Busy%` (off by default, enable with `-s IOWait%` or `-s idle`).
 - `LPI-*` columns are display-adjusted: deepest visible usable state absorbs residual so `sum(LPI-*) ≈ Idle%`. Up to 8 visible columns.
 - `SUM` row aggregates summary-scope fields; percentages are tracked-CPU averages.
 - `--cpu` suppresses the automatic mixed `SUM` section.
@@ -158,8 +158,8 @@ When behavior changes, update **all five** in order:
 |-------|--------|---------|
 | Freq (MHz) | `scaling_cur_freq` | khz / 1000 |
 | AvgFreq (MHz) | derived | (prev + cur) / 2, averaged across tracked CPUs |
-| Idle% | busy-source policy | idle_delta_us / interval_delta_us × 100 |
-| Busy% | derived | 100 - Idle% |
+| Idle% | busy-source policy | idle_delta_us / interval_delta_us × 100 (procstat); 100 - Busy% (schedstat) |
+| Busy% | derived | 100 - Idle% (procstat); sched_runtime_delta_ns / wall_clock_delta_ns × 100 (schedstat) |
 | IOWait% | `/proc/stat` iowait | iowait_delta_us / interval_delta_us × 100 |
 | LPI-* | `cpuidle/stateN/time` | state_delta_us / interval_delta_us × 100 (display-adjusted) |
 | Power (mW) | `power_meter/power1_average` | raw hwmon reading |
@@ -177,7 +177,7 @@ When behavior changes, update **all five** in order:
 | cpuidle | 1 per CPU × per state | ≤ 32 |
 | sysstat | 2 (`/proc/stat`, `/proc/schedstat`) | 2 |
 | cpufreq | 1 per CPU (`scaling_cur_freq`) | none |
-| PMU | 1 group fd per tracked CPU | none |
+| PMU | N events × tracked CPUs (1 group/CPU) | none |
 
 On large systems (256+ CPUs with PMU), total can exceed 500 fds. Use `--cpu` to reduce tracked CPU count or raise `ulimit -n`.
 

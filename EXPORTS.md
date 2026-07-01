@@ -160,15 +160,17 @@ contain:
 
 - `pmu`
 
-when PMU output is enabled and aggregated summary PMU values exist.
+when PMU output is enabled (the value is `null` when no events are configured or PMU is not active).
 
 ### Null values
 
 JSON uses `null` for unavailable values, for example:
 
-- unavailable temperatures
-- unavailable PMU values
-- disabled or unsupported split idle states
+- IPC (CPU and summary) when PMU is not active
+- unavailable split idle states (`lpi0`-`lpi7`)
+- the `pmu` object when no PMU events are configured or PMU is not active
+
+Note: unavailable temperatures are rendered as `0.00`, not `null`.
 
 ## CSV format
 

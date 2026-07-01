@@ -18,7 +18,9 @@ The current helper scripts are:
 - `scripts/plot_sum.py` for `SUM`-scope plots
 - `scripts/plot_cpu.py` for CPU-scope plots
 
-Both scripts work with `armstat` JSON exports and current CSV exports.
+Both scripts import shared utilities from `plot_utils.py`, which is installed
+alongside them. Both scripts work with `armstat` JSON exports and current CSV
+exports.
 
 The exact machine-readable export contract is documented separately in
 `EXPORTS.md`.
@@ -26,13 +28,21 @@ The exact machine-readable export contract is documented separately in
 When `armstat` is installed with `make install`, the helper scripts and
 plotting docs are also installed under `share/doc/armstat/`.
 
-These helper scripts currently load the full export into memory. They are best
+For JSON inputs, these scripts load the full export into memory. For CSV inputs with `--sample-range`, only the requested samples are loaded. They are best
 suited to moderate-size traces, interactive analysis, and filtered CPU exports.
 For very long runs or very large CPU dumps, prefer:
 
 - `SUM` plots first
 - `--cpu-filter`, `--top`, or `--group-by` for CPU plots
 - exporting shorter windows when possible
+
+## Dependencies
+
+These scripts require matplotlib. Install it with:
+
+```bash
+python3 -m pip install matplotlib
+```
 
 ## Input Exports
 
@@ -181,7 +191,7 @@ Examples:
 ### CPU selection
 
 - `--cpu-filter 0,1,4-7`
-  - explicit CPU list, using the same syntax as `armstat -c`
+  - explicit CPU list, using syntax similar to `armstat -c`
 - `--top N`
   - selects the top N entities ranked by the primary field
 - `--rank-by avg|max|last`
@@ -229,6 +239,7 @@ Semantics:
 - `--output-dir DIR`
 - `--format png|svg|pdf`
 - `--title TEXT`
+- `-o, --output PATH`
 
 ### Notes
 

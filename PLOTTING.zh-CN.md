@@ -17,6 +17,7 @@
 - `scripts/plot_sum.py`：`SUM` 级画图
 - `scripts/plot_cpu.py`：CPU 级画图
 
+两个脚本都从 `plot_utils.py` 导入共享工具，安装时会一并安装。
 两个脚本都支持读取 `armstat` 的 JSON 导出，也支持当前版本的 CSV 导出。
 
 更精确的机器可读导出结构，请参考独立文档 `EXPORTS.zh-CN.md`。
@@ -24,7 +25,7 @@
 如果使用 `make install` 安装 `armstat`，这些 helper scripts 和画图文档
 也会一起安装到 `share/doc/armstat/` 下。
 
-这些 helper scripts 当前会把整个导出文件读入内存，因此更适合：
+JSON 输入会把整个导出文件读入内存。CSV 输入配合 `--sample-range` 时只加载请求的样本。因此更适合：
 
 - 中等规模 trace
 - 交互式分析
@@ -35,6 +36,14 @@
 - 先画 `SUM` 级图
 - 在 CPU 图里使用 `--cpu-filter`、`--top` 或 `--group-by`
 - 尽量缩小导出时间窗口
+
+## 依赖
+
+这些脚本需要 matplotlib。安装方式：
+
+```bash
+python3 -m pip install matplotlib
+```
 
 ## 输入导出
 
@@ -119,6 +128,7 @@ python3 tools/power/armstat/scripts/plot_sum.py summary.json --list-fields
 - `--output-dir DIR`
 - `--format png|svg|pdf`
 - `--title TEXT`
+- `-o, --output PATH`
 
 例如：
 
@@ -183,7 +193,7 @@ python3 tools/power/armstat/scripts/plot_cpu.py cpus.json --list-cpus
 ### CPU 选择
 
 - `--cpu-filter 0,1,4-7`
-  - 显式指定 CPU 列表，语法和 `armstat -c` 一致
+  - 显式指定 CPU 列表，语法类似 `armstat -c`
 - `--top N`
   - 按主轴字段选前 N 个实体
 - `--rank-by avg|max|last`
@@ -228,6 +238,7 @@ python3 tools/power/armstat/scripts/plot_cpu.py cpus.json --list-cpus
 - `--output-dir DIR`
 - `--format png|svg|pdf`
 - `--title TEXT`
+- `-o, --output PATH`
 
 ### 说明
 

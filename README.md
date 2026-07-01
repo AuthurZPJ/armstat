@@ -374,6 +374,13 @@ armstat --busy-source schedstat
 armstat --busy-source task-clock
 ```
 
+### Other options
+
+- `-N, --header-iterations N` — reprint text header every N intervals
+- `-J, --joules` — show interval energy in Joules
+- `-q, --quiet` — suppress interval banner and text headers
+- `-v, --version` — show version and exit
+
 ### Output format
 
 ```bash
@@ -456,6 +463,7 @@ Supported column groups:
 - `membw`, `mem`
 - `ipc`
 - `energy`, `joules`
+- `all`
 
 `-s` / `-H` also accept exact field names, for example `Idle%`, `Busy%`,
 `IOWait%`, `SoftIRQs`, `LPI-0`, or `Power`.
@@ -666,7 +674,7 @@ display-oriented adjustments.
     it as the reference value that the displayed `LPI-*` breakdown should
     explain.
 
-- **IOWait%** (off by default; enable with `-s iowait` or `-s IOWait%`)
+- **IOWait%** (off by default; enable with `-s IOWait%` or `-s idle`)
   - source:
     `/proc/stat` per-CPU `iowait`
   - implementation path:
@@ -865,7 +873,7 @@ If your platform exposes a different sensor topology, either set
 ## Known Limitations
 
 - The output model is still `SUM + CPU rows`; there are not yet dedicated
-  package/core aggregate rows like mature `turbostat`.
+  core aggregate rows like mature `turbostat` (per-package aggregation is implemented).
 - Per-core power is not implemented.
 - CPU-row temperature is a NUMA/die temperature mapping, not a per-core sensor.
 - PMU scaling depends on kernel perf group semantics and still needs validation

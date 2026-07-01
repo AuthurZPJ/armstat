@@ -1,4 +1,4 @@
-.TH ARMSTAT 8 "March 2026" "armstat" "System Administration"
+.TH ARMSTAT 8 "July 2026" "armstat" "System Administration"
 .SH NAME
 armstat \- ARM server monitoring tool in the style of turbostat
 .SH SYNOPSIS
@@ -140,7 +140,7 @@ Show interval energy in Joules
 .B \-l, \-\-list
 List built-in column groups and built-in PMU event names
 .TP
-.BR \-P ", " \-\-probe
+.B \-P, \-\-probe
 Print a one-shot capability summary for the current platform, including CPU
 topology, effective busy-source policy, cpuidle/LPI availability,
 power/temperature sources, memory bandwidth support, and basic PMU availability
@@ -264,8 +264,6 @@ example \fBLPI-0\fR, \fBLPI-1\fR) when cpuidle data is available
 .IP \(bu 2
 up to eight \fBLPI-*\fR columns are visible; deeper or unavailable states are
 folded into the deepest visible usable residual bucket
-.IP \(bu 2
-\fBBusy%\fR is calculated from the selected busy-source policy
 .IP \(bu 2
 visible \fBLPI-*\fR columns are display-oriented: shallower usable states keep
 their raw cpuidle residency, while the deepest visible usable state becomes a
@@ -400,8 +398,8 @@ per-core power is not currently exposed
 
 .SH LIMITATIONS
 .IP \(bu 2
-The current layout is \fBSUM + CPU rows\fR; there are no dedicated package/core
-aggregate rows yet
+The current layout is \fBSUM + CPU rows\fR; there are no dedicated core
+aggregate rows yet (per-package aggregation is implemented)
 .IP \(bu 2
 Per-state idle columns require cpuidle support; when cpuidle is unavailable,
 \fBIdle%\fR / \fBBusy%\fR fall back to \fB/proc/stat\fR
