@@ -427,6 +427,10 @@ int init_cpuidle(void)
 	int state_count;
 	int total_cpus;
 
+	/* Idempotency: avoid leaking prior allocations if called twice */
+	if (cpuidle_initialized)
+		return 0;
+
 	/* Cache CPU-ID array size once at init - avoid repeated probes. */
 	total_cpus = get_cpu_id_array_size();
 	if (total_cpus <= 0)

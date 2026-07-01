@@ -21,9 +21,6 @@ void close_power(void);
  * Returns 0 if no power_meter sensor is present on this platform. */
 long long get_total_power(void);
 
-/* Per-CPU power (mW). Only valid when get_per_core_power_support() returns 1. */
-int read_cpu_power(int cpu, long long *power);
-
 /* Bulk read for all tracked CPUs — fills powers[0..max_cpus-1] in tracked-CPU order. */
 int read_all_cpu_power(long long *powers, int max_cpus);
 
@@ -52,12 +49,11 @@ const char *get_summary_temp_policy_name(void);
  * ============================================================================ */
 
 /* Energy in Joules */
-double get_total_energy(void);  /* Joules since start */
 double get_interval_energy_joules(void);  /* Joules for last interval */
 void reset_energy(void);
 
 /* Interval-based statistics */
-void update_power_interval_stats(unsigned long long delta_us, long long current_power);
+void update_power_interval_stats(unsigned long long delta_us, unsigned long long current_power);
 long long get_interval_avg_power_mw(void);
 
 /* ============================================================================

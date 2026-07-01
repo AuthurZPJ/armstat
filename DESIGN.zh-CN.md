@@ -307,6 +307,7 @@ Package 行按 socket 聚合 per-CPU 的 MHz、Idle%、Busy% 和 IOWait%。Core 
 - 分 state 唤醒列来自 cpuidle 的 usage 计数器（每秒进入次数）
 - 分 state 列名来自 cpuidle `stateN/name`，例如 `LPI-0`、`LPI-1`
 - 只显示真实存在的 state 列
+- 最多显示八列 state（`LPI-0` ... `LPI-7`）
 - 这些 `LPI-*` 列和 `/proc/stat` 驱动的 `Idle%` / `Busy%` / `IOWait%`
   共享同一 wall-clock 采样区间，但数据源不同
 - 最深的“可用” state 会作为 residual bucket，用于补齐剩余 idle，
@@ -425,6 +426,7 @@ serializer 不应再编码采样假设；采样语义属于 builder 和 getter�
     “总体有多 idle”
   - 展示规则：最深可见且可用的 state 会作为 residual bucket，
     用于让可见 `LPI-*` 总和贴近 `Idle%`
+  - 可见列数：最多暴露八列（`LPI-0` ... `LPI-7`）
   - 含义：
     最终显示出来的 `LPI-*` 主要服务于解释权威的 `Idle%`，不保证保持
     原始 cpuidle 百分比完全不变
@@ -506,8 +508,9 @@ formatter 层的残差调整正是为了弥合这一差距：
   "持续驻留未退出"的时间
 
 这样得到的可见 `LPI-*` 列之和等于权威的 `Idle%`，同时在 cpuidle 最可靠
-的层面保留了 ARM 特有的分状态 idle 信息。残差归入最深的**可用**状态；
-如果该状态被禁用（`stateN/disable = 1`），残差上移到次深可用状态。
+的层面保留了 ARM 特有的分状态 idle 信息。formatter 最多暴露八列 LPI。
+残差归入最深的**可用**状态；如果该状态被禁用（`stateN/disable = 1`），
+残差上移到次深可用状态。
 
 没有这个调整，在短采样 interval 下 `sum(LPI-*)` 会系统性地低估 `Idle%`，
 使分状态 idle 列产生误导。
@@ -576,5 +579,8 @@ cpuidle fd 缓存被刻意限制在 32，防止 LPI 分状态报告消耗全部�
 3. 更新 `README.zh-CN.md`
 4. 更新本文与 `DESIGN.md`
 5. 更新 `armstat.8`
+6. 更新 `EXPORTS.md` 与 `EXPORTS.zh-CN.md`
+7. 更新 `PLOTTING.md` 与 `PLOTTING.zh-CN.md`
+8. 更新 `TESTING.md` 与 `TESTING.zh-CN.md`
 
-五份文档必须保持一致。
+所有文档必须保持一致。

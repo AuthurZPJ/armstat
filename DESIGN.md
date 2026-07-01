@@ -644,5 +644,8 @@ If behavior changes:
 3. update `README.zh-CN.md`
 4. update this file and `DESIGN.zh-CN.md`
 5. update `armstat.8`
+6. update `EXPORTS.md` and `EXPORTS.zh-CN.md`
+7. update `PLOTTING.md` and `PLOTTING.zh-CN.md`
+8. update `TESTING.md` and `TESTING.zh-CN.md`
 
-Keep all five aligned.
+Keep all documents aligned.

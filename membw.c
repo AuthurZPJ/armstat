@@ -77,6 +77,12 @@ static int scan_mem_bw_counters(void)
  */
 int init_mem_bw(void)
 {
+	/* Idempotency: close existing fp before re-initializing */
+	if (mem_bw_read_fp) {
+		fclose(mem_bw_read_fp);
+		mem_bw_read_fp = NULL;
+	}
+
 	/* Scan for memory bandwidth counters */
 	mem_bw_support = scan_mem_bw_counters();
 
@@ -150,8 +156,10 @@ static unsigned long long calculate_mem_bw_delta(unsigned long long current,
 	 *                = bytes * 1000000 / 1024 / 1024 / us
 	 *                = bytes / 1048.576 / us * 1000000
 	 * Simpler: bytes per second = bytes * 1000000 / us
-	 *          MB/s = (bytes * 1000000 / us) / 1024 / 1024 */
-	bw = (delta_bytes * 1000000ULL) / delta_us;  /* bytes/sec */
+	 *          MB/s = (bytes * 1000000 / us) / 1024 / 1024
+	 * Divide first to avoid overflow on long intervals + high bandwidth. */
+	bw = (delta_bytes / delta_us) * 1000000ULL;  /* bytes/sec */
+	bw += ((delta_bytes % delta_us) * 1000000ULL) / delta_us;  /* remainder */
 	bw = bw / (1024 * 1024);  /* MB/s */
 
 	return bw;

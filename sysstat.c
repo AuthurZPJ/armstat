@@ -235,14 +235,13 @@ static void refresh_schedstat(void)
 			int cpu_idx;
 			unsigned long long fields[9] = {0};
 
-			if (sscanf(line,
-				   "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu %llu",
-				   &cpu_idx,
-				   &fields[0], &fields[1], &fields[2], &fields[3],
-				   &fields[4], &fields[5], &fields[6], &fields[7],
-				   &fields[8]) == 10) {
-				if (cpu_idx >= 0 && cpu_idx < MAX_CPUS) {
-					next_runtime[cpu_idx] = fields[6];
+		if (sscanf(line,
+			   "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu",
+			   &cpu_idx,
+			   &fields[0], &fields[1], &fields[2], &fields[3],
+			   &fields[4], &fields[5], &fields[6], &fields[7]) >= 9) {
+			if (cpu_idx >= 0 && cpu_idx < MAX_CPUS) {
+				next_runtime[cpu_idx] = fields[5];
 					if (cpu_idx > next_highest_cpu_idx)
 						next_highest_cpu_idx = cpu_idx;
 					saw_data = 1;
@@ -326,9 +325,11 @@ int get_kernel_hz(void)
 	if (fp) {
 		int res_ms;
 		if (fscanf(fp, "%d", &res_ms) == 1 && res_ms > 0) {
-			fclose(fp);
 			cached_hz = 1000 / res_ms;
-			return cached_hz;
+			if (cached_hz > 0) {
+				fclose(fp);
+				return cached_hz;
+			}
 		}
 		fclose(fp);
 	}

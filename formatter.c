@@ -189,7 +189,7 @@ void list_counters(void)
 
 void cleanup_formatter(void)
 {
-	/* Nothing to clean up in the facade */
+	cleanup_formatter_pool();
 }
 
 void close_format(const struct interval_stats *stats)

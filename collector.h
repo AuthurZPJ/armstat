@@ -144,12 +144,6 @@ void collect_snapshot(struct sys_snapshot *snapshot);
 void cleanup_collector(void);
 
 /*
- * Force refresh of slow-changing layer
- * Call this when CPU hotplug or sensor changes are detected
- */
-void collector_rescan(void);
-
-/*
  * Get CPU ID by index in tracked list
  * @idx: index (0-based) into tracked CPU list
  * Returns: CPU ID, or -1 if out of bounds

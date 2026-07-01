@@ -41,6 +41,7 @@ clean :
 	@rm -f $(BUILD_OUTPUT)/*.d
 	@rm -f $(SNAPSHOT).tar.gz
 	@rm -rf scripts/__pycache__
+	@rm -f tests/test_core_logic
 	@rm -f tests/test_column_selection
 	@rm -f tests/test_runtime_smoke
 
@@ -60,7 +61,7 @@ install : armstat
 		PLOTTING.md PLOTTING.zh-CN.md TESTING.md TESTING.zh-CN.md \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat
 	install -d $(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
-	install -m 755 scripts/plot_sum.py scripts/plot_cpu.py \
+	install -m 755 scripts/plot_sum.py scripts/plot_cpu.py scripts/plot_utils.py \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
 
 .PHONY : test

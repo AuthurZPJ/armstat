@@ -1166,9 +1166,34 @@ void setup_formatter_pool(int max_cpus)
 
 	rec_pool = calloc(1, sizeof(struct interval_record));
 	cpu_rows_pool = calloc(max_cpus, sizeof(struct cpu_row));
-	cpu_rows_pool_size = max_cpus;
 
+	if (!rec_pool || !cpu_rows_pool) {
+		fprintf(stderr, "Error: failed to allocate formatter pool\n");
+		free(rec_pool);
+		free(cpu_rows_pool);
+		rec_pool = NULL;
+		cpu_rows_pool = NULL;
+		cpu_rows_pool_size = 0;
+		pool_initialized = 0;
+		return;
+	}
+
+	cpu_rows_pool_size = max_cpus;
 	pool_initialized = 1;
+}
+
+void cleanup_formatter_pool(void)
+{
+	if (rec_pool) {
+		free(rec_pool);
+		rec_pool = NULL;
+	}
+	if (cpu_rows_pool) {
+		free(cpu_rows_pool);
+		cpu_rows_pool = NULL;
+	}
+	cpu_rows_pool_size = 0;
+	pool_initialized = 0;
 }
 
 /* ============================================================================

@@ -27,7 +27,6 @@ static long long interval_avg_power_mw;      /* Average power during interval (m
 static double interval_energy_joules;        /* Energy consumed during last interval (Joules) */
 
 /* Energy tracking */
-static double total_energy_joules;
 static int energy_initialized;
 
 /* Power delta tracking */
@@ -42,7 +41,6 @@ static unsigned long long prev_power_reading;  /* Previous total power for delta
  */
 void reset_energy(void)
 {
-	total_energy_joules = 0;
 	interval_energy_joules = 0;
 	energy_initialized = 0;
 	interval_avg_power_mw = 0;
@@ -55,12 +53,15 @@ void reset_energy(void)
  * @delta_us: time elapsed since last update (microseconds)
  * @current_power: current total power reading (milliwatts)
  */
-void update_power_interval_stats(unsigned long long delta_us, long long current_power)
+void update_power_interval_stats(unsigned long long delta_us,
+				 unsigned long long current_power)
 {
+	unsigned long long avg_mw;
+
 	/* First call - initialize */
 	if (!energy_initialized || delta_us == 0) {
 		prev_power_reading = current_power;
-		interval_avg_power_mw = current_power;
+		interval_avg_power_mw = (long long)current_power;
 		interval_energy_joules = 0;
 		energy_initialized = 1;
 		return;
@@ -71,14 +72,14 @@ void update_power_interval_stats(unsigned long long delta_us, long long current_
 	 * shared collector interval. This gives us a real interval average instead
 	 * of simply relabeling the current reading as "avg power".
 	 */
-	interval_avg_power_mw = (prev_power_reading + current_power) / 2;
+	avg_mw = (prev_power_reading + current_power) / 2;
+	interval_avg_power_mw = (long long)avg_mw;
 
 	/* Calculate energy: E = P * t
 	 * Power in mW, time in us -> energy in mJ = mW * us / 1000000
 	 * Convert to Joules: mJ / 1000 = J */
 	double delta_s = (double)delta_us / 1000000.0;
-	interval_energy_joules = (interval_avg_power_mw * delta_s) / 1000.0;
-	total_energy_joules += interval_energy_joules;
+	interval_energy_joules = (avg_mw * delta_s) / 1000.0;
 
 	prev_power_reading = current_power;
 }
@@ -89,14 +90,6 @@ void update_power_interval_stats(unsigned long long delta_us, long long current_
 long long get_interval_avg_power_mw(void)
 {
 	return interval_avg_power_mw;
-}
-
-/*
- * Get total energy since start (in Joules)
- */
-double get_total_energy(void)
-{
-	return total_energy_joules;
 }
 
 /*

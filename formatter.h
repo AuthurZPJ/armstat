@@ -347,6 +347,11 @@ void list_counters(void);
 void cleanup_formatter(void);
 
 /*
+ * Cleanup formatter pool (called by cleanup_formatter)
+ */
+void cleanup_formatter_pool(void);
+
+/*
  * Close output format (e.g., print JSON footer for infinite sampling mode)
  * Call this when exiting due to signal
  */

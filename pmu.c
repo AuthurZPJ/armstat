@@ -539,17 +539,20 @@ int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS], int max_cpus)
 
 	for (int cpu = 0; cpu < pmu_cpu_count && cpu < max_cpus; cpu++) {
 		struct perf_group_read_data group_data;
-		ssize_t expected_size;
 		ssize_t ret;
 
 		if (pmu_fds[cpu][0] < 0)
 			continue;
 
 		memset(&group_data, 0, sizeof(group_data));
-		expected_size = (ssize_t)(sizeof(uint64_t) * (3 + pmu_event_count));
-		ret = read(pmu_fds[cpu][0], &group_data, expected_size);
-		if (ret < expected_size)
+		/* Read at least the header (nr + time_enabled + time_running) to
+		 * learn how many event values the kernel actually returns. */
+		ret = read(pmu_fds[cpu][0], &group_data, sizeof(group_data));
+		if (ret < (ssize_t)(sizeof(uint64_t) * 3))
 			continue;
+		/* Cap nr at pmu_event_count to stay within the struct bounds. */
+		if ((int)group_data.nr > pmu_event_count)
+			group_data.nr = pmu_event_count;
 
 		if (!pmu_has_baseline[cpu]) {
 			pmu_prev_time_enabled[cpu] = group_data.time_enabled;

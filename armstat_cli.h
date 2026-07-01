@@ -29,7 +29,6 @@ struct armstat_options {
 	/* PMU */
 	char *pmu_events;
 	int ipc_requested;  /* Track if -I was used (requires PMU) */
-	int ipc_column_requested;  /* Track if -s ipc was used (just shows column) */
 
 	/* Other */
 	int debug;

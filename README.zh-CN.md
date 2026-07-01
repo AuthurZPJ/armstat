@@ -30,9 +30,9 @@ MSR/RAPL/TSC 模型。
 
 `armstat` 当前使用 `SUM + CPU 行` 模型：
 
-- 默认 text 模式输出每个 tracked CPU 一行
+- 默认 text 模式每个 socket 输出一行 package 聚合行，再输出每个 tracked CPU 一行
 - `-S` 每个 interval 只输出一行 `SUM`
-- `-a` 打开所有支持的基础列组
+- `-a` 打开所有支持的基础列组，包括 per-package 聚合
 - JSON 输出 interval 对象数组
 - CSV 输出 CPU 行或 summary 行
 
@@ -82,9 +82,12 @@ MSR/RAPL/TSC 模型。
 - `--busy-source task-clock` 保留为兼容别名，当前等价于 `schedstat`
 - `IOWait%` 也来自 `/proc/stat`，表示本采样区间内处于 iowait 记账的
   时间占比
-- 分 idle state 驻留列使用 cpuidle `stateN/name`，例如 `LPI-0`、`LPI-1`
+- 分 idle state 驻留列和唤醒列使用 cpuidle `stateN/name`，例如 `LPI-0`、
+  `LPI-1`……以及 `LPI-0_wake`（每秒唤醒次数）
 - cpuidle 只用于拆分 `LPI-*` 驻留，不作为 Busy/Idle 的权威来源
 - 当没有 cpuidle 数据时，分 state 列会自动隐藏
+- formatter 最多暴露八列 `LPI-*`（`LPI-0` ... `LPI-7`）；更深的 cpuidle
+  state 会被折叠到最深可见的可用 residual bucket
 - `Busy%` 的计算方式是 `100 - Idle%`
 - 可见的 `LPI-*` 列是面向展示的语义，不是简单把 cpuidle 原始百分比直接
   打出来：
@@ -393,14 +396,14 @@ armstat -I
 - `mem-access`
 - `mem-read`
 - `mem-write`
-- `l1d-cache`
 - `l1d-cache-refill`
-- `l1i-cache`
+- `l1d-cache`
 - `l1i-cache-refill`
-- `l2d-cache`
+- `l1i-cache`
 - `l2d-cache-refill`
-- `l3d-cache`
+- `l2d-cache`
 - `l3d-cache-refill`
+- `l3d-cache`
 
 ### 辅助输出
 

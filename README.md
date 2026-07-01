@@ -471,14 +471,14 @@ Built-in PMU names:
 - `mem-access`
 - `mem-read`
 - `mem-write`
-- `l1d-cache`
 - `l1d-cache-refill`
-- `l1i-cache`
+- `l1d-cache`
 - `l1i-cache-refill`
-- `l2d-cache`
+- `l1i-cache`
 - `l2d-cache-refill`
-- `l3d-cache`
+- `l2d-cache`
 - `l3d-cache-refill`
+- `l3d-cache`
 
 Raw ARM PMU event configs can also be requested as hexadecimal values such as
 `0x11`. Unknown named events and lists longer than `MAX_PMU_EVENTS` fail before

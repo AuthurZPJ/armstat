@@ -304,6 +304,10 @@ static void run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot
 	struct timespec ts;
 	int iteration = 1;
 
+	/* -D overrides -n: always dump exactly one interval */
+	if (opts->dump_once)
+		opts->iterations = 1;
+
 	/* Wait for first interval */
 	ts.tv_sec = (time_t)opts->interval;
 	ts.tv_nsec = (long)((opts->interval - (double)ts.tv_sec) * 1000000000.0 + 0.5);

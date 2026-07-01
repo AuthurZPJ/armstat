@@ -404,21 +404,6 @@ static int scan_power_sensors(void)
  * SENSOR READING
  * ============================================================================ */
 
-int read_cpu_power(int cpu, long long *power)
-{
-	(void)cpu;
-
-	if (!power)
-		return -1;
-
-	/*
-	 * This platform does not expose per-core/package-to-CPU mapped power.
-	 * SUM/package power is available through get_total_power().
-	 */
-	*power = 0;
-	return -1;
-}
-
 int read_all_cpu_power(long long *powers, int max_cpus)
 {
 	if (!powers)

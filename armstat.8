@@ -138,7 +138,7 @@ Show interval energy in Joules
 .B \-l, \-\-list
 List built-in column groups and built-in PMU event names
 .TP
-.B \-\-probe
+.BR \-P ", " \-\-probe
 Print a one-shot capability summary for the current platform, including CPU
 topology, effective busy-source policy, cpuidle/LPI availability,
 power/temperature sources, memory bandwidth support, and basic PMU availability
@@ -184,6 +184,8 @@ and
 \fBipc\fR
 .IP \(bu 2
 \fBenergy\fR, \fBjoules\fR
+.IP \(bu 2
+\fBall\fR
 
 .PP
 \fB--show\fR and \fB--hide\fR also accept exact field names such as
@@ -212,21 +214,21 @@ Built-in PMU names include:
 .IP \(bu 2
 \fBmem-write\fR
 .IP \(bu 2
-\fBl1d-cache\fR
-.IP \(bu 2
 \fBl1d-cache-refill\fR
 .IP \(bu 2
-\fBl1i-cache\fR
+\fBl1d-cache\fR
 .IP \(bu 2
 \fBl1i-cache-refill\fR
 .IP \(bu 2
-\fBl2d-cache\fR
+\fBl1i-cache\fR
 .IP \(bu 2
 \fBl2d-cache-refill\fR
 .IP \(bu 2
-\fBl3d-cache\fR
+\fBl2d-cache\fR
 .IP \(bu 2
 \fBl3d-cache-refill\fR
+.IP \(bu 2
+\fBl3d-cache\fR
 
 PMU counters are opened per tracked CPU. Events on the same CPU are grouped
 with perf group semantics, and multiplexed intervals are scaled using

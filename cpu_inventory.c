@@ -451,10 +451,14 @@ int cpu_catalog_tracked_count(void)
 
 int set_cpu_inventory_filter(const char *cpu_list)
 {
-	if (!cpu_list || !*cpu_list) {
+	if (!cpu_list) {
 		cpu_filter_enabled = 0;
 		cpu_filter_count = 0;
 		return 0;
+	}
+	if (!*cpu_list) {
+		fprintf(stderr, "Error: --cpu filter must not be empty\n");
+		return -1;
 	}
 
 	if (parse_cpu_filter_list(cpu_list) < 0) {
@@ -509,11 +513,14 @@ int get_tracked_cpu_count(void)
 
 int check_and_rebuild_inventory(void)
 {
-	struct cpu_catalog prev_catalog = cpu_catalog;
-	struct cpu_inventory prev_inventory = cpu_inv;
-	int prev_tracked_count = cpu_inv.tracked_count;
+	static struct cpu_catalog prev_catalog;
+	static struct cpu_inventory prev_inventory;
 	static int prev_tracked_cpus[MAX_PRESENT_CPUS];
+	int prev_tracked_count = cpu_inv.tracked_count;
 	int tracked_changed = 0;
+
+	prev_catalog = cpu_catalog;
+	prev_inventory = cpu_inv;
 
 	if (prev_tracked_count > 0) {
 		memcpy(prev_tracked_cpus, cpu_inv.tracked_cpus,

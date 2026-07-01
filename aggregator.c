@@ -17,7 +17,6 @@
 
 /* Previous raw counters for delta calculation */
 static struct raw_counters prev_counters;
-static int initialized;
 
 /* Previous frequencies for interval average calculation */
 static unsigned int prev_freqs[MAX_CPUS];
@@ -27,13 +26,9 @@ static unsigned long long prev_authoritative_iowait_jiffies[MAX_CPUS];
 static unsigned long long prev_authoritative_runtime_ns[MAX_CPUS];
 static unsigned char prev_authoritative_runtime_valid[MAX_CPUS];
 
-/* Current interval stats */
-static struct interval_stats current_stats;
-
 int init_aggregator(void)
 {
 	memset(&prev_counters, 0, sizeof(prev_counters));
-	memset(&current_stats, 0, sizeof(current_stats));
 	memset(prev_freqs, 0, sizeof(prev_freqs));
 	memset(prev_pmu_per_cpu, 0, sizeof(prev_pmu_per_cpu));
 	memset(prev_authoritative_idle_jiffies, 0,
@@ -44,7 +39,6 @@ int init_aggregator(void)
 	       sizeof(prev_authoritative_runtime_ns));
 	memset(prev_authoritative_runtime_valid, 0,
 	       sizeof(prev_authoritative_runtime_valid));
-	initialized = 1;
 
 	/* Initialize power subsystem for energy tracking */
 	reset_energy();
@@ -127,6 +121,8 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 	    raw->authoritative_runtime_ns &&
 	    delta_us > 0 && cpu_count > 0) {
 		int hz = get_kernel_hz();
+		if (hz <= 0)
+			hz = 100;
 
 		for (i = 0; i < cpu_count; i++) {
 			int cpu_id = get_cpu_id_by_tracked_idx(i);
@@ -226,7 +222,7 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 	/* ===== 3. Power and energy (calculated in aggregator using unified delta) ===== */
 	/* Use package-level power (always available) instead of summing per-CPU powers */
 	long long current_total_power = raw->package_power_mw;
-	update_power_interval_stats(delta_us, current_total_power);
+	update_power_interval_stats(delta_us, (unsigned long long)current_total_power);
 	stats->avg_power_mw = get_interval_avg_power_mw();
 	stats->interval_energy_joules = get_interval_energy_joules();
 
@@ -370,15 +366,11 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 			(raw->authoritative_runtime_valid &&
 			 raw->authoritative_runtime_valid[i]) ? 1 : 0;
 	}
-
-	/* Copy to current_stats */
-	current_stats = *stats;
 }
 
 void reset_aggregator(void)
 {
 	memset(&prev_counters, 0, sizeof(prev_counters));
-	memset(&current_stats, 0, sizeof(current_stats));
 	memset(prev_freqs, 0, sizeof(prev_freqs));
 	memset(prev_pmu_per_cpu, 0, sizeof(prev_pmu_per_cpu));
 	memset(prev_authoritative_idle_jiffies, 0,
@@ -395,5 +387,4 @@ void reset_aggregator(void)
 
 void cleanup_aggregator(void)
 {
-	initialized = 0;
 }

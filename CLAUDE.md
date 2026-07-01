@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make              # Build armstat binary
 make clean        # Clean build artifacts
-make test         # Run smoke tests (test_column_selection + test_plot_loaders.py)
+make test         # Run all tests (test_core_logic, test_column_selection, test_runtime_smoke, test_cli_smoke.sh, test_plot_loaders.py)
 ```
 
 ## Architecture

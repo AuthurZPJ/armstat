@@ -10,8 +10,7 @@
 #define ARMSTAT_PMU_H
 
 #include <stdint.h>
-
-#define MAX_PMU_EVENTS	16
+#include "collector.h"
 
 struct pmu_event {
 	const char *name;
@@ -20,27 +19,6 @@ struct pmu_event {
 	unsigned long long config;
 	uint64_t value;
 	uint64_t prev_value;
-};
-
-/* PMU event types */
-enum {
-	PMU_EVENT_CYCLES,
-	PMU_EVENT_INSTRUCTIONS,
-	PMU_EVENT_CACHE_REFERENCES,
-	PMU_EVENT_CACHE_MISSES,
-	PMU_EVENT_BRANCHES,
-	PMU_EVENT_BRANCH_MISSES,
-	PMU_EVENT_MEM_ACCESS,
-	PMU_EVENT_MEM_ACCESS_READ,
-	PMU_EVENT_MEM_ACCESS_WRITE,
-	PMU_EVENT_L1D_CACHE_REFILL,
-	PMU_EVENT_L1D_CACHE,
-	PMU_EVENT_L1I_CACHE_REFILL,
-	PMU_EVENT_L1I_CACHE,
-	PMU_EVENT_L2D_CACHE_REFILL,
-	PMU_EVENT_L2D_CACHE,
-	PMU_EVENT_L3D_CACHE_REFILL,
-	PMU_EVENT_L3D_CACHE,
 };
 
 /* Initialize PMU events */

@@ -440,7 +440,10 @@ static void collect_system_counter_snapshot(struct sys_snapshot *snapshot)
 		 * calculation. If a procfs/sysfs refresh transiently fails (for
 		 * example due to descriptor pressure while PMU groups are active),
 		 * keep the last good cumulative value instead of synthesizing zero.
-		 * That degrades to a flat interval instead of a fake 100% busy row.
+		 * The resulting interval delta will be zero, which produces a single
+		 * 100% busy spike for that interval (not a flat interval). The next
+		 * interval recovers smoothly because the cumulative counter resumes
+		 * from the retained value rather than jumping.
 		 */
 		if (procstat_limit > 0 && cpu_id < procstat_limit) {
 			snapshot->authoritative_idle_jiffies[i] = procstat_idles[cpu_id];

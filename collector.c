@@ -207,10 +207,3 @@ void cleanup_collector(void)
 	close_cpufreq();
 	cleanup_cpu_inventory();
 }
-
-void collector_rescan(void)
-{
-	if (rebuild_hotplug_dependent_state() < 0)
-		fprintf(stderr, "Warning: collector rescan failed to rebuild runtime state\n");
-	prev_collector_time_us = 0;
-}

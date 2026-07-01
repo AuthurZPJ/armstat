@@ -22,9 +22,6 @@ int get_cores_per_socket(void);
 /* Get number of sockets */
 int get_socket_count(void);
 
-/* Get CPU ID within a core (for SMT) */
-int get_cpu_id_in_core(int cpu);
-
 /* Get number of CPUs in a core */
 int get_cpus_per_core(void);
 

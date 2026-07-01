@@ -329,14 +329,6 @@ int get_socket_count(void)
 	return sockets;
 }
 
-int get_cpu_id_in_core(int cpu)
-{
-	struct cpu_desc *desc = cpu_catalog_get_by_id(cpu);
-	if (!desc)
-		return 0;
-	return desc->cpu_id_in_core;
-}
-
 int get_cpus_per_core(void)
 {
 	return cpus_per_core;

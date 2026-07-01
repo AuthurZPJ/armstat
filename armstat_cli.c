@@ -41,7 +41,6 @@ struct armstat_options default_options = {
 	.busy_source = NULL,
 	.pmu_events = NULL,
 	.ipc_requested = 0,
-	.ipc_column_requested = 0,
 	.debug = 0,
 	.list_counters = 0,
 	.dump_once = 0,
@@ -141,6 +140,9 @@ struct column_alias_group {
 
 void parse_column_option(const char *arg, int enable);
 
+/* Track unmatched tokens for whitelist validation */
+static int unknown_column_count;
+
 static void set_idle_columns(int enable)
 {
 	enable_idle(enable);
@@ -225,7 +227,7 @@ static int parse_positive_double_arg(const char *option, const char *arg,
 	errno = 0;
 	parsed = strtod(arg, &end);
 	if (errno || end == arg || (end && *end) ||
-	    !isfinite(parsed) || parsed <= 0.0) {
+	    !isfinite(parsed) || parsed <= 0.0 || parsed > 31536000.0) {
 		fprintf(stderr, "Error: %s requires a positive number: %s\n",
 			option, arg ? arg : "");
 		return -1;
@@ -274,16 +276,20 @@ static int apply_busy_source_option(struct armstat_options *opts, const char *ar
 	return 0;
 }
 
-static void apply_show_option(struct armstat_options *opts, const char *arg)
+static int apply_show_option(const char *arg)
 {
 	/* Show whitelist: clear all, then enable specified */
+	if (!arg || !*arg) {
+		fprintf(stderr, "Error: --show requires at least one column group or field name\n");
+		return -1;
+	}
 	clear_columns();
+	unknown_column_count = 0;
 	parse_column_option(arg, 1);
 	set_default_summary_output(1);
-
-	/* Track if user explicitly requested IPC column via -s */
-	if (strstr(arg, "ipc"))
-		opts->ipc_column_requested = 1;
+	if (unknown_column_count > 0)
+		return -1;
+	return 0;
 }
 
 static void apply_hide_option(const char *arg)
@@ -294,8 +300,9 @@ static void apply_hide_option(const char *arg)
 
 static void apply_ipc_option(struct armstat_options *opts)
 {
-	/* IPC - enable PMU and show IPC */
-	opts->pmu_events = "cycles,instructions";
+	/* IPC - enable PMU and show IPC.
+	 * pmu_events is not set here; apply_default_pmu_events() merges
+	 * cycles,instructions into whatever -p already provided. */
 	opts->ipc_requested = 1;
 	enable_pmu(1);
 	enable_ipc(1);
@@ -428,8 +435,10 @@ void parse_column_option(const char *arg, int enable)
 			}
 		}
 
-		if (!matched)
+		if (!matched) {
 			fprintf(stderr, "Warning: unknown column group/field '%s'\n", token);
+			unknown_column_count++;
+		}
 	}
 
 	free(arg_copy);
@@ -473,7 +482,6 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			break;
 		case 'D':
 			opts->dump_once = 1;
-			opts->iterations = 1;
 			opts->quiet = 1;
 			set_quiet(1);
 			break;
@@ -500,7 +508,8 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			opts->output_file = optarg;
 			break;
 		case 's':
-			apply_show_option(opts, optarg);
+			if (apply_show_option(optarg) < 0)
+				return -1;
 			break;
 		case 'H':
 			apply_hide_option(optarg);
@@ -549,6 +558,11 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 		}
 	}
 
+	if (optind < argc) {
+		fprintf(stderr, "Error: unexpected argument: %s\n", argv[optind]);
+		return -1;
+	}
+
 	return 0;  /* Continue execution */
 }
 
@@ -561,4 +575,40 @@ void apply_default_pmu_events(struct armstat_options *opts)
 	 */
 	if (!opts->pmu_events && (is_pmu_enabled() || is_ipc_enabled()))
 		opts->pmu_events = "cycles,instructions";
+
+	/*
+	 * If -I was used, ensure cycles,instructions are present in the event
+	 * list so IPC can actually be computed.  Merge them in front of any
+	 * existing -p events without duplicating.
+	 */
+	if (opts->ipc_requested && opts->pmu_events) {
+		static char merged[256];
+		int has_cycles = 0, has_instructions = 0;
+		const char *p = opts->pmu_events;
+
+		while (*p) {
+			const char *start = p;
+			const char *end = p;
+			while (*end && *end != ',')
+				end++;
+			if ((end - start) == 6 && strncmp(start, "cycles", 6) == 0)
+				has_cycles = 1;
+			if ((end - start) == 12 && strncmp(start, "instructions", 12) == 0)
+				has_instructions = 1;
+			p = (*end == ',') ? end + 1 : end;
+		}
+
+		if (!has_cycles || !has_instructions) {
+			if (!has_cycles && !has_instructions)
+				snprintf(merged, sizeof(merged),
+					 "cycles,instructions,%s", opts->pmu_events);
+			else if (!has_cycles)
+				snprintf(merged, sizeof(merged),
+					 "cycles,%s", opts->pmu_events);
+			else
+				snprintf(merged, sizeof(merged),
+					 "instructions,%s", opts->pmu_events);
+			opts->pmu_events = merged;
+		}
+	}
 }

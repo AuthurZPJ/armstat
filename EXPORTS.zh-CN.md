@@ -119,6 +119,7 @@ JSON 输出的顶层是一个数组。数组中的每个元素都是一个区间
 - `-S` 摘要 JSON
   - 包含 `summary`
   - 不包含 `cpus`
+  - 不包含 `packages`
 
 ### JSON CPU 对象
 
@@ -140,11 +141,13 @@ JSON 输出的顶层是一个数组。数组中的每个元素都是一个区间
 
 ```json
 "packages": [
-  { "package": 0, "freq": 2200.00, "idle_percent": 95.0, "busy_percent": 5.0 }
+  { "package": 0, "package_id": 0, "freq": 2200.00, "idle_percent": 95.0, "busy_percent": 5.0 }
 ]
 ```
 
-每个 package 对象一定包含 `package`（socket 编号）。
+每个 package 对象一定包含 `package`（topology 报告的物理 package/socket
+编号）。当 package 列组本身被选中时，字段表还会暴露 `package_id`；该键
+刻意与 `package` 区分，使 JSON 对象不会出现重复的 `package` 键。
 
 ### JSON summary 对象
 
