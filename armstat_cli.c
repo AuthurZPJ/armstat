@@ -53,9 +53,9 @@ struct armstat_options default_options = {
 
 static struct option long_options[] = {
 	{"interval", required_argument, 0, 'i'},
-	{"Dump", no_argument, 0, 'D'},
-	{"num_iterations", required_argument, 0, 'n'},
-	{"header_iterations", required_argument, 0, 'N'},
+	{"dump", no_argument, 0, 'D'},
+	{"num-iterations", required_argument, 0, 'n'},
+	{"header-iterations", required_argument, 0, 'N'},
 	{"cpu", required_argument, 0, 'c'},
 	{"busy-source", required_argument, 0, 'B'},
 	{"output", required_argument, 0, 'o'},
@@ -69,9 +69,9 @@ static struct option long_options[] = {
 	{"format", required_argument, 0, 'f'},
 	{"pmu-events", required_argument, 0, 'p'},
 	{"list", no_argument, 0, 'l'},
-	{"Summary", no_argument, 0, 'S'},
-	{"Joules", no_argument, 0, 'J'},
-	{"IPC", no_argument, 0, 'I'},
+	{"summary", no_argument, 0, 'S'},
+	{"joules", no_argument, 0, 'J'},
+	{"ipc", no_argument, 0, 'I'},
 	{"all", no_argument, 0, 'a'},
 	{"probe", no_argument, 0, 'P'},
 	{0, 0, 0, 0}
@@ -91,22 +91,22 @@ static void print_help(void)
 	printf("\n");
 	printf("Options:\n");
 	printf("  -i, --interval <sec>   Measurement interval (default: 1.0)\n");
-	printf("  -n, --num_iterations   Number of iterations\n");
-	printf("  -N, --header_iterations Reprint text header every N intervals\n");
+	printf("  -n, --num-iterations   Number of iterations\n");
+	printf("  -N, --header-iterations Reprint text header every N intervals\n");
 	printf("  -c, --cpu <list>       Real CPU IDs to monitor (e.g. 0,1,4-7)\n");
 	printf("  -B, --busy-source <src> Busy/Idle source hint: auto, procstat, schedstat, task-clock\n");
 	printf("  -o, --output <file>    Output file\n");
 	printf("  -O, --export <file>    Export text/json/csv output to file\n");
 	printf("  -q, --quiet            Quiet mode\n");
-	printf("  -D, --Dump             Dump once and exit\n");
-	printf("  -S, --Summary          Summary mode (SUM only)\n");
+	printf("  -D, --dump             Dump once and exit\n");
+	printf("  -S, --summary          Summary mode (SUM only)\n");
 	printf("  -a, --all              Enable all supported base column groups (use -I for IPC, -p for PMU)\n");
 	printf("  -f, --format <fmt>     Output format: text, json, csv\n");
 	printf("  -s, --show <items>     Show only selected groups or exact field names\n");
 	printf("  -H, --hide <items>     Hide selected groups or exact field names\n");
 	printf("  -p, --pmu-events <evts> Enable PMU events\n");
-	printf("  -I, --IPC              Enable cycles,instructions PMU + IPC columns\n");
-	printf("  -J, --Joules           Show interval energy in Joules\n");
+	printf("  -I, --ipc              Enable cycles,instructions PMU + IPC columns\n");
+	printf("  -J, --joules           Show interval energy in Joules\n");
 	printf("  -l, --list             List built-in column groups and PMU events\n");
 	printf("  -P, --probe            Probe current platform capabilities and sources\n");
 	printf("  -d, --debug            Enable debug output\n");
@@ -292,10 +292,18 @@ static int apply_show_option(const char *arg)
 	return 0;
 }
 
-static void apply_hide_option(const char *arg)
+static int apply_hide_option(const char *arg)
 {
 	/* Hide blacklist: disable specified columns */
+	if (!arg || !*arg) {
+		fprintf(stderr, "Error: --hide requires at least one column group or field name\n");
+		return -1;
+	}
+	unknown_column_count = 0;
 	parse_column_option(arg, 0);
+	if (unknown_column_count > 0)
+		return -1;
+	return 0;
 }
 
 static void apply_ipc_option(struct armstat_options *opts)
@@ -466,12 +474,12 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 				return -1;
 			break;
 		case 'n':
-			if (parse_non_negative_int_arg("--num_iterations", optarg,
+			if (parse_non_negative_int_arg("--num-iterations", optarg,
 						       &opts->iterations) < 0)
 				return -1;
 			break;
 		case 'N':
-			if (parse_non_negative_int_arg("--header_iterations", optarg,
+			if (parse_non_negative_int_arg("--header-iterations", optarg,
 						       &opts->header_interval) < 0)
 				return -1;
 			set_header_interval(opts->header_interval);
@@ -512,7 +520,8 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 				return -1;
 			break;
 		case 'H':
-			apply_hide_option(optarg);
+			if (apply_hide_option(optarg) < 0)
+				return -1;
 			break;
 		case 'd':
 			opts->debug = 1;

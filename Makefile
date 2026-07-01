@@ -64,6 +64,12 @@ install : armstat
 	install -m 755 scripts/plot_sum.py scripts/plot_cpu.py scripts/plot_utils.py \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
 
+.PHONY : uninstall
+uninstall :
+	rm -f $(DESTDIR)$(PREFIX)/bin/armstat
+	rm -f $(DESTDIR)$(PREFIX)/share/man/man8/armstat.8
+	rm -rf $(DESTDIR)$(PREFIX)/share/doc/armstat
+
 .PHONY : test
 test : armstat tests/test_core_logic tests/test_column_selection tests/test_runtime_smoke
 	./tests/test_core_logic

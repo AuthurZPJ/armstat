@@ -41,3 +41,15 @@ if ./armstat --busy-source mystery >/dev/null 2>&1; then
 	echo "unknown busy source unexpectedly succeeded" >&2
 	exit 1
 fi
+
+# --probe must not crash regardless of platform; exit 0 (success) or 1
+# (init failure on non-ARM) are both acceptable, but signals are not.
+if ./armstat --probe >/dev/null 2>&1; then
+	probe_ec=0
+else
+	probe_ec=$?
+fi
+if [ "$probe_ec" -ne 0 ] && [ "$probe_ec" -ne 1 ]; then
+	echo "--probe exited with unexpected code $probe_ec" >&2
+	exit 1
+fi

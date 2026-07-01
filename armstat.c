@@ -119,6 +119,7 @@ static int run_probe(struct armstat_options *opts)
 
 	if (init_collector() < 0) {
 		fprintf(stderr, "Error: Failed to init collector for probe\n");
+		fprintf(stderr, "  armstat requires ARM64 Linux with sysfs/procfs access.\n");
 		return -1;
 	}
 
@@ -165,6 +166,9 @@ static int run_probe(struct armstat_options *opts)
 	printf("  mem_bw_supported: %s\n",
 	       probe_yes_no(get_mem_bw_support()));
 	printf("  pmu_cycles: %s\n", probe_yes_no(pmu_available));
+	if (!pmu_available)
+		printf("  pmu_note: requires root or permissive perf_event_paranoid; "
+		       "see perf_event_open(2)\n");
 
 	close_topology();
 	close_pmu_events();
@@ -187,6 +191,7 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	if (opts->debug) fprintf(stderr, "Initializing collector...\n");
 	if (init_collector() < 0) {
 		fprintf(stderr, "Error: Failed to init collector\n");
+		fprintf(stderr, "  armstat requires ARM64 Linux with sysfs/procfs access.\n");
 		return -1;
 	}
 
@@ -385,6 +390,12 @@ int main(int argc, char *argv[])
 	parse_result = parse_args(argc, argv, &opts);
 	if (parse_result)
 		return parse_result < 0 ? 1 : 0;  /* Exited early */
+
+#if !defined(__aarch64__) || !defined(__linux__)
+	fprintf(stderr,
+		"Warning: armstat targets ARM64 Linux; most telemetry sources "
+		"will be unavailable on other platforms.\n");
+#endif
 
 	apply_default_pmu_events(&opts);
 

@@ -358,6 +358,8 @@ armstat -s LPI-0,LPI-1,Idle%,Busy%
 armstat -H temp
 ```
 
+`-s` 与 `-H` 均会对未知列组或字段名报启动错误。
+
 支持的列组别名：
 
 - `cpu`

@@ -350,9 +350,14 @@ recomputing metrics in serializers.
 ## Build
 
 ```bash
-cd tools/power/armstat
 make
 ```
+
+armstat can be built standalone from this repository, or placed inside the
+Linux source tree at `tools/power/armstat` and built there with the same
+`make` invocation. Cross-compilation is supported via `CROSS_COMPILE`
+(for example `CROSS_COMPILE=aarch64-linux-gnu-`), and out-of-tree builds
+via `make O=/path/to/output`.
 
 ## Usage
 
@@ -432,6 +437,9 @@ armstat -s pkg,core,node,freq,idle
 armstat -s LPI-0,LPI-1,Idle%,Busy%
 armstat -H temp
 ```
+
+Both `-s` and `-H` reject unknown column groups or field names as startup
+errors.
 
 Supported column groups:
 

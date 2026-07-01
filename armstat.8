@@ -76,10 +76,10 @@ as a compatibility alias and currently resolves to the same implementation as
 .BI \-i ", " \-\-interval " seconds"
 Sampling interval in finite positive seconds. Default: 1.0
 .TP
-.BI \-n ", " \-\-num_iterations " n"
+.BI \-n ", " \-\-num-iterations " n"
 Number of iterations to run. Default: unlimited
 .TP
-.BI \-N ", " \-\-header_iterations " n"
+.BI \-N ", " \-\-header-iterations " n"
 Reprint the text header every N iterations
 .TP
 .BI \-c ", " \-\-cpu " cpu-list"
@@ -105,10 +105,10 @@ export contract is documented in \fBEXPORTS.md\fR and \fBEXPORTS.zh-CN.md\fR
 .B \-q, \-\-quiet
 Suppress the interval banner and text headers
 .TP
-.B \-D, \-\-Dump
+.B \-D, \-\-dump
 Collect one interval and exit
 .TP
-.B \-S, \-\-Summary
+.B \-S, \-\-summary
 Summary-only mode. Output one \fBSUM\fR row/object per interval
 .TP
 .B \-a, \-\-all
@@ -119,20 +119,22 @@ not auto-enabled by \fB-a\fR
 Select output format. Default: text
 .TP
 .BI \-s ", " \-\-show " items"
-Show only the specified column groups or exact field names
+Show only the specified column groups or exact field names. Unknown items
+are reported as errors
 .TP
 .BI \-H ", " \-\-hide " items"
-Hide the specified column groups or exact field names
+Hide the specified column groups or exact field names. Unknown items are
+reported as errors, matching \fB\-\-show\fR behavior
 .TP
 .BI \-p ", " \-\-pmu-events " events"
 Enable PMU events. Events are comma-separated. Unknown named events and lists
 longer than \fBMAX_PMU_EVENTS\fR are startup errors; known events that cannot
 be opened because of perf permissions remain visible as unavailable values
 .TP
-.B \-I, \-\-IPC
+.B \-I, \-\-ipc
 Enable PMU \fBcycles,instructions\fR and show IPC columns
 .TP
-.B \-J, \-\-Joules
+.B \-J, \-\-joules
 Show interval energy in Joules
 .TP
 .B \-l, \-\-list

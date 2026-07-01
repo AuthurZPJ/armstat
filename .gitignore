@@ -43,3 +43,7 @@ htmlcov/
 # Editor / tool config
 .claude/
 .deepseek/
+.qwen/
+
+# Compiler dependency files
+*.d
