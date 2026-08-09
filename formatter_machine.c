@@ -390,7 +390,7 @@ void serialize_json(const struct interval_record *rec, int iteration)
 			for (int j = 0; j < cpu_field_count; j++)
 				print_json_inline_field(cpu_fields[j], rec, cpu_idx);
 
-			if (show_pmu) {
+			if (is_pmu_enabled()) {
 				printf(", \"pmu\": ");
 				print_pmu_json_cpu_object(rec, cpu_idx);
 			}
@@ -412,7 +412,7 @@ void serialize_json(const struct interval_record *rec, int iteration)
 						   &needs_comma);
 
 		/* PMU events (aggregated summary) */
-		if (show_pmu) {
+		if (is_pmu_enabled()) {
 			printf("%s      \"pmu\": ",
 			       needs_comma ? ",\n" : "");
 			print_pmu_json_summary_object(rec);
@@ -465,7 +465,7 @@ static void serialize_csv_header(void)
 			putchar(',');
 			print_mixed_scope_csv_field_name("cpu", cpu_fields[i]);
 		}
-		if (show_pmu) {
+		if (is_pmu_enabled()) {
 			print_prefixed_pmu_csv_headers("summary");
 			print_prefixed_pmu_csv_headers("cpu");
 		}
@@ -502,7 +502,7 @@ static void serialize_csv_header(void)
 	}
 
 	/* PMU columns */
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_pmu_csv_headers();
 	printf("\n");
 }
@@ -535,7 +535,7 @@ static void serialize_csv_row(const struct interval_record *rec, int row_idx)
 		first = 0;
 	}
 
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_pmu_csv_cpu_values(rec, cpu_idx);
 
 	printf("\n");
@@ -562,10 +562,10 @@ static void serialize_csv_mixed_cpu_row(const struct interval_record *rec, int r
 		print_csv_cell(tmp);
 	}
 
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_empty_csv_cells(rec->pmu_event_count);
 
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_pmu_csv_cpu_values(rec, cpu_idx);
 
 	printf("\n");
@@ -595,7 +595,7 @@ static void serialize_csv_summary_row(const struct interval_record *rec)
 	}
 
 	/* Aggregated PMU summary values */
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_pmu_csv_summary_values(rec);
 
 	printf("\n");
@@ -622,10 +622,10 @@ static void serialize_csv_mixed_summary_row(const struct interval_record *rec,
 
 	print_empty_csv_cells(cpu_count);
 
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_pmu_csv_summary_values(rec);
 
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_empty_csv_cells(rec->pmu_event_count);
 
 	printf("\n");

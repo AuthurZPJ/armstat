@@ -207,3 +207,36 @@ void cleanup_collector(void)
 	close_cpufreq();
 	cleanup_cpu_inventory();
 }
+
+/* ============================================================================
+ * SNAPSHOT ACCESSORS
+ * ============================================================================ */
+
+int sys_snapshot_get_effective_cpu_count(const struct sys_snapshot *s)
+{
+	return s ? s->effective_cpu_count : 0;
+}
+
+int sys_snapshot_get_cpu_truncated(const struct sys_snapshot *s)
+{
+	return s ? s->cpu_truncated : 0;
+}
+
+unsigned long long sys_snapshot_get_interval_delta_us(const struct sys_snapshot *s)
+{
+	return s ? s->interval_delta_us : 0;
+}
+
+const struct cpu_freq_info *sys_snapshot_get_freqs(const struct sys_snapshot *s)
+{
+	return s ? s->freqs : NULL;
+}
+
+struct raw_counters sys_snapshot_get_counters(const struct sys_snapshot *s)
+{
+	if (s)
+		return s->counters;
+
+	struct raw_counters zero = {0};
+	return zero;
+}

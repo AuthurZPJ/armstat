@@ -358,14 +358,6 @@ static void collect_power_and_temp_snapshot(struct sys_snapshot *snapshot, int t
 	int need_power = is_power_enabled() || is_energy_enabled();
 	int need_temp = is_temp_enabled();
 
-	/* ---- Per-interval: sensor availability ---- */
-	snapshot->has_per_core_power = slow_data.per_core_power_available;
-	snapshot->has_per_core_temp = 0;  /* Per-core temp not supported */
-
-	/* ---- Per-interval: power and temp ---- */
-	snapshot->powers = powers_pool;
-	snapshot->temps = temps_pool;
-
 	/*
 	 * Package power and NUMA temperatures are valid platform-level signals on
 	 * this machine. Per-CPU power/temp arrays remain capability-gated because
@@ -376,10 +368,8 @@ static void collect_power_and_temp_snapshot(struct sys_snapshot *snapshot, int t
 	else
 		snapshot->package_power_mw = 0;
 
-	if (need_power && snapshot->has_per_core_power)
-		read_all_cpu_power(snapshot->powers, tracked);
-	if (need_temp && snapshot->has_per_core_temp)
-		read_all_cpu_temp(snapshot->temps, tracked);
+	if (need_power && slow_data.per_core_power_available)
+		read_all_cpu_power(powers_pool, tracked);
 
 	/* ---- Per-interval: NUMA temperatures (vdie0, vdie1) ---- */
 	if (need_temp) {

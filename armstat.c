@@ -263,7 +263,7 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	collect_snapshot(snapshot);
 
 	/* Setup formatter pool after we know the CPU count */
-	setup_formatter_pool(snapshot->effective_cpu_count);
+	setup_formatter_pool(sys_snapshot_get_effective_cpu_count(snapshot));
 
 	/*
 	 * Phase 1b: Warm up aggregator with baseline for correct first interval delta
@@ -332,7 +332,7 @@ static void run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot
 		 * misleading rows such as Idle%=0 / Busy%=100 for what is really an
 		 * incomplete baseline.
 		 */
-		if (snapshot->interval_delta_us == 0) {
+		if (sys_snapshot_get_interval_delta_us(snapshot) == 0) {
 			if (safe_interval_sleep(&ts)) break;
 			continue;
 		}

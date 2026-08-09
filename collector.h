@@ -76,8 +76,6 @@ struct sys_snapshot {
 	/* ===== RAW PER-CPU DATA ===== */
 	struct cpu_freq_info *freqs;           /* cur/min/max freq, governor */
 	struct idle_state **idle;              /* per-CPU idle states */
-	long long *powers;                     /* per-CPU power (mW) - only used if has_per_core_power */
-	int *temps;                            /* per-CPU temperature (milli-C) */
 
 	/* ===== PACKAGE-LEVEL POWER (always available if any power sensor exists) ===== */
 	long long package_power_mw;            /* Package-level power in mW */
@@ -86,10 +84,6 @@ struct sys_snapshot {
 	/* ===== NUMA-LEVEL TEMPERATURES (for vdie0, vdie1) ===== */
 	int numa_temps[16];                   /* Temperature per NUMA node (milli-C) */
 	int numa_temp_count;                  /* Number of NUMA nodes with temp sensors */
-
-	/* Hardware capabilities */
-	int has_per_core_power;
-	int has_per_core_temp;
 
 	/* ===== RAW SYSTEM COUNTERS ===== */
 	struct raw_counters counters;
@@ -154,5 +148,19 @@ int get_cpu_id_by_tracked_idx(int tracked_idx);
  * Get tracked CPU count
  */
 int get_tracked_cpu_count(void);
+
+/*
+ * Snapshot accessors — the seam between the collector and its consumers.
+ *
+ * Multi-consumer fields are exposed through these getters so that aggregator.c,
+ * formatter_record.c, and armstat.c do not dereference sys_snapshot internals
+ * directly. Single-consumer fields remain accessed directly for now; a future
+ * step can make the struct fully opaque by adding the remaining getters.
+ */
+int sys_snapshot_get_effective_cpu_count(const struct sys_snapshot *s);
+int sys_snapshot_get_cpu_truncated(const struct sys_snapshot *s);
+unsigned long long sys_snapshot_get_interval_delta_us(const struct sys_snapshot *s);
+const struct cpu_freq_info *sys_snapshot_get_freqs(const struct sys_snapshot *s);
+struct raw_counters sys_snapshot_get_counters(const struct sys_snapshot *s);
 
 #endif /* ARMSTAT_COLLECTOR_H */

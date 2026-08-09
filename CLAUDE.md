@@ -40,7 +40,8 @@ armstat_cli.c → armstat.c → collector.c → aggregator.c → formatter_recor
 Key design decisions:
 - **CPU Identity Model**: Two identities coexist - `cpu_id` (real Linux CPU ID, external) and `tracked_idx` (dense internal array index). Output rows are sorted by real CPU ID.
 - **Three Sampling Layers**: Static/rebuild (topology, inventory) → Slow-changing (~5s refresh with budgeted cursor) → Per-interval fast path (frequency, /proc/stat, power, PMU)
-- **Two-Stage Formatting**: `formatter_record.c` builds a stable `interval_record`, then `formatter_text.c`/`formatter_machine.c` serialize to text/JSON/CSV
+- **Column visibility + field registry** (`columns.c`): owns `show_*` flags, idle-state/temp series visibility + override bitmasks, and the `all_fields[]` descriptor table. CLI writes via `enable_*()`; sample_cache reads for demand-driven sampling.
+- **Two-Stage Formatting**: `formatter_record.c` builds a stable `interval_record` (value getters live here), then `formatter_text.c`/`formatter_machine.c` serialize to text/JSON/CSV
 - **CPU inventory** owns the single source of truth for present/online/tracked CPUs; hotplug rebuilds cascade through the entire stack
 
 ## Data Flow Per Interval
@@ -88,7 +89,8 @@ When CPU membership changes: rebuild cpu_inventory → sample_cache → cpuidle 
 - `cpu_inventory.c`: CPU identity and inventory (single source of truth)
 - `idle_backend.c`: busy-source policy (/proc/stat vs /proc/schedstat)
 - `aggregator.c`: delta/percentage calculations
-- `formatter_record.c`: interval_record builder and field table
+- `columns.c`: column visibility flags + field descriptor table
+- `formatter_record.c`: interval_record builder (value getters + materialization)
 - `formatter_text.c` / `formatter_machine.c`: output serializers
 - `power_sensor.c`: platform sensor discovery
 

@@ -217,7 +217,7 @@ static void build_text_layout(struct text_layout *layout,
 		layout->widths[i] = width;
 	}
 
-	if (!show_pmu)
+	if (!is_pmu_enabled())
 		return;
 
 	layout->pmu_count = get_pmu_event_count();
@@ -350,7 +350,7 @@ static void serialize_text_summary_header(const struct text_layout *layout)
 		printf("%*s", layout->widths[i], layout->fields[i]->label);
 	}
 
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_text_pmu_headers(layout);
 	printf("\n");
 }
@@ -358,7 +358,7 @@ static void serialize_text_summary_header(const struct text_layout *layout)
 static void serialize_text_cpu_header(const struct text_layout *layout)
 {
 	if (!any_fields_enabled(FIELD_SCOPE_CPU) &&
-	    !show_cpu && !show_pmu)
+	    !show_cpu && !is_pmu_enabled())
 			return;
 
 	printf("%-*s", TEXT_ROW_KEY_WIDTH, section_emit_cpu_identity() ? "CPU" : "");
@@ -367,7 +367,7 @@ static void serialize_text_cpu_header(const struct text_layout *layout)
 		printf("%*s", layout->widths[i], layout->fields[i]->label);
 	}
 
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_text_pmu_headers(layout);
 	printf("\n");
 }
@@ -387,7 +387,7 @@ static void serialize_text_summary_row(const struct interval_record *rec,
 					    layout->widths[i]);
 	}
 
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_text_summary_pmu(rec, layout);
 	printf("\n");
 }
@@ -416,7 +416,7 @@ static void serialize_text_cpu_row(const struct interval_record *rec,
 					    layout->widths[i]);
 	}
 
-	if (show_pmu)
+	if (is_pmu_enabled())
 		print_text_cpu_pmu(rec, cpu_idx, layout);
 
 	printf("\n");

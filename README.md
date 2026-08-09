@@ -210,7 +210,8 @@ collector.c            orchestrates one interval of collection
 sample_cache.c         memory pools + fast-path sampling
 idle_backend.c         busy-source policy helpers (/proc/stat vs /proc/schedstat)
 aggregator.c           delta/interval calculations
-formatter_record.c     interval_record builder and field table
+columns.c              column visibility flags + field descriptor table
+formatter_record.c     interval_record builder (value getters + materialization)
 formatter_text.c       text output
 formatter_machine.c    JSON/CSV output
 cpu_inventory.c        single source of truth for present/online/tracked CPUs
@@ -340,8 +341,9 @@ interval deltas are derived.
 
 Formatting is split into:
 
-1. `formatter_record.c`: build a stable `interval_record`
-2. `formatter_text.c` / `formatter_machine.c`: serialize that record
+1. `columns.c`: column visibility (`show_*` flags) + field descriptor table
+2. `formatter_record.c`: build a stable `interval_record` (value getters)
+3. `formatter_text.c` / `formatter_machine.c`: serialize that record
 
 This keeps formatting logic consistent across text, JSON, and CSV without
 recomputing metrics in serializers.

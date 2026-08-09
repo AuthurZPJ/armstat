@@ -16,7 +16,7 @@ ifeq ("$(origin O)", "command line")
 endif
 
 SRCS = armstat.c armstat_cli.c cpufreq.c cpuidle.c power.c pmu.c topology.c sysstat.c \
-       collector.c cpu_inventory.c sample_cache.c \
+       collector.c cpu_inventory.c sample_cache.c columns.c \
        idle_backend.c aggregator.c formatter_record.c \
        formatter_text.c formatter_machine.c formatter_section.c power_sensor.c power_interval.c membw.c
 OBJS = $(SRCS:.c=.o)

@@ -187,7 +187,8 @@ collector.c            采样编排
 sample_cache.c         内存池与快路径采样
 idle_backend.c         busy-source 策略辅助（/proc/stat 与 /proc/schedstat）
 aggregator.c           区间统计与 delta 计算
-formatter_record.c     interval_record 构建与字段表
+columns.c              列可见性标志与字段描述符表
+formatter_record.c     interval_record 构建（值 getter 与物化）
 formatter_text.c       文本输出
 formatter_machine.c    JSON/CSV 输出
 cpu_inventory.c        present/online/tracked CPU 单一事实源
@@ -304,10 +305,11 @@ delta。
 
 ### 6. 两阶段 formatter
 
-输出分成两步：
+输出分成三步：
 
-1. `formatter_record.c` 构造稳定的 `interval_record`
-2. `formatter_text.c` / `formatter_machine.c` 负责序列化
+1. `columns.c` 持有列可见性（`show_*` 标志）与字段描述符表
+2. `formatter_record.c` 构造稳定的 `interval_record`（值 getter）
+3. `formatter_text.c` / `formatter_machine.c` 负责序列化
 
 这样 text / JSON / CSV 共用同一套字段模型，不会在 serializer 里重复计算。
 

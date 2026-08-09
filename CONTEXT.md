@@ -34,3 +34,27 @@ current; add a term when a decision resolves one.
 - **tracked CPU view** — the iteration interface (`for_each_tracked_cpu`) that
   yields a `cpu_desc` per tracked CPU, hiding the `tracked_idx ↔ cpu_id`
   translation from consumers.
+
+- **column visibility** — the concept and module (`columns.c`) that owns the
+  `show_*` group-visibility flags, the idle-state and summary-temp series
+  visibility + override bitmasks, and the `enable_*()` / `reset_columns()` /
+  `clear_columns()` API. Written by CLI parsing; read by sample_cache for
+  demand-driven sampling and by the serializers/section policy for output
+  decisions. Single owner — no other module defines or mutates the visibility
+  state directly.
+
+- **field registry** — the `all_fields[]` descriptor table and its query API
+  (`get_field_desc`, `get_enabled_fields`, `any_fields_enabled`,
+  `field_is_effectively_enabled`), owned by `columns.c`. Ties each field id
+  to its group, scope, series, enabled flag, and value getter. The value
+  getters themselves live in `formatter_record.c` (declared in the private
+  `formatter_fields.h` sub-header); the registry references them by address.
+
+- **snapshot accessors** — the `sys_snapshot_get_*()` functions declared in
+  `collector.h` and implemented in `collector.c`. The seam between the
+  collector (producer) and the aggregator/formatter/main-loop (consumers).
+  Multi-consumer fields (`effective_cpu_count`, `cpu_truncated`,
+  `interval_delta_us`, `freqs`, `counters`) are read through these getters;
+  single-consumer fields remain directly accessed. A future step can make
+  `struct sys_snapshot` fully opaque by adding the remaining getters and
+  moving the struct definition into `collector.c`.

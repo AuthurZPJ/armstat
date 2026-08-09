@@ -39,7 +39,8 @@ armstat.c (main loop + module lifecycle)
        -> idle_backend (policy helpers only)
        -> cpufreq / cpuidle / power / pmu / sysstat readers
   -> aggregator.c
-  -> formatter_record.c (interval_record builder)
+  -> columns.c (column visibility + field descriptor table)
+  -> formatter_record.c (interval_record builder; value getters)
   -> formatter_text.c / formatter_machine.c (serializers, dispatched by armstat.c)
 ```
 
@@ -177,8 +178,15 @@ Responsibilities:
 
 The formatter stack is intentionally two-stage:
 
-1. `formatter_record.c` builds a stable intermediate record
-2. serializers consume the record without knowing sampling details
+1. `columns.c` owns the column-visibility flags (`show_*`), the idle-state and
+   summary-temp series visibility + override bitmasks, and the field descriptor
+   table (`all_fields[]`) that ties field ids to their group, scope, series,
+   enabled flag, and value getter. CLI parsing writes visibility through the
+   `enable_*()` setters; sample_cache reads it for demand-driven sampling.
+2. `formatter_record.c` builds a stable intermediate record — the value
+   getters referenced by the field table live here, next to the record model.
+3. serializers consume the record without knowing sampling details or column
+   visibility internals.
 
 ## CPU Identity Model
 
@@ -239,6 +247,14 @@ This avoids mixing pre-hotplug and post-hotplug counters into one interval.
 
 ### Raw snapshot (`sys_snapshot`)
 
+The snapshot is owned by the collector and exposed to consumers through
+accessor functions (`sys_snapshot_get_effective_cpu_count`,
+`sys_snapshot_get_interval_delta_us`, `sys_snapshot_get_cpu_truncated`,
+`sys_snapshot_get_freqs`, `sys_snapshot_get_counters`). Multi-consumer
+fields are read through these getters so a layout change does not ripple
+across aggregator, formatter, and main loop. Single-consumer fields remain
+accessed directly for now; a future step can make the struct fully opaque.
+
 Contains:
 
 - CPU counts and truncation metadata
@@ -246,7 +262,8 @@ Contains:
 - package power
 - NUMA temperature array
 - raw PMU counters
-- raw system counters
+- raw system counters (`struct raw_counters`, also independently instantiated
+  by the aggregator for `prev_counters`)
 - unified interval delta in microseconds
 - per-tracked-CPU schedstat validity flags, allowing per-CPU fallback to
   `/proc/stat` when `/proc/schedstat` lacks data for that CPU

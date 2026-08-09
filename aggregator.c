@@ -56,18 +56,18 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 	memset(stats, 0, sizeof(*stats));
 
 	/* Use effective CPU count from snapshot (already capped at MAX_CPUS) */
-	int cpu_count = raw->effective_cpu_count;
+	int cpu_count = sys_snapshot_get_effective_cpu_count(raw);
 
 	/* Warn about truncation once at start */
 	static int warned_truncation = 0;
-	if (raw->cpu_truncated && !warned_truncation) {
+	if (sys_snapshot_get_cpu_truncated(raw) && !warned_truncation) {
 		fprintf(stderr, "WARNING: System has %d CPUs, only monitoring first %d (MAX_CPUS=%d)\n",
 			raw->cpu_count, MAX_CPUS, MAX_CPUS);
 		warned_truncation = 1;
 	}
 
 	/* Use unified time delta from collector for all metrics consistency */
-	unsigned long long delta_us = raw->interval_delta_us;
+	unsigned long long delta_us = sys_snapshot_get_interval_delta_us(raw);
 
 	/* ===== 1. Calculate frequency statistics ===== */
 	/* Per-CPU MHz and system-wide average */
@@ -83,9 +83,10 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 	memset(stats->per_cpu_pmu, 0, sizeof(stats->per_cpu_pmu));
 	memset(stats->per_cpu_ipc, 0, sizeof(stats->per_cpu_ipc));
 
-	if (raw->freqs) {
+	const struct cpu_freq_info *freqs = sys_snapshot_get_freqs(raw);
+	if (freqs) {
 		for (i = 0; i < cpu_count; i++) {
-			unsigned int cur_freq = raw->freqs[i].cur_freq;
+			unsigned int cur_freq = freqs[i].cur_freq;
 			if (cur_freq > 0) {
 				/* Calculate interval average frequency for this CPU:
 				 * avg = (previous + current) / 2 */
@@ -215,8 +216,9 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 	}
 
 	/* ===== 2. Memory bandwidth (calculated in aggregator using unified delta) ===== */
+	struct raw_counters current_counters = sys_snapshot_get_counters(raw);
 	/* Use pre-read mem_bw_counter from collector to avoid duplicate I/O */
-	update_mem_bw_interval_stats(delta_us, raw->counters.mem_bw_counter);
+	update_mem_bw_interval_stats(delta_us, current_counters.mem_bw_counter);
 	stats->mem_bw = get_interval_mem_bw();
 
 	/* ===== 3. Power and energy (calculated in aggregator using unified delta) ===== */
@@ -229,23 +231,23 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 	/* ===== 4. System stat deltas ===== */
 	if (delta_us > 0) {
 		stats->ctx_switches =
-			(raw->counters.ctx_switches >= prev_counters.ctx_switches) ?
-			raw->counters.ctx_switches - prev_counters.ctx_switches : 0;
+			(current_counters.ctx_switches >= prev_counters.ctx_switches) ?
+			current_counters.ctx_switches - prev_counters.ctx_switches : 0;
 		stats->interrupts =
-			(raw->counters.interrupts >= prev_counters.interrupts) ?
-			raw->counters.interrupts - prev_counters.interrupts : 0;
+			(current_counters.interrupts >= prev_counters.interrupts) ?
+			current_counters.interrupts - prev_counters.interrupts : 0;
 		stats->soft_interrupts =
-			(raw->counters.soft_interrupts >= prev_counters.soft_interrupts) ?
-			raw->counters.soft_interrupts - prev_counters.soft_interrupts : 0;
+			(current_counters.soft_interrupts >= prev_counters.soft_interrupts) ?
+			current_counters.soft_interrupts - prev_counters.soft_interrupts : 0;
 	}
 
 	/* ===== 5. PMU deltas ===== */
-	int pmu_count = raw->counters.pmu_count;
+	int pmu_count = current_counters.pmu_count;
 	unsigned long long cycles = 0;
 	unsigned long long instructions = 0;
 	for (i = 0; i < pmu_count && i < MAX_PMU_EVENTS; i++) {
-		stats->pmu_delta[i] = (raw->counters.pmu[i] >= prev_counters.pmu[i]) ?
-			raw->counters.pmu[i] - prev_counters.pmu[i] : 0;
+		stats->pmu_delta[i] = (current_counters.pmu[i] >= prev_counters.pmu[i]) ?
+			current_counters.pmu[i] - prev_counters.pmu[i] : 0;
 		/* Track cycles and instructions for IPC calculation */
 		const char *name = get_pmu_event_name(i);
 		if (name) {
@@ -262,7 +264,7 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 		stats->ipc = (double)instructions / cycles;
 	}
 
-	if (raw->counters.pmu_per_cpu && pmu_count > 0) {
+	if (current_counters.pmu_per_cpu && pmu_count > 0) {
 		int cycles_idx = -1;
 		int instructions_idx = -1;
 
@@ -279,7 +281,7 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 
 		for (i = 0; i < cpu_count; i++) {
 			for (int event = 0; event < pmu_count && event < MAX_PMU_EVENTS; event++) {
-				unsigned long long current = raw->counters.pmu_per_cpu[i][event];
+				unsigned long long current = current_counters.pmu_per_cpu[i][event];
 				unsigned long long previous = prev_pmu_per_cpu[i][event];
 
 				if (current >= previous)
@@ -354,7 +356,7 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 	}
 
 	/* Save current counters as previous for next interval */
-	prev_counters = raw->counters;
+	prev_counters = current_counters;
 	for (i = 0; i < cpu_count; i++) {
 		prev_authoritative_idle_jiffies[i] = raw->authoritative_idle_jiffies ?
 			raw->authoritative_idle_jiffies[i] : 0;

@@ -38,7 +38,8 @@ armstat.c（主循环 + 模块生命周期）
        -> idle_backend（仅策略辅助）
        -> cpufreq / cpuidle / power / pmu / sysstat 读取器
   -> aggregator.c
-  -> formatter_record.c（interval_record 构建）
+  -> columns.c（列可见性与字段描述符表）
+  -> formatter_record.c（interval_record 构建；值 getter）
   -> formatter_text.c / formatter_machine.c（序列化，由 armstat.c 分发）
 ```
 
@@ -171,10 +172,15 @@ armstat.c 职责：
 - 将 `sys_snapshot + interval_stats` 转换成 `interval_record`
 - 将中间模型序列化成 text / JSON / CSV
 
-采用两阶段：
+采用三阶段：
 
-1. `formatter_record.c` 构建稳定的中间模型
-2. serializer 只消费中间模型，不知道采样细节
+1. `columns.c` 持有列可见性标志（`show_*`）、idle-state 与 summary-temp
+   系列可见性及覆盖位掩码，以及字段描述符表（`all_fields[]`），将字段
+   id 关联到其 group、scope、series、enabled 标志与值 getter。CLI 解析
+   通过 `enable_*()` setter 写入可见性；sample_cache 读取以驱动按需采样。
+2. `formatter_record.c` 构建稳定的中间模型——字段表引用的值 getter 位于
+   此处，紧邻 record 模型。
+3. serializer 只消费中间模型，不知道采样细节或列可见性内部。
 
 ## CPU 身份模型
 
@@ -231,6 +237,13 @@ hotplug 检测基于真实成员变化，而不是只看 CPU 数量。
 
 ### 原始快照（`sys_snapshot`）
 
+快照由 collector 持有，通过访问器函数暴露给消费者
+（`sys_snapshot_get_effective_cpu_count`、`sys_snapshot_get_interval_delta_us`、
+`sys_snapshot_get_cpu_truncated`、`sys_snapshot_get_freqs`、
+`sys_snapshot_get_counters`）。多消费者字段通过这些 getter 读取，这样布局变更不会
+波及 aggregator、formatter 和主循环。单消费者字段目前仍直接访问；未来一步可将
+结构体完全 opaque 化。
+
 包含：
 
 - CPU 数量与截断元数据
@@ -238,7 +251,7 @@ hotplug 检测基于真实成员变化，而不是只看 CPU 数量。
 - package 功耗
 - NUMA 温度数组
 - 原始 PMU 计数
-- 原始系统计数
+- 原始系统计数（`struct raw_counters`，aggregator 也独立实例化为 `prev_counters`）
 - 统一 interval 微秒数
 - per-tracked-CPU schedstat 有效性标志，允许在 `/proc/schedstat` 缺少某 CPU 数据时逐 CPU 回退到 `/proc/stat`
 
