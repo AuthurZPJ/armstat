@@ -11,9 +11,9 @@
 #include "aggregator.h"
 #include "power.h"
 #include "pmu.h"
-#include "topology.h"
 #include "idle_backend.h"
 #include "sysstat.h"
+#include "cpu_inventory.h"
 
 /* Previous raw counters for delta calculation */
 static struct raw_counters prev_counters;
@@ -309,13 +309,13 @@ void calculate_interval_stats(const struct sys_snapshot *raw, struct interval_st
 		double pkg_idle_sum[MAX_PACKAGES] = {0};
 		double pkg_iowait_sum[MAX_PACKAGES] = {0};
 		int pkg_count = 0;
+		struct cpu_desc *desc;
 
 		for (int pkg_idx = 0; pkg_idx < MAX_PACKAGES; pkg_idx++)
 			package_ids[pkg_idx] = -1;
 
-		for (i = 0; i < cpu_count; i++) {
-			int cpu_id = get_cpu_id_by_tracked_idx(i);
-			int pkg = (cpu_id >= 0) ? get_package_id(cpu_id) : -1;
+		for_each_tracked_cpu(i, desc) {
+			int pkg = desc->package_id;
 			int pkg_idx = -1;
 
 			if (pkg < 0)

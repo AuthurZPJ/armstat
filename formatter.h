@@ -19,11 +19,15 @@
 
 #include "collector.h"
 #include "aggregator.h"
+#include "cpufreq.h"
 
 /* Output format types */
 #define FORMAT_TEXT  0
 #define FORMAT_JSON  1
 #define FORMAT_CSV   2
+
+/* Number of idle-state columns exposed at most (LPI-0 ... LPI-N) */
+#define MAX_VISIBLE_IDLE_STATES 8
 
 /*
  * Field scope - defines where field data comes from
@@ -86,11 +90,15 @@ struct interval_record;
 struct cpu_row;
 struct summary_data;
 
-/* Getter function types */
-typedef double (*getter_double)(const struct interval_record *rec, int cpu);
-typedef long long (*getter_llong)(const struct interval_record *rec, int cpu);
-typedef int (*getter_int)(const struct interval_record *rec, int cpu);
-typedef const char *(*getter_string)(const struct interval_record *rec, int cpu);
+/* Getter function types.
+ * The int parameter is a row index within the field's scope iteration:
+ * a tracked CPU index for CPU-scope fields, a package index for
+ * package-scope fields, and ignored for system-scope fields.
+ */
+typedef double (*getter_double)(const struct interval_record *rec, int row_idx);
+typedef long long (*getter_llong)(const struct interval_record *rec, int row_idx);
+typedef int (*getter_int)(const struct interval_record *rec, int row_idx);
+typedef const char *(*getter_string)(const struct interval_record *rec, int row_idx);
 
 /*
  * Field descriptor - metadata for a single field
@@ -156,11 +164,30 @@ void set_field_override_by_index(int field_index, int enable, int whitelist);
 
 /*
  * CPU row data - per-CPU intermediate model
- * OPTIMIZATION: Only stores cpu_idx, static fields (package, core, numa_node, governor)
- * are looked up at output time from topology/cpufreq caches.
+ *
+ * interval_record owns every per-interval dynamic value here; serializers read
+ * them directly instead of chasing raw/stats pointers. Static identity fields
+ * (package/core/NUMA node) are still looked up lazily at output time from the
+ * topology caches via the tracked CPU id.
  */
 struct cpu_row {
-	int cpu_idx;  /* Index into raw->freqs[], raw->powers[], stats->per_cpu_* arrays */
+	int cpu_idx;  /* tracked index; cpu_rows[i].cpu_idx == i */
+
+	/* Owned per-interval frequency snapshot (cur/min/max, governor, boost) */
+	struct cpu_freq_info freq;
+
+	double idle_percent;
+	double iowait_percent;
+	double busy_percent;
+	double ipc;                /* NAN when unavailable */
+	double temp_c;             /* 0 when unavailable */
+
+	/* Display-adjusted per-idle-state residency (NAN when column hidden) */
+	double idle_state_pct[MAX_VISIBLE_IDLE_STATES];
+	double idle_state_wakeups[MAX_VISIBLE_IDLE_STATES];
+
+	/* Owned per-CPU PMU counters */
+	unsigned long long pmu[MAX_PMU_EVENTS];
 };
 
 /*
@@ -198,9 +225,10 @@ struct summary_data {
  * Interval record - unified intermediate model
  * Built from sys_snapshot + interval_stats, consumed by serializers
  *
- * OPTIMIZATION: cpu_rows only stores cpu_idx (index into arrays).
- * Static fields (package, core, numa_node, governor) are looked up at output time.
- * Dynamic fields (freq, power, temp, busy/idle) accessed via raw/stats pointers.
+ * The record owns all per-interval values (CPU rows, package rows, summary
+ * idle-state residency, NUMA temps) so serializers never dereference the raw
+ * snapshot or interval stats after build. Static identity fields (package,
+ * core, numa_node) are looked up at output time via the topology caches.
  */
 struct interval_record {
 	int interval;
@@ -217,16 +245,21 @@ struct interval_record {
 	/* Summary (system-wide) data */
 	struct summary_data summary;
 
+	/* Owned summary-scope values not part of summary_data */
+	double summary_idle_state_pct[MAX_VISIBLE_IDLE_STATES];
+	int numa_temps[16];           /* milli-C per NUMA/vdie */
+	int numa_temp_count;
+
+	/* Owned per-package aggregation rows */
+	int package_count;
+	struct package_row packages[MAX_PACKAGES];
+
 	/* Per-CPU rows (tracked sampling set, dynamic allocation) */
 	struct cpu_row *cpu_rows;
 	int cpu_row_count;
 
 	/* Flag: cpu_rows is a temp allocation (not from pool) */
 	int cpu_rows_is_temp;
-
-	/* Pointers to source data for serializers to access dynamic fields */
-	const struct sys_snapshot *raw;
-	const struct interval_stats *stats;
 };
 
 /*
@@ -258,36 +291,16 @@ void serialize_json(const struct interval_record *rec, int iteration);
 void serialize_csv(const struct interval_record *rec);
 
 /*
- * Initialize formatter
- */
-int init_formatter(void);
-
-/*
  * Setup memory pool for interval_record
  * Called by main to pre-allocate based on expected CPU count
  */
 void setup_formatter_pool(int max_cpus);
 
 /*
- * Set output format
+ * Text serializer configuration
  */
-void set_format(int format);
-
-/*
- * Set quiet mode (no headers)
- */
-void set_quiet(int quiet);
-
-/*
- * Set summary mode (SUM only, no per-CPU)
- */
-void set_summary_mode(int summary);
-void set_default_summary_output(int enable);
-
-/*
- * Set header print interval
- */
-void set_header_interval(int interval);
+void set_text_quiet(int quiet);
+void set_text_header_interval(int interval);
 
 /*
  * Enable/disable columns
@@ -321,40 +334,13 @@ void clear_columns(void);
 /* CPU list filtering now lives in cpu_inventory; see cpu_inventory.h */
 
 /*
- * Print interval header
- */
-void print_interval_header(double interval);
-
-/*
- * Print one interval of output
- *
- * @raw: Raw snapshot from collector
- * @stats: Aggregated statistics from aggregator
- * @iteration: Current iteration number (1-based)
- */
-void print_interval(const struct sys_snapshot *raw,
-		    const struct interval_stats *stats,
-		    int iteration);
-
-/*
- * List available counters
- */
-void list_counters(void);
-
-/*
- * Cleanup formatter
- */
-void cleanup_formatter(void);
-
-/*
- * Cleanup formatter pool (called by cleanup_formatter)
+ * Cleanup formatter pool
  */
 void cleanup_formatter_pool(void);
 
 /*
- * Close output format (e.g., print JSON footer for infinite sampling mode)
- * Call this when exiting due to signal
+ * Close the JSON output array (must be called once when JSON mode ends)
  */
-void close_format(const struct interval_stats *stats);
+void close_machine_json(void);
 
 #endif /* ARMSTAT_FORMATTER_H */

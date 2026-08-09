@@ -186,16 +186,10 @@ static int slow_budget_for_interval(int tracked, unsigned long long delta_us)
 
 static void slow_refresh_cpu(int tracked_idx)
 {
-	int cpu_id;
-
 	if (tracked_idx < 0 || tracked_idx >= get_tracked_cpu_count())
 		return;
 
-	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
-	if (cpu_id < 0)
-		return;
-
-	read_cpu_min_max_freq(cpu_id,
+	read_cpu_min_max_freq(tracked_idx,
 			      &slow_data.min_freq[tracked_idx],
 			      &slow_data.max_freq[tracked_idx]);
 	/*
@@ -207,11 +201,11 @@ static void slow_refresh_cpu(int tracked_idx)
 	{
 		int boost;
 
-		if (read_cpu_boost(cpu_id, &boost) == 0)
+		if (read_cpu_boost(tracked_idx, &boost) == 0)
 			slow_data.boost[tracked_idx] = boost;
 	}
 
-	read_cpu_governor(cpu_id, slow_data.governors[tracked_idx], 32);
+	read_cpu_governor(tracked_idx, slow_data.governors[tracked_idx], 32);
 }
 
 static void slow_refresh_sensor_caps(void)
@@ -307,14 +301,7 @@ static void collect_freq_snapshot(struct sys_snapshot *snapshot, int tracked)
 		return;
 
 	for (int i = 0; i < tracked; i++) {
-		int cpu_id = get_cpu_id_by_tracked_idx(i);
-
-		if (cpu_id < 0) {
-			snapshot->freqs[i].cur_freq = 0;
-			continue;
-		}
-
-		if (read_cpu_freq(cpu_id, &snapshot->freqs[i].cur_freq) < 0)
+		if (read_cpu_freq(i, &snapshot->freqs[i].cur_freq) < 0)
 			snapshot->freqs[i].cur_freq = 0;
 		if (slow_layer_initialized && slow_data.min_freq) {
 			snapshot->freqs[i].min_freq = slow_data.min_freq[i];

@@ -21,40 +21,21 @@
 /* Minimal seed for a single-CPU catalog so tracked_idx=0 → cpu_id=0 */
 static void seed_one_cpu(void)
 {
-	memset(&cpu_catalog, 0, sizeof(cpu_catalog));
-	memset(&cpu_inv, 0, sizeof(cpu_inv));
-	cpu_catalog.present_count = 1;
-	cpu_catalog.online_count  = 1;
-	cpu_catalog.tracked_count = 1;
-	cpu_catalog.cpus[0].cpu_id   = 0;
-	cpu_catalog.cpus[0].present  = 1;
-	cpu_catalog.cpus[0].online   = 1;
-	cpu_inv.tracked_count = 1;
-	cpu_inv.tracked_cpus[0] = 0;
+	struct cpu_inventory_seed cpus[1] = {
+		{0, 1, 1, 0, 0, 0},
+	};
+
+	cpu_inventory_seed(cpus, 1);
 }
 
 static void seed_two_cpus_sparse_packages(void)
 {
-	memset(&cpu_catalog, 0, sizeof(cpu_catalog));
-	memset(&cpu_inv, 0, sizeof(cpu_inv));
+	struct cpu_inventory_seed cpus[2] = {
+		{0, 1, 1, 2, 0, 0},
+		{1, 1, 1, 4, 0, 0},
+	};
 
-	cpu_catalog.present_count = 2;
-	cpu_catalog.online_count = 2;
-	cpu_catalog.tracked_count = 2;
-
-	cpu_catalog.cpus[0].cpu_id = 0;
-	cpu_catalog.cpus[0].present = 1;
-	cpu_catalog.cpus[0].online = 1;
-	cpu_catalog.cpus[0].package_id = 2;
-
-	cpu_catalog.cpus[1].cpu_id = 1;
-	cpu_catalog.cpus[1].present = 1;
-	cpu_catalog.cpus[1].online = 1;
-	cpu_catalog.cpus[1].package_id = 4;
-
-	cpu_inv.tracked_count = 2;
-	cpu_inv.tracked_cpus[0] = 0;
-	cpu_inv.tracked_cpus[1] = 1;
+	cpu_inventory_seed(cpus, 2);
 }
 
 static double jiffies_percent(unsigned long long jiffies,

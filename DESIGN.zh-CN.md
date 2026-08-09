@@ -38,10 +38,8 @@ armstat.c（主循环 + 模块生命周期）
        -> idle_backend（仅策略辅助）
        -> cpufreq / cpuidle / power / pmu / sysstat 读取器
   -> aggregator.c
-  -> formatter.c
-       -> formatter_record.c
-       -> formatter_text.c
-       -> formatter_machine.c
+  -> formatter_record.c（interval_record 构建）
+  -> formatter_text.c / formatter_machine.c（序列化，由 armstat.c 分发）
 ```
 
 ### armstat.c 与 armstat_cli.c
@@ -166,7 +164,7 @@ armstat.c 职责：
 
 聚合层不能直接做 sysfs/procfs I/O。
 
-### formatter.c 及子模块
+### 格式化输出栈
 
 职责：
 
@@ -256,12 +254,22 @@ hotplug 检测基于真实成员变化，而不是只看 CPU 数量。
 
 ### 中间模型（`interval_record`）
 
+`interval_record` 在每次 interval 构建时被完全实体化：它拥有所有 per-interval
+动态值，`build_interval_record()` 返回后 serializer 不再解引用原始快照或
+interval stats。
+
 包含：
 
 - interval 元数据
-- summary 数据
-- 过滤且排序后的 CPU 行索引
-- 指向 raw/stats 的指针，便于 lazy getter
+- summary 数据（`summary_data`）
+- 自有的 per-CPU 行（`cpu_rows`）：freq 快照、busy/idle/iowait、IPC、
+  分 idle state 驻留与唤醒、per-CPU PMU 计数、CPU 温度
+- 自有的 per-package 聚合行（`packages`）
+- 自有的 summary 分 idle state 驻留（`summary_idle_state_pct`）与 NUMA 温度
+  （`numa_temps`）
+
+静态身份字段（package、core、NUMA node）仍在输出时通过 tracked CPU id 从
+topology 缓存惰性查询。
 
 这样 text / JSON / CSV 就可以共用同一套字段表。
 
@@ -274,10 +282,16 @@ hotplug 检测基于真实成员变化，而不是只看 CPU 数量。
 
 当前 text 模型是：
 
-- 默认模式：per-package 聚合行 + CPU 行
+- 默认模式：只打印 CPU 行
+- `-a` 模式：`SUM` + per-package 聚合行 + CPU 行
 - summary 模式：只打印 SUM 行
 
-Package 行按 socket 聚合 per-CPU 的 MHz、Idle%、Busy% 和 IOWait%。Core 级聚合尚未实现。
+在混合作用域输出（`-a`）中，每个 section 各自携带自己的表头行、紧跟其数据行，
+SUM / Pkg / CPU 三个 section 之间用空行分隔，避免三张表连成一片。
+
+Package 行按 socket 聚合 per-CPU 的 MHz、Idle%、Busy% 和 IOWait%。只有在显式
+启用 package 列组（`-a` 或 `-s package`）时才打印，默认输出保持只打印 per-CPU。
+Core 级聚合尚未实现。
 
 需要特别说明的 summary 语义：
 

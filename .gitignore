@@ -4,9 +4,11 @@
 
 # Linked binaries
 armstat
+tests/test_cpu_inventory
 tests/test_column_selection
 tests/test_core_logic
 tests/test_runtime_smoke
+tests/test_section_policy
 
 # Python cache
 __pycache__/

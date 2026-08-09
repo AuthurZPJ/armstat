@@ -87,7 +87,6 @@ struct perf_event_attr {
 static struct pmu_event pmu_events[MAX_PMU_EVENTS];
 static int pmu_event_count;
 static int pmu_cpu_count;
-static int pmu_cpu_ids[MAX_PRESENT_CPUS];
 static int pmu_fds[MAX_PRESENT_CPUS][MAX_PMU_EVENTS];
 static uint64_t pmu_prev_raw[MAX_PRESENT_CPUS][MAX_PMU_EVENTS];
 static uint64_t pmu_scaled_totals[MAX_PRESENT_CPUS][MAX_PMU_EVENTS];
@@ -361,7 +360,6 @@ static void clear_pmu_fds(void)
 	}
 
 	pmu_cpu_count = 0;
-	memset(pmu_cpu_ids, 0, sizeof(pmu_cpu_ids));
 }
 
 static void clear_pmu_runtime_state(void)
@@ -484,7 +482,6 @@ static int open_pmu_counters_for_tracked_cpus(void)
 			ioctl(leader_fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
 		}
 
-		pmu_cpu_ids[pmu_cpu_count] = cpu_id;
 		pmu_cpu_count++;
 	}
 

@@ -17,8 +17,8 @@ endif
 
 SRCS = armstat.c armstat_cli.c cpufreq.c cpuidle.c power.c pmu.c topology.c sysstat.c \
        collector.c cpu_inventory.c sample_cache.c \
-       idle_backend.c aggregator.c formatter.c formatter_record.c \
-       formatter_text.c formatter_machine.c power_sensor.c power_interval.c membw.c
+       idle_backend.c aggregator.c formatter_record.c \
+       formatter_text.c formatter_machine.c formatter_section.c power_sensor.c power_interval.c membw.c
 OBJS = $(SRCS:.c=.o)
 TEST_OBJS = $(filter-out armstat.o,$(OBJS))
 
@@ -44,6 +44,8 @@ clean :
 	@rm -f tests/test_core_logic
 	@rm -f tests/test_column_selection
 	@rm -f tests/test_runtime_smoke
+	@rm -f tests/test_cpu_inventory
+	@rm -f tests/test_section_policy
 
 .PHONY : debug
 debug :
@@ -71,10 +73,12 @@ uninstall :
 	rm -rf $(DESTDIR)$(PREFIX)/share/doc/armstat
 
 .PHONY : test
-test : armstat tests/test_core_logic tests/test_column_selection tests/test_runtime_smoke
+test : armstat tests/test_core_logic tests/test_column_selection tests/test_runtime_smoke tests/test_cpu_inventory tests/test_section_policy
 	./tests/test_core_logic
 	./tests/test_column_selection
 	./tests/test_runtime_smoke
+	./tests/test_cpu_inventory
+	./tests/test_section_policy
 	sh ./tests/test_cli_smoke.sh
 	python3 tests/test_plot_loaders.py
 
@@ -86,3 +90,9 @@ tests/test_column_selection : tests/test_column_selection.c $(TEST_OBJS)
 
 tests/test_runtime_smoke : tests/test_runtime_smoke.c $(TEST_OBJS)
 	$(CC) $(CFLAGS) tests/test_runtime_smoke.c $(TEST_OBJS) -o $@ $(LDFLAGS)
+
+tests/test_cpu_inventory : tests/test_cpu_inventory.c $(TEST_OBJS)
+	$(CC) $(CFLAGS) tests/test_cpu_inventory.c $(TEST_OBJS) -o $@ $(LDFLAGS)
+
+tests/test_section_policy : tests/test_section_policy.c $(TEST_OBJS)
+	$(CC) $(CFLAGS) tests/test_section_policy.c $(TEST_OBJS) -o $@ $(LDFLAGS)

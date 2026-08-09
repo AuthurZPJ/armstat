@@ -46,4 +46,13 @@ void apply_default_pmu_events(struct armstat_options *opts);
 void set_all_columns_enabled(int enable);
 void parse_column_option(const char *arg, int enable);
 
+/*
+ * Startup banner for text mode; suppressed for JSON/CSV or when -q/-D active.
+ * Implemented in armstat_cli.c.
+ */
+void print_interval_header(const struct armstat_options *opts, double interval);
+
+/* List available column groups and PMU events. Implemented in armstat_cli.c. */
+void list_counters(void);
+
 #endif /* ARMSTAT_CLI_H */

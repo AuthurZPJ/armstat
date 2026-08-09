@@ -19,13 +19,16 @@ and
 
 The current output model is:
 .IP \(bu 2
-default mode: per-package aggregation rows followed by per-CPU rows
+default mode: one row per tracked CPU (no summary or package rows)
+.IP \(bu 2
+\fB-a\fR mode: \fBSUM\fR row + per-package aggregation rows + per-CPU rows
 .IP \(bu 2
 summary mode (\fB-S\fR): one \fBSUM\fR row per interval
 .IP \(bu 2
 in text/JSON mode, explicitly enabling summary-scope groups (for example via
 \fB-a\fR or \fB-s sysstat,membw,energy\fR) prints a \fBSUM\fR section in
-addition to CPU rows
+addition to CPU rows; package aggregation rows appear only when the package
+group is also enabled (\fB-s pkg\fR or \fB-a\fR)
 
 .PP
 When \fB--cpu\fR is active, tracked-CPU-derived summary fields are based on the

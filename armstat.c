@@ -216,10 +216,8 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	}
 
 	if (opts->debug) fprintf(stderr, "Initializing formatter...\n");
-	if (init_formatter() < 0) {
-		fprintf(stderr, "Error: Failed to init formatter\n");
-		return -1;
-	}
+	update_idle_state_visibility();
+	update_temp_field_visibility();
 
 	/* Initialize PMU if requested */
 	if (opts->pmu_events) {
@@ -259,7 +257,7 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	}
 
 	/* Print interval header */
-	print_interval_header(opts->interval);
+	print_interval_header(opts, opts->interval);
 
 	/* Phase 1: Establish baseline */
 	collect_snapshot(snapshot);
@@ -307,6 +305,7 @@ static void run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot
 {
 	struct interval_stats stats;
 	struct timespec ts;
+	struct interval_record *rec;
 	int iteration = 1;
 
 	/* -D overrides -n: always dump exactly one interval */
@@ -341,8 +340,22 @@ static void run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot
 		/* Calculate interval statistics */
 		calculate_interval_stats(snapshot, &stats);
 
-		/* Output */
-		print_interval(snapshot, &stats, iteration);
+		/* Output — dispatch directly to the serializer for this format */
+		rec = build_interval_record(snapshot, &stats, iteration);
+		if (rec) {
+			switch (opts->format) {
+			case FORMAT_JSON:
+				serialize_json(rec, iteration);
+				break;
+			case FORMAT_CSV:
+				serialize_csv(rec);
+				break;
+			default:
+				serialize_text(rec, iteration);
+				break;
+			}
+			free_interval_record(rec);
+		}
 
 		/* Check exit condition */
 		if (opts->iterations > 0 && iteration >= opts->iterations)
@@ -353,8 +366,9 @@ static void run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot
 		iteration++;
 	}
 
-	/* Close output format (for JSON array) */
-	close_format(&stats);
+	/* Close output format (close the JSON array) */
+	if (opts->format == FORMAT_JSON)
+		close_machine_json();
 }
 
 /* ============================================================================
@@ -373,7 +387,7 @@ static void cleanup_modules(struct armstat_options *opts)
 	close_topology();
 	cleanup_collector();
 	cleanup_aggregator();
-	cleanup_formatter();
+	cleanup_formatter_pool();
 }
 
 /* ============================================================================

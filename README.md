@@ -35,9 +35,9 @@ time-series charts without manual data wrangling. See [EXPORTS.md](EXPORTS.md) a
 
 `armstat` currently uses a `SUM + CPU rows` model:
 
-- Default text mode prints one package-row per socket, then one row per tracked CPU
+- Default text mode prints one row per tracked CPU (no summary or package rows)
+- `-a` enables all supported base column groups and adds the package aggregation rows plus the `SUM` summary row on top of the per-CPU rows
 - `-S` prints a single `SUM` row per interval
-- `-a` enables all supported base column groups including per-package aggregation
 - JSON writes an array of interval objects
 - CSV writes either CPU rows or summary rows
 
@@ -210,7 +210,6 @@ collector.c            orchestrates one interval of collection
 sample_cache.c         memory pools + fast-path sampling
 idle_backend.c         busy-source policy helpers (/proc/stat vs /proc/schedstat)
 aggregator.c           delta/interval calculations
-formatter.c            output formatting facade
 formatter_record.c     interval_record builder and field table
 formatter_text.c       text output
 formatter_machine.c    JSON/CSV output
@@ -412,8 +411,9 @@ armstat -S -a
 `-S` enables summary-only output. `-a` enables all supported base column
 groups and intentionally does not auto-enable PMU/IPC.
 In text/JSON mode, using `-a` or explicitly selecting summary-scope groups via
-`-s` prints a `SUM` section in addition to package and CPU rows when system-scope
-or package-scope fields are enabled.
+`-s` prints a `SUM` section when system-scope fields are enabled. Package
+aggregation rows appear only when the package group is also enabled (`-s pkg` or
+`-a`).
 
 When `--cpu` filtering is active, this automatic mixed `SUM` section is
 suppressed to avoid surprising mixed-scope output. Use `-S --cpu ...` when you

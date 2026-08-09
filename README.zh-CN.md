@@ -38,9 +38,9 @@ MSR/RAPL/TSC 模型。
 
 `armstat` 当前使用 `SUM + CPU 行` 模型：
 
-- 默认 text 模式每个 socket 输出一行 package 聚合行，再输出每个 tracked CPU 一行
+- 默认 text 模式每个 tracked CPU 只输出一行（不打印汇总或 package 行）
+- `-a` 打开所有支持的基础列组，并在每核 CPU 行之上附加 package 聚合行和 `SUM` 汇总行
 - `-S` 每个 interval 只输出一行 `SUM`
-- `-a` 打开所有支持的基础列组，包括 per-package 聚合
 - JSON 输出 interval 对象数组
 - CSV 输出 CPU 行或 summary 行
 
@@ -187,7 +187,6 @@ collector.c            采样编排
 sample_cache.c         内存池与快路径采样
 idle_backend.c         busy-source 策略辅助（/proc/stat 与 /proc/schedstat）
 aggregator.c           区间统计与 delta 计算
-formatter.c            输出格式化 facade
 formatter_record.c     interval_record 构建与字段表
 formatter_text.c       文本输出
 formatter_machine.c    JSON/CSV 输出
@@ -375,7 +374,8 @@ armstat -S -a
 `-S` 表示只输出摘要行，`-a` 表示打开所有支持的基础列组，并且不会
 隐式启用 PMU/IPC。
 在 text/JSON 模式下，如果使用 `-a`，或者通过 `-s` 显式选择了
-summary 级列组，那么启用了 system 或 package 级字段时会额外打印 `SUM` 区域。
+summary 级列组，那么启用了 system 级字段时会额外打印 `SUM` 区域。
+package 聚合行只有在同时启用 package 列组（`-s pkg` 或 `-a`）时才会出现。
 
 当启用了 `--cpu` 过滤时，为避免“过滤后的 CPU 行”和“全系统 SUM”
 混在一起，默认不会再自动附加这个 `SUM` 区域；如果确实要只看摘要，

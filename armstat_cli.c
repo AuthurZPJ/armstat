@@ -21,6 +21,7 @@
 #include "collector.h"
 #include "aggregator.h"
 #include "formatter.h"
+#include "formatter_section.h"
 #include "pmu.h"
 #include "cpuidle.h"
 #include "idle_backend.h"
@@ -128,6 +129,45 @@ static void print_help(void)
 	printf("  ipc\n");
 	printf("  energy, joules\n");
 	printf("  all\n");
+}
+
+void list_counters(void)
+{
+	printf("Built-in column groups:\n");
+	printf("  cpu\n");
+	printf("  pkg, package\n");
+	printf("  core\n");
+	printf("  numa, node\n");
+	printf("  freq\n");
+	printf("  idle\n");
+	printf("  power\n");
+	printf("  temp\n");
+	printf("  pmu\n");
+	printf("  sysstat, irq\n");
+	printf("  membw, mem\n");
+	printf("  ipc\n");
+	printf("  energy, joules\n");
+	printf("  all\n");
+	printf("\n");
+	printf("Use lowercase names with -s/-H (e.g. -s cpu,freq,power).\n");
+	printf("Exact field names like Idle%%, Busy%%, LPI-0 are also accepted.\n");
+	printf("Built-in PMU events:\n");
+	list_builtin_pmu_events();
+}
+
+/*
+ * Print the startup banner for text mode. Suppressed for machine-readable
+ * formats and for -q / -D (quiet). Declared in armstat_cli.h.
+ */
+void print_interval_header(const struct armstat_options *opts, double interval)
+{
+	if (opts->format == FORMAT_JSON || opts->format == FORMAT_CSV)
+		return;
+	if (opts->quiet)
+		return;
+	printf("armstat - ARM Server Performance Monitor\n");
+	printf("Sampling interval: %.1f second(s)\n", interval);
+	printf("\n");
 }
 
 struct column_alias_group {
@@ -286,7 +326,7 @@ static int apply_show_option(const char *arg)
 	clear_columns();
 	unknown_column_count = 0;
 	parse_column_option(arg, 1);
-	set_default_summary_output(1);
+	set_section_default_summary_output(1);
 	if (unknown_column_count > 0)
 		return -1;
 	return 0;
@@ -329,7 +369,6 @@ static int apply_format_option(struct armstat_options *opts, const char *arg)
 		return -1;
 	}
 
-	set_format(opts->format);
 	return 0;
 }
 
@@ -482,25 +521,25 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			if (parse_non_negative_int_arg("--header-iterations", optarg,
 						       &opts->header_interval) < 0)
 				return -1;
-			set_header_interval(opts->header_interval);
+			set_text_header_interval(opts->header_interval);
 			break;
 		case 'q':
 			opts->quiet = 1;
-			set_quiet(1);
+			set_text_quiet(1);
 			break;
 		case 'D':
 			opts->dump_once = 1;
 			opts->quiet = 1;
-			set_quiet(1);
+			set_text_quiet(1);
 			break;
 		case 'S':
 			opts->summary_mode = 1;
-			set_summary_mode(1);
+			set_section_summary_mode(1);
 			break;
 		case 'a':
 			set_all_columns_enabled(1);
 			clear_field_overrides();
-			set_default_summary_output(1);
+			set_section_default_summary_output(1);
 			break;
 		case 'c':
 			opts->cpu_filter = optarg;

@@ -39,10 +39,8 @@ armstat.c (main loop + module lifecycle)
        -> idle_backend (policy helpers only)
        -> cpufreq / cpuidle / power / pmu / sysstat readers
   -> aggregator.c
-  -> formatter.c
-       -> formatter_record.c
-       -> formatter_text.c
-       -> formatter_machine.c
+  -> formatter_record.c (interval_record builder)
+  -> formatter_text.c / formatter_machine.c (serializers, dispatched by armstat.c)
 ```
 
 ### armstat.c and armstat_cli.c
@@ -170,7 +168,7 @@ Responsibilities:
 
 The aggregator must not do sysfs or procfs I/O.
 
-### formatter.c and submodules
+### Formatter output stack
 
 Responsibilities:
 
@@ -265,12 +263,22 @@ Contains:
 
 ### Intermediate record (`interval_record`)
 
+The record is fully materialized per interval: it owns every per-interval
+dynamic value, so serializers never dereference the raw snapshot or the
+interval stats after `build_interval_record()` returns.
+
 Contains:
 
 - interval metadata
-- summary row payload
-- filtered and sorted CPU row indices
-- pointers back to raw and aggregated data for lazy access
+- summary data (`summary_data`)
+- owned per-CPU rows (`cpu_rows`) with the freq snapshot, busy/idle/iowait, IPC,
+  per-idle-state residency and wakeups, per-CPU PMU counters, and CPU temperature
+- owned per-package aggregation rows (`packages`)
+- owned summary idle-state residency (`summary_idle_state_pct`) and NUMA
+  temperatures (`numa_temps`)
+
+Static identity fields (package, core, NUMA node) are still looked up lazily at
+output time from the topology caches via the tracked CPU id.
 
 This allows one field table to drive text/JSON/CSV consistently.
 
@@ -283,10 +291,18 @@ Current output scope is split into:
 
 Current text layout is:
 
-- default mode: per-package aggregation rows + CPU rows
+- default mode: per-CPU rows only
+- `-a` mode: `SUM` + per-package aggregation rows + CPU rows
 - summary mode: one SUM row only
 
-Package rows aggregate per-CPU MHz, Idle%, Busy%, and IOWait% by socket. Core-level aggregation is not yet implemented.
+In mixed-scope output (`-a`), each section keeps its own header line directly
+above its rows, with a blank line separating the SUM, Pkg, and CPU sections, so
+the three tables stay visually distinct instead of running together.
+
+Package rows aggregate per-CPU MHz, Idle%, Busy%, and IOWait% by socket. They are
+emitted only when the package column group is explicitly enabled (`-a` or
+`-s package`); the default output stays per-CPU only. Core-level aggregation is
+not yet implemented.
 
 Important summary semantics:
 

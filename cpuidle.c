@@ -102,16 +102,18 @@ static unsigned long long read_fd_ull(int fd)
 	return strtoull(buf, NULL, 10);
 }
 
-static int get_state_time_fd(int cpu, int state)
+static int get_state_time_fd(int tracked_idx, int state)
 {
 	char path[256];
+	char sub[64];
 	int idx;
 	int fd;
+	int cpu_id;
 
 	if (!state_time_fds)
 		return -1;
 
-	idx = state_fd_index(cpu, state);
+	idx = state_fd_index(tracked_idx, state);
 	fd = state_time_fds[idx];
 	if (fd >= 0)
 		return fd;
@@ -125,9 +127,13 @@ static int get_state_time_fd(int cpu, int state)
 	if (state_time_fd_open_count >= state_time_fd_cap)
 		return -1;
 
-	snprintf(path, sizeof(path),
-		 "/sys/devices/system/cpu/cpu%d/cpuidle/state%d/time",
-		 cpu, state);
+	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
+	if (cpu_id < 0)
+		return -1;
+
+	snprintf(sub, sizeof(sub), "cpuidle/state%d/time", state);
+	if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) < 0)
+		return -1;
 	fd = open(path, O_RDONLY);
 	if (fd >= 0) {
 		state_time_fds[idx] = fd;
@@ -216,25 +222,31 @@ static char *read_sysfs_file(const char *path, char *buf, size_t len)
 	return buf;
 }
 
-static void refresh_disable_bits_for_cpu(int cpu)
+static void refresh_disable_bits_for_cpu(int tracked_idx)
 {
 	char path[256];
+	char sub[64];
+	int cpu_id;
 
-	if (cpu < 0 || cpu >= get_cached_cpu_count() ||
+	if (tracked_idx < 0 ||
 	    !cpu_idle_state_counts || !cpu_idle_state_disabled)
 		return;
 
-	for (int state = 0; state < cpu_idle_state_counts[cpu]; state++) {
+	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
+	if (cpu_id < 0)
+		return;
+
+	for (int state = 0; state < cpu_idle_state_counts[tracked_idx]; state++) {
 		unsigned long long disable = 0;
 
-		snprintf(path, sizeof(path),
-			 "/sys/devices/system/cpu/cpu%d/cpuidle/state%d/disable",
-			 cpu, state);
+		snprintf(sub, sizeof(sub), "cpuidle/state%d/disable", state);
+		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) < 0)
+			continue;
 		if (read_sysfs_ull_checked(path, &disable) == 0)
-			cpu_idle_state_disabled[cpu * max_idle_states + state] =
+			cpu_idle_state_disabled[tracked_idx * max_idle_states + state] =
 				disable ? 1 : 0;
 		else
-			cpu_idle_state_disabled[cpu * max_idle_states + state] = 0;
+			cpu_idle_state_disabled[tracked_idx * max_idle_states + state] = 0;
 	}
 }
 
@@ -245,8 +257,8 @@ int get_idle_state_count(int cpu)
 	char path[256];
 	int count = 0;
 
-	snprintf(path, sizeof(path),
-		 "/sys/devices/system/cpu/cpu%d/cpuidle", cpu);
+	if (cpu < 0 || cpu_sysfs_path(cpu, "cpuidle", path, sizeof(path)) < 0)
+		return -1;
 
 	dir = opendir(path);
 	if (!dir)
@@ -305,8 +317,8 @@ static int get_cached_cpu_count(void)
 {
 	if (cached_cpu_count > 0)
 		return cached_cpu_count;
-	/* Fallback to system count if not set */
-	cached_cpu_count = get_cpu_id_array_size();
+	/* Fallback to the dense tracked count if not set */
+	cached_cpu_count = get_tracked_cpu_count();
 	return cached_cpu_count > 0 ? cached_cpu_count : 1;
 }
 
@@ -319,16 +331,25 @@ struct idle_state **get_idle_states_array(void)
 	return idle_states;
 }
 
-static int read_idle_state(int cpu, int state, struct idle_state *info)
+static int read_idle_state(int tracked_idx, int state, struct idle_state *info)
 {
 	char path[256];
+	char sub[64];
 	int fd;
+	int cpu_id;
 
 	memset(info, 0, sizeof(*info));
 
-	if (cpu < 0 || cpu >= get_cached_cpu_count() || state < 0 ||
+	if (tracked_idx < 0 || state < 0 ||
 	    !cpu_idle_state_counts ||
-	    state >= cpu_idle_state_counts[cpu]) {
+	    state >= cpu_idle_state_counts[tracked_idx]) {
+		info->available = 0;
+		info->disabled = 0;
+		return -1;
+	}
+
+	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
+	if (cpu_id < 0) {
 		info->available = 0;
 		info->disabled = 0;
 		return -1;
@@ -346,27 +367,24 @@ static int read_idle_state(int cpu, int state, struct idle_state *info)
 	}
 
 	/* DYNAMIC LAYER: Read time and usage every interval */
-	fd = get_state_time_fd(cpu, state);
+	fd = get_state_time_fd(tracked_idx, state);
 	if (fd >= 0) {
 		info->time = read_fd_ull(fd);
 		/* usage is in a separate file; read it the slow way */
-		snprintf(path, sizeof(path),
-			 "/sys/devices/system/cpu/cpu%d/cpuidle/state%d/usage",
-			 cpu, state);
-		info->usage = read_sysfs_ull(path);
+		snprintf(sub, sizeof(sub), "cpuidle/state%d/usage", state);
+		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0)
+			info->usage = read_sysfs_ull(path);
 	} else {
-		snprintf(path, sizeof(path),
-			 "/sys/devices/system/cpu/cpu%d/cpuidle/state%d/time",
-			 cpu, state);
-		info->time = read_sysfs_ull(path);
-		snprintf(path, sizeof(path),
-			 "/sys/devices/system/cpu/cpu%d/cpuidle/state%d/usage",
-			 cpu, state);
-		info->usage = read_sysfs_ull(path);
+		snprintf(sub, sizeof(sub), "cpuidle/state%d/time", state);
+		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0)
+			info->time = read_sysfs_ull(path);
+		snprintf(sub, sizeof(sub), "cpuidle/state%d/usage", state);
+		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0)
+			info->usage = read_sysfs_ull(path);
 	}
 
 	if (cpu_idle_state_disabled)
-		info->disabled = cpu_idle_state_disabled[cpu * max_idle_states + state];
+		info->disabled = cpu_idle_state_disabled[tracked_idx * max_idle_states + state];
 	else
 		info->disabled = 0;
 
@@ -431,15 +449,18 @@ int init_cpuidle(void)
 	if (cpuidle_initialized)
 		return 0;
 
-	/* Cache CPU-ID array size once at init - avoid repeated probes. */
-	total_cpus = get_cpu_id_array_size();
+	/*
+	 * Arrays are dense, sized by the tracked CPU count — not the sparse
+	 * real-ID space. effective_cpu_count is the tracked count set by the
+	 * collector before runtime init; trust it as the allocation size.
+	 */
+	total_cpus = get_tracked_cpu_count();
 	if (total_cpus <= 0)
 		return -1;
 	cached_cpu_count = total_cpus;
-	if (effective_cpu_count <= 0)
-		effective_cpu_count = total_cpus;
+	effective_cpu_count = total_cpus;
 
-	tracked = effective_cpu_count > 0 ? effective_cpu_count : total_cpus;
+	tracked = total_cpus;
 	state_count = 0;
 	for (int tracked_idx = 0; tracked_idx < tracked; tracked_idx++) {
 		int cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
@@ -492,8 +513,12 @@ int init_cpuidle(void)
 		cleanup_cpuidle_runtime_allocations(total_cpus);
 		return -1;
 	}
-	for (cpu = 0; cpu < total_cpus; cpu++)
-		cpu_idle_state_counts[cpu] = get_idle_state_count(cpu);
+	for (cpu = 0; cpu < total_cpus; cpu++) {
+		int cpu_id = get_cpu_id_by_tracked_idx(cpu);
+
+		cpu_idle_state_counts[cpu] = (cpu_id >= 0) ?
+					     get_idle_state_count(cpu_id) : 0;
+	}
 
 	state_time_fds = malloc(total_cpus * max_idle_states * sizeof(int));
 	if (!state_time_fds) {
@@ -577,27 +602,25 @@ void update_idle_states(unsigned long long elapsed_us)
 	unsigned long long total_time = 0;
 	int tracked = effective_cpu_count > 0 ? effective_cpu_count : get_cached_cpu_count();
 
-	/* Read only tracked CPUs and index internal arrays by real CPU ID. */
+	/* Read only tracked CPUs; arrays are dense by tracked index. */
 	for (int tracked_idx = 0; tracked_idx < tracked; tracked_idx++) {
-		int cpu = get_cpu_id_by_tracked_idx(tracked_idx);
 		int state;
 
-		if (cpu < 0 || cpu >= get_cached_cpu_count() || !idle_states[cpu])
+		if (!idle_states[tracked_idx])
 			continue;
 
 		for (state = 0; state < max_idle_states; state++) {
-			read_idle_state(cpu, state, &idle_states[cpu][state]);
-			total_time += idle_states[cpu][state].time;
+			read_idle_state(tracked_idx, state, &idle_states[tracked_idx][state]);
+			total_time += idle_states[tracked_idx][state].time;
 		}
 	}
 
 	/* Calculate interval deltas and per-state residency percentages. */
 	if (prev_total_time > 0) {
 		for (int tracked_idx = 0; tracked_idx < tracked; tracked_idx++) {
-			int cpu = get_cpu_id_by_tracked_idx(tracked_idx);
 			int state;
 
-			if (cpu < 0 || cpu >= get_cached_cpu_count() || !idle_states[cpu])
+			if (!idle_states[tracked_idx])
 				continue;
 
 			/*
@@ -610,10 +633,10 @@ void update_idle_states(unsigned long long elapsed_us)
 			for (state = 0; state < max_idle_states; state++) {
 				unsigned long long state_delta = 0;
 
-				if (idle_states[cpu][state].time >
-				    prev_state_times[cpu * max_idle_states + state]) {
-					state_delta = idle_states[cpu][state].time -
-						prev_state_times[cpu * max_idle_states + state];
+				if (idle_states[tracked_idx][state].time >
+				    prev_state_times[tracked_idx * max_idle_states + state]) {
+					state_delta = idle_states[tracked_idx][state].time -
+						prev_state_times[tracked_idx * max_idle_states + state];
 				}
 
 				if (elapsed_us > 0) {
@@ -623,23 +646,23 @@ void update_idle_states(unsigned long long elapsed_us)
 						pct = 0.0;
 					if (pct > 100.0)
 						pct = 100.0;
-					idle_states[cpu][state].percentage = pct;
+					idle_states[tracked_idx][state].percentage = pct;
 				} else {
-					idle_states[cpu][state].percentage = 0.0;
+					idle_states[tracked_idx][state].percentage = 0.0;
 				}
 
 				/* Wakeups per second = usage_delta / interval_seconds */
-				if (idle_states[cpu][state].usage >
-				    prev_state_usages[cpu * max_idle_states + state] &&
+				if (idle_states[tracked_idx][state].usage >
+				    prev_state_usages[tracked_idx * max_idle_states + state] &&
 				    elapsed_us > 0) {
 					unsigned long long usage_delta =
-						idle_states[cpu][state].usage -
-						prev_state_usages[cpu * max_idle_states + state];
+						idle_states[tracked_idx][state].usage -
+						prev_state_usages[tracked_idx * max_idle_states + state];
 					double interval_s = (double)elapsed_us / 1000000.0;
-					idle_states[cpu][state].wakeups_per_sec =
+					idle_states[tracked_idx][state].wakeups_per_sec =
 						(double)usage_delta / interval_s;
 				} else {
-					idle_states[cpu][state].wakeups_per_sec = 0.0;
+					idle_states[tracked_idx][state].wakeups_per_sec = 0.0;
 				}
 			}
 		}
@@ -648,17 +671,16 @@ void update_idle_states(unsigned long long elapsed_us)
 	/* Store current values for next iteration */
 	prev_total_time = total_time;
 	for (int tracked_idx = 0; tracked_idx < tracked; tracked_idx++) {
-		int cpu = get_cpu_id_by_tracked_idx(tracked_idx);
 		int state;
 
-		if (cpu < 0 || cpu >= get_cached_cpu_count() || !idle_states[cpu])
+		if (!idle_states[tracked_idx])
 			continue;
 
 		for (state = 0; state < max_idle_states; state++) {
-			prev_state_times[cpu * max_idle_states + state] =
-				idle_states[cpu][state].time;
-			prev_state_usages[cpu * max_idle_states + state] =
-				idle_states[cpu][state].usage;
+			prev_state_times[tracked_idx * max_idle_states + state] =
+				idle_states[tracked_idx][state].time;
+			prev_state_usages[tracked_idx * max_idle_states + state] =
+				idle_states[tracked_idx][state].usage;
 		}
 	}
 
@@ -681,10 +703,8 @@ void refresh_idle_state_disable_cache_budgeted(int tracked_cpu_budget)
 
 	for (int refreshed = 0; refreshed < tracked_cpu_budget; refreshed++) {
 		int tracked_idx = disable_refresh_cursor % tracked;
-		int cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
 
-		if (cpu_id >= 0)
-			refresh_disable_bits_for_cpu(cpu_id);
+		refresh_disable_bits_for_cpu(tracked_idx);
 
 		disable_refresh_cursor = (disable_refresh_cursor + 1) % tracked;
 	}

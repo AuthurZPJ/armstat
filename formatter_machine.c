@@ -13,6 +13,7 @@
 #include <math.h>
 
 #include "formatter.h"
+#include "formatter_section.h"
 #include "aggregator.h"
 #include "pmu.h"
 #include "topology.h"
@@ -21,51 +22,8 @@
 #define MACHINE_SCHEMA_VERSION 4
 
 /* Machine formatter state */
-static int summary_mode = 0;
 static int json_first_interval = 1;
 static int csv_header_printed = 0;
-static int default_summary_output = 0;
-
-static int should_emit_package_section(void)
-{
-	/*
-	 * Package rows aggregate across all CPUs in a package, which conflicts
-	 * with explicit CPU filtering. When --cpu is active, suppress package
-	 * rows just like we suppress the automatic SUM section.
-	 */
-	if (cpu_inventory_filter_is_active())
-		return 0;
-	return any_fields_enabled(FIELD_SCOPE_PACKAGE);
-}
-
-static int should_emit_cpu_section(void)
-{
-	return show_cpu || show_pmu || any_fields_enabled(FIELD_SCOPE_CPU);
-}
-
-/*
- * CSV per-CPU rows need a stable row key, just like text and JSON.
- * Keep the CPU column whenever we emit per-CPU rows so the output remains
- * self-describing even if the user hid the cpu group.
- */
-static int should_emit_cpu_identity(void)
-{
-	return should_emit_cpu_section();
-}
-
-static int should_emit_default_summary_section(void)
-{
-	return default_summary_output &&
-	       any_fields_enabled(FIELD_SCOPE_SYSTEM) &&
-	       !cpu_inventory_filter_is_active();
-}
-
-static int should_emit_mixed_csv_section(void)
-{
-	return !summary_mode &&
-	       should_emit_cpu_section() &&
-	       should_emit_default_summary_section();
-}
 
 /* ============================================================================
  * SECTION 1: MACHINE OUTPUT HELPERS
@@ -248,7 +206,7 @@ static void print_pmu_json_cpu_object(const struct interval_record *rec, int cpu
 {
 	int pmu_count = rec->pmu_event_count;
 
-	if (pmu_count <= 0 || !rec->stats || !pmu_is_active()) {
+	if (pmu_count <= 0 || !pmu_is_active()) {
 		printf("null");
 		return;
 	}
@@ -258,7 +216,7 @@ static void print_pmu_json_cpu_object(const struct interval_record *rec, int cpu
 		const char *name = get_pmu_event_name(i);
 		printf("%s", i ? ", " : "");
 		print_json_escaped_string(name ? name : "event");
-		printf(": %llu", rec->stats->per_cpu_pmu[cpu_idx][i]);
+		printf(": %llu", rec->cpu_rows[cpu_idx].pmu[i]);
 	}
 	printf("}");
 }
@@ -293,10 +251,10 @@ static void print_prefixed_pmu_csv_headers(const char *scope_prefix)
 static void print_pmu_csv_cpu_values(const struct interval_record *rec, int cpu_idx)
 {
 	for (int i = 0; i < rec->pmu_event_count; i++) {
-		if (!rec->stats || !pmu_is_active())
+		if (!pmu_is_active())
 			printf(",");
 		else
-			printf(",%llu", rec->stats->per_cpu_pmu[cpu_idx][i]);
+			printf(",%llu", rec->cpu_rows[cpu_idx].pmu[i]);
 	}
 }
 
@@ -368,11 +326,11 @@ void serialize_json(const struct interval_record *rec, int iteration)
 {
 	struct field_desc *cpu_fields[64];
 	struct field_desc *system_fields[64];
-	int emit_cpu_section = !summary_mode && should_emit_cpu_section();
-	int emit_summary_section = summary_mode || should_emit_default_summary_section();
-	int emit_package_section = !summary_mode &&
-				   should_emit_package_section() &&
-				   rec->stats && rec->stats->package_count > 0;
+	int emit_cpu_section = !section_is_summary_mode() && section_emit_cpu();
+	int emit_summary_section = section_is_summary_mode() || section_emit_default_summary();
+	int emit_package_section = !section_is_summary_mode() &&
+				   section_emit_package() &&
+				   rec->package_count > 0;
 	int cpu_field_count = 0;
 	int system_field_count = 0;
 	char ts_iso[64];
@@ -407,13 +365,13 @@ void serialize_json(const struct interval_record *rec, int iteration)
 		/* Package array - in default mode */
 		if (emit_package_section) {
 			printf("    \"packages\": [\n");
-			for (int pkg = 0; pkg < rec->stats->package_count; pkg++) {
-				int package_id = rec->stats->packages[pkg].package_id;
+			for (int pkg = 0; pkg < rec->package_count; pkg++) {
+				int package_id = rec->packages[pkg].package_id;
 
 				printf("      {\"package\": %d", package_id);
 				for (int j = 0; j < pkg_field_count; j++)
 					print_json_inline_field(pkg_fields[j], rec, pkg);
-				printf("}%s\n", (pkg < rec->stats->package_count - 1) ? "," : "");
+				printf("}%s\n", (pkg < rec->package_count - 1) ? "," : "");
 		}
 		printf("    ]%s\n", emit_cpu_section || emit_summary_section ? "," : "");
 	}
@@ -489,9 +447,9 @@ static void serialize_csv_header(void)
 	struct field_desc *cpu_fields[64];
 	int system_count;
 	int cpu_count;
-	int cpu_section = should_emit_cpu_section();
+	int cpu_section = section_emit_cpu();
 	int system_section = any_fields_enabled(FIELD_SCOPE_SYSTEM);
-	int mixed_scope = should_emit_mixed_csv_section();
+	int mixed_scope = section_emit_mixed_csv();
 
 	if (mixed_scope) {
 		get_enabled_fields(FIELD_SCOPE_SYSTEM, system_fields, &system_count);
@@ -516,7 +474,7 @@ static void serialize_csv_header(void)
 	}
 
 	/* In summary mode, or when only system fields remain, use system fields */
-	enum field_scope scope = (summary_mode || (!cpu_section && system_section)) ?
+	enum field_scope scope = (section_is_summary_mode() || (!cpu_section && system_section)) ?
 		FIELD_SCOPE_SYSTEM : FIELD_SCOPE_CPU;
 	get_enabled_fields(scope, scope == FIELD_SCOPE_SYSTEM ? system_fields : cpu_fields,
 			   scope == FIELD_SCOPE_SYSTEM ? &system_count : &cpu_count);
@@ -533,7 +491,7 @@ static void serialize_csv_header(void)
 			print_csv_cell(system_fields[i]->label);
 			first = 0;
 		}
-	} else if (should_emit_cpu_identity()) {
+	} else if (section_emit_cpu_identity()) {
 		printf("CPU");
 		first = 0;
 		for (int i = 0; i < cpu_count; i++) {
@@ -561,7 +519,7 @@ static void serialize_csv_row(const struct interval_record *rec, int row_idx)
 	print_csv_metadata_prefix(rec);
 
 	int first = 1;
-	if (should_emit_cpu_identity()) {
+	if (section_emit_cpu_identity()) {
 		printf("%d", cpu_id);
 		first = 0;
 	}
@@ -675,9 +633,9 @@ static void serialize_csv_mixed_summary_row(const struct interval_record *rec,
 
 void serialize_csv(const struct interval_record *rec)
 {
-	int cpu_section = should_emit_cpu_section();
+	int cpu_section = section_emit_cpu();
 	int system_section = any_fields_enabled(FIELD_SCOPE_SYSTEM);
-	int mixed_scope = should_emit_mixed_csv_section();
+	int mixed_scope = section_emit_mixed_csv();
 
 	/* Print header once */
 	if (!csv_header_printed) {
@@ -702,7 +660,7 @@ void serialize_csv(const struct interval_record *rec)
 	}
 
 	/* Print summary row in summary mode, otherwise per-CPU rows */
-	if (summary_mode || (!cpu_section && system_section)) {
+	if (section_is_summary_mode() || (!cpu_section && system_section)) {
 		serialize_csv_summary_row(rec);
 	} else if (cpu_section) {
 		for (int i = 0; i < rec->cpu_row_count; i++) {
@@ -724,16 +682,6 @@ void set_machine_quiet(int quiet)
 	 * currently do not use a separate quiet-mode concept.
 	 */
 	(void)quiet;
-}
-
-void set_machine_summary_mode(int summary)
-{
-	summary_mode = summary;
-}
-
-void set_machine_default_summary_output(int enable)
-{
-	default_summary_output = enable;
 }
 
 void reset_machine_state(void)

@@ -13,6 +13,7 @@
 #include <math.h>
 
 #include "formatter.h"
+#include "formatter_section.h"
 #include "aggregator.h"
 #include "pmu.h"
 #include "topology.h"
@@ -20,9 +21,7 @@
 
 /* Text formatter state */
 static int quiet_mode = 0;
-static int summary_mode = 0;
 static int header_interval = 0;
-static int default_summary_output = 0;
 
 #define TEXT_COLUMN_GAP 2
 #define TEXT_ROW_KEY_WIDTH 5
@@ -37,9 +36,6 @@ struct text_layout {
 	int pmu_widths[MAX_PMU_EVENTS];
 	int pmu_count;
 };
-
-/* Forward declarations */
-static int should_emit_cpu_section(void);
 
 /* ============================================================================
  * SECTION 1: TEXT OUTPUT HELPERS
@@ -167,6 +163,24 @@ static void build_text_layout(struct text_layout *layout,
 	memset(layout, 0, sizeof(*layout));
 	get_enabled_fields(scope, layout->fields, &layout->count);
 
+	/*
+	 * The package row key already renders the package id as "Pkg<N>", so a
+	 * separate pkg_id column would be redundant in text output. The field
+	 * stays in the table so JSON can still expose the distinct
+	 * "package_id" key.
+	 */
+	if (scope == FIELD_SCOPE_PACKAGE) {
+		for (int i = 0; i < layout->count; i++) {
+			if (layout->fields[i]->id &&
+			    strcmp(layout->fields[i]->id, "pkg_id") == 0) {
+				for (int j = i; j < layout->count - 1; j++)
+					layout->fields[j] = layout->fields[j + 1];
+				layout->count--;
+				break;
+			}
+		}
+	}
+
 	for (int i = 0; i < layout->count; i++) {
 		int width = 0;
 
@@ -179,7 +193,7 @@ static void build_text_layout(struct text_layout *layout,
 				if (label_len > width)
 					width = label_len;
 			}
-			for (int pkg = 0; pkg < rec->stats->package_count; pkg++) {
+			for (int pkg = 0; pkg < rec->package_count; pkg++) {
 				int c = measure_text_field_width(layout->fields[i], rec, pkg);
 				if (c > width)
 					width = c;
@@ -222,12 +236,12 @@ static void build_text_layout(struct text_layout *layout,
 
 			for (int row_idx = 0; row_idx < rec->cpu_row_count; row_idx++) {
 				unsigned long long value = 0;
-				int available = rec && rec->stats && pmu_is_active();
+				int available = rec && pmu_is_active();
 				int cpu_idx = rec->cpu_rows[row_idx].cpu_idx;
 				int candidate;
 
 				if (available)
-					value = rec->stats->per_cpu_pmu[cpu_idx][i];
+					value = rec->cpu_rows[cpu_idx].pmu[i];
 				candidate = measure_text_pmu_width(name, value, available);
 				if (candidate > width)
 					width = candidate;
@@ -284,46 +298,12 @@ static void print_text_cpu_pmu(const struct interval_record *rec,
 {
 	for (int i = 0; i < rec->pmu_event_count; i++) {
 		print_text_separator();
-		if (!rec->stats || !pmu_is_active())
+		if (!pmu_is_active())
 			printf("%*s", layout->pmu_widths[i], "-");
 		else
 			printf("%*llu", layout->pmu_widths[i],
-			       rec->stats->per_cpu_pmu[cpu_idx][i]);
+			       rec->cpu_rows[cpu_idx].pmu[i]);
 	}
-}
-
-static int should_emit_cpu_section(void)
-{
-	return show_cpu || show_pmu || any_fields_enabled(FIELD_SCOPE_CPU);
-}
-
-/*
- * Per-CPU rows are only useful when the row key is visible.
- * Keep the CPU identity column for every per-CPU text table, even if the
- * user hid the "cpu" group, so rows remain interpretable.
- */
-static int should_emit_cpu_identity(void)
-{
-	return should_emit_cpu_section();
-}
-
-static int should_emit_package_section(void)
-{
-	/*
-	 * Package rows aggregate across all CPUs in a package, which conflicts
-	 * with explicit CPU filtering. When --cpu is active, suppress package
-	 * rows just like we suppress the automatic SUM section.
-	 */
-	if (cpu_inventory_filter_is_active())
-		return 0;
-	return any_fields_enabled(FIELD_SCOPE_PACKAGE);
-}
-
-static int should_emit_default_summary_section(void)
-{
-	return default_summary_output &&
-	       any_fields_enabled(FIELD_SCOPE_SYSTEM) &&
-	       !cpu_inventory_filter_is_active();
 }
 
 /* ============================================================================
@@ -347,7 +327,7 @@ static void serialize_text_package_row(const struct interval_record *rec,
 					   const struct text_layout *layout)
 {
 	char key[16];
-	int package_id = rec->stats->packages[pkg_idx].package_id;
+	int package_id = rec->packages[pkg_idx].package_id;
 
 	snprintf(key, sizeof(key), "Pkg%d", package_id);
 	printf("%-*s", TEXT_ROW_KEY_WIDTH, key);
@@ -381,7 +361,7 @@ static void serialize_text_cpu_header(const struct text_layout *layout)
 	    !show_cpu && !show_pmu)
 			return;
 
-	printf("%-*s", TEXT_ROW_KEY_WIDTH, should_emit_cpu_identity() ? "CPU" : "");
+	printf("%-*s", TEXT_ROW_KEY_WIDTH, section_emit_cpu_identity() ? "CPU" : "");
 	for (int i = 0; i < layout->count; i++) {
 		print_text_separator();
 		printf("%*s", layout->widths[i], layout->fields[i]->label);
@@ -424,7 +404,7 @@ static void serialize_text_cpu_row(const struct interval_record *rec,
 	int cpu_id = get_cpu_id_by_tracked_idx(cpu_idx);
 
 	/* CPU column */
-	if (should_emit_cpu_identity())
+	if (section_emit_cpu_identity())
 		printf("%-*d", TEXT_ROW_KEY_WIDTH, cpu_id);
 	else
 		printf("%-*s", TEXT_ROW_KEY_WIDTH, "");
@@ -449,6 +429,11 @@ static void serialize_text_cpu_row(const struct interval_record *rec,
 void serialize_text(const struct interval_record *rec, int iteration)
 {
 	int print_header;
+	int emit_summary;
+	int emit_package;
+	int emit_cpu;
+	int section_count;
+	int section_index;
 	struct text_layout summary_layout;
 	struct text_layout package_layout;
 	struct text_layout cpu_layout;
@@ -459,9 +444,9 @@ void serialize_text(const struct interval_record *rec, int iteration)
 
 	if (any_fields_enabled(FIELD_SCOPE_SYSTEM))
 		build_text_layout(&summary_layout, FIELD_SCOPE_SYSTEM, rec);
-	if (should_emit_package_section())
+	if (section_emit_package())
 		build_text_layout(&package_layout, FIELD_SCOPE_PACKAGE, rec);
-	if (should_emit_cpu_section())
+	if (section_emit_cpu())
 		build_text_layout(&cpu_layout, FIELD_SCOPE_CPU, rec);
 
 	print_header = (!quiet_mode && iteration == 1);
@@ -469,34 +454,49 @@ void serialize_text(const struct interval_record *rec, int iteration)
 	    iteration > 1 && iteration % header_interval == 0)
 		print_header = 1;
 
-	if (print_header) {
-		if (summary_mode || should_emit_default_summary_section())
+	if (section_is_summary_mode()) {
+		/* Summary-only mode: one SUM block. */
+		if (print_header)
 			serialize_text_summary_header(&summary_layout);
-		if (!summary_mode && should_emit_package_section())
-			serialize_text_package_header(&package_layout);
-		if (!summary_mode && should_emit_cpu_section())
-			serialize_text_cpu_header(&cpu_layout);
-	}
-
-	/* Print SUM row only in summary mode */
-	if (summary_mode) {
 		serialize_text_summary_row(rec, &summary_layout);
 	} else {
-		if (should_emit_default_summary_section())
-			serialize_text_summary_row(rec, &summary_layout);
+		/*
+		 * Mixed scope: keep each section self-contained so the SUM, Pkg,
+		 * and CPU headers stay attached to their own rows instead of
+		 * running together as one merged table. Sections are separated by
+		 * a blank line.
+		 */
+		emit_summary = section_emit_default_summary();
+		emit_package = section_emit_package();
+		emit_cpu = section_emit_cpu();
+		section_count = emit_summary + emit_package + emit_cpu;
+		section_index = 0;
 
-		/* Print per-package rows */
-		if (should_emit_package_section()) {
-			for (int pkg = 0; pkg < rec->stats->package_count; pkg++) {
-				serialize_text_package_row(rec, pkg, &package_layout);
-			}
+		if (emit_summary) {
+			section_index++;
+			if (print_header)
+				serialize_text_summary_header(&summary_layout);
+			serialize_text_summary_row(rec, &summary_layout);
+			if (section_index < section_count)
+				printf("\n");
 		}
 
-		/* Print per-CPU rows (default mode) */
-		if (should_emit_cpu_section()) {
-			for (int i = 0; i < rec->cpu_row_count; i++) {
+		if (emit_package) {
+			section_index++;
+			if (print_header)
+				serialize_text_package_header(&package_layout);
+			for (int pkg = 0; pkg < rec->package_count; pkg++)
+				serialize_text_package_row(rec, pkg, &package_layout);
+			if (section_index < section_count)
+				printf("\n");
+		}
+
+		if (emit_cpu) {
+			section_index++;
+			if (print_header)
+				serialize_text_cpu_header(&cpu_layout);
+			for (int i = 0; i < rec->cpu_row_count; i++)
 				serialize_text_cpu_row(rec, i, &cpu_layout);
-			}
 		}
 	}
 
@@ -512,17 +512,7 @@ void set_text_quiet(int quiet)
 	quiet_mode = quiet;
 }
 
-void set_text_summary_mode(int summary)
-{
-	summary_mode = summary;
-}
-
 void set_text_header_interval(int interval)
 {
 	header_interval = interval;
-}
-
-void set_text_default_summary_output(int enable)
-{
-	default_summary_output = enable;
 }

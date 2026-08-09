@@ -27,36 +27,25 @@ struct cpu_desc {
 };
 
 /*
- * cpu_catalog - Centralized CPU information store.
- * Used directly by topology and indirectly by the collector wrappers below.
+ * cpu_inventory_seed - Install a fixed CPU set, used by host unit tests that
+ * must not touch /sys. Replaces the internal catalog/inventory wholesale; the
+ * tracked set is re-derived from the present/online flags and any active
+ * --cpu filter, so the catalog and inventory stay consistent.
+ *
+ * @cpus:  array of CPU descriptors to install
+ * @count: number of entries in @cpus (0 < count <= MAX_CPUS)
+ * Returns: 0 on success, -1 on invalid input.
  */
-struct cpu_catalog {
-	struct cpu_desc cpus[MAX_CPUS];
-
-	int present_count;       /* Total present CPUs */
-	int online_count;        /* Total online CPUs */
-	int tracked_count;       /* Online CPUs limited by MAX_CPUS */
+struct cpu_inventory_seed {
+	int cpu_id;
+	int present;
+	int online;
+	int package_id;
+	int core_id;
+	int numa_node;
 };
 
-/*
- * CPU Inventory - maintains actual online CPU list
- * Handles CPU ID mapping: tracked_idx <-> real cpu_id
- */
-struct cpu_inventory {
-	int present_count;        /* All CPUs that exist */
-	int online_count;        /* Currently online CPUs */
-	int tracked_count;       /* Effective CPUs being tracked (limited by MAX_CPUS) */
-
-	int present_cpus[MAX_PRESENT_CPUS];   /* List of present CPU IDs */
-	int online_cpus[MAX_PRESENT_CPUS];    /* List of online CPU IDs */
-	int tracked_cpus[MAX_PRESENT_CPUS];   /* List of tracked (effective) CPU IDs */
-
-	unsigned int generation;  /* Incremented when CPU state changes */
-};
-
-/* Global instance - exposed for collector */
-extern struct cpu_inventory cpu_inv;
-extern struct cpu_catalog cpu_catalog;
+int cpu_inventory_seed(const struct cpu_inventory_seed *cpus, int count);
 
 /*
  * Initialize CPU inventory
@@ -98,13 +87,33 @@ int get_cpu_id_by_tracked_idx(int tracked_idx);
 int get_tracked_cpu_count(void);
 
 /*
- * Get CPU-ID indexed array size.
+ * Iterate over every tracked CPU, in tracked order.
  *
- * Returns the highest present CPU ID plus one, not the number of present
- * CPUs. This keeps sparse CPU IDs and hotplug-created holes safe when a
- * caller indexes arrays by real Linux CPU ID.
+ * @idx:  int variable receiving the dense tracked index (0..tracked_count-1)
+ * @desc: struct cpu_desc * variable receiving each tracked CPU's descriptor
+ *
+ * The catalog must not be rebuilt during iteration. This is the one place
+ * consumers should walk the tracked set — it hides the tracked_idx/cpu_id
+ * translation and the bounds check.
  */
-int get_cpu_id_array_size(void);
+#define for_each_tracked_cpu(idx, desc)						\
+	for ((idx) = 0, (desc) = cpu_catalog_get_by_tracked_idx((idx));	\
+	     (desc) != NULL;							\
+	     (idx)++, (desc) = cpu_catalog_get_by_tracked_idx((idx)))
+
+/*
+ * Build a sysfs path under /sys/devices/system/cpu/cpu<id>/.
+ *
+ * @cpu_id:  real Linux CPU ID
+ * @subpath: path relative to the cpu directory, e.g. "cpufreq/scaling_cur_freq"
+ *           or "cpuidle/state0/time" (state index formatted by the caller)
+ * @buf / @buflen: output buffer
+ * Returns: 0 on success, -1 if the result would be truncated.
+ *
+ * The real CPU ID appears in sysfs directory names; keeping that knowledge in
+ * one place means consumers can pass a cpu_id without owning the mapping.
+ */
+int cpu_sysfs_path(int cpu_id, const char *subpath, char *buf, size_t buflen);
 
 /*
  * Check if CPU inventory changed and rebuild if needed

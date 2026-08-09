@@ -32,9 +32,8 @@ armstat_cli.c (CLI parsing, column selection)
       → idle_backend.c (busy-source policy: /proc/stat vs /proc/schedstat)
       → cpufreq.c / cpuidle.c / power_sensor.c / power_interval.c / pmu.c / membw.c / sysstat.c / topology.c
     → aggregator.c (interval deltas, percentages — no I/O)
-    → formatter.c (output facade)
-      → formatter_record.c (builds stable interval_record)
-      → formatter_text.c / formatter_machine.c (serializers)
+    → formatter_record.c (builds stable interval_record)
+    → formatter_text.c / formatter_machine.c (serializers, dispatched by armstat.c)
 ```
 
 ### Three Sampling Layers

@@ -19,8 +19,38 @@
 
 #include "cpu_inventory.h"
 
-struct cpu_catalog cpu_catalog;
-struct cpu_inventory cpu_inv;
+/*
+ * cpu_catalog - Centralized CPU information store (private; access via the
+ * cpu_catalog_* accessors). Holds the per-CPU descriptors plus aggregate
+ * present/online/tracked counts.
+ */
+struct cpu_catalog {
+	struct cpu_desc cpus[MAX_CPUS];
+
+	int present_count;       /* Total present CPUs */
+	int online_count;        /* Total online CPUs */
+	int tracked_count;       /* Online CPUs limited by MAX_CPUS */
+};
+
+/*
+ * cpu_inventory - Dense CPU ID lists (private; access via get_cpu_id_by_tracked_idx
+ * and the for_each_tracked_cpu view). Kept in sync with cpu_catalog by
+ * inventory_build().
+ */
+struct cpu_inventory {
+	int present_count;        /* All CPUs that exist */
+	int online_count;        /* Currently online CPUs */
+	int tracked_count;       /* Effective CPUs being tracked (limited by MAX_CPUS) */
+
+	int present_cpus[MAX_PRESENT_CPUS];   /* List of present CPU IDs */
+	int online_cpus[MAX_PRESENT_CPUS];    /* List of online CPU IDs */
+	int tracked_cpus[MAX_PRESENT_CPUS];   /* List of tracked (effective) CPU IDs */
+
+	unsigned int generation;  /* Incremented when CPU state changes */
+};
+
+static struct cpu_catalog cpu_catalog;
+static struct cpu_inventory cpu_inv;
 
 static int catalog_initialized;
 static int inventory_initialized;
@@ -592,13 +622,59 @@ int check_and_rebuild_inventory(void)
 	return 0;
 }
 
-int get_cpu_id_array_size(void)
+int cpu_sysfs_path(int cpu_id, const char *subpath, char *buf, size_t buflen)
 {
-	if (!catalog_initialized || cpu_catalog.present_count <= 0)
+	int n;
+
+	n = snprintf(buf, buflen, "/sys/devices/system/cpu/cpu%d/%s",
+		     cpu_id, subpath ? subpath : "");
+	if (n < 0 || (size_t)n >= buflen)
+		return -1;
+	return 0;
+}
+
+int cpu_inventory_seed(const struct cpu_inventory_seed *cpus, int count)
+{
+	if (!cpus || count <= 0 || count > MAX_CPUS)
 		return -1;
 
-	/* Catalog is sorted by cpu_id; the last entry has the highest ID. */
-	return cpu_catalog.cpus[cpu_catalog.present_count - 1].cpu_id + 1;
+	for (int i = 0; i < count; i++) {
+		if (cpus[i].cpu_id < 0 || cpus[i].cpu_id >= MAX_CPUS)
+			return -1;
+	}
+
+	/* Reset catalog and inventory state without touching the CPU filter. */
+	memset(&cpu_catalog, 0, sizeof(cpu_catalog));
+	memset(&cpu_inv, 0, sizeof(cpu_inv));
+	pending_tracked_valid = 0;
+	pending_tracked_count = 0;
+	catalog_initialized = 1;
+	inventory_initialized = 1;
+
+	for (int i = 0; i < count; i++) {
+		struct cpu_desc *desc = &cpu_catalog.cpus[i];
+
+		desc->cpu_id = cpus[i].cpu_id;
+		desc->present = cpus[i].present;
+		desc->online = cpus[i].online;
+		desc->package_id = cpus[i].package_id;
+		desc->core_id = cpus[i].core_id;
+		desc->numa_node = cpus[i].numa_node;
+	}
+
+	cpu_catalog.present_count = count;
+	cpu_catalog.online_count = 0;
+	cpu_catalog.tracked_count = 0;
+	for (int i = 0; i < count; i++) {
+		if (cpu_catalog.cpus[i].online)
+			cpu_catalog.online_count++;
+		if (catalog_cpu_is_tracked(&cpu_catalog.cpus[i]))
+			cpu_catalog.tracked_count++;
+	}
+
+	sort_present_cpus();
+	inventory_build();
+	return 0;
 }
 
 void cleanup_cpu_inventory(void)

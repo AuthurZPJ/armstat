@@ -26,7 +26,8 @@ make test         # Run all tests (test_core_logic, test_column_selection, test_
 The implementation follows a three-stage pipeline:
 
 ```
-armstat_cli.c → armstat.c → collector.c → aggregator.c → formatter.c
+armstat_cli.c → armstat.c → collector.c → aggregator.c → formatter_record.c
+                             → formatter_text.c / formatter_machine.c (dispatched by armstat.c)
                         ↓
                   sample_cache.c (memory pools + fast/slow sampling)
                   cpu_inventory.c (CPU identity model - single source of truth)
@@ -102,6 +103,16 @@ When behavior changes, update in order: code → README.md → README.zh-CN.md �
 - `TESTING.md`: Testing workflow (local build check, smoke tests, target ARM validation)
 - `EXPORTS.md`: JSON/CSV export contract
 - `PLOTTING.md`: Helper plotting scripts usage
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs for this repo live as GitHub issues; use the `gh` CLI for all operations. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root, created lazily by `/domain-modeling`. See `docs/agents/domain.md`.
 
 ---
 

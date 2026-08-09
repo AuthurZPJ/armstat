@@ -166,24 +166,31 @@ static int discover_uncore_freq_source(void)
 	return 0;
 }
 
-int read_cpu_freq(int cpu, unsigned int *freq)
+int read_cpu_freq(int tracked_idx, unsigned int *freq)
 {
 	char path[CPUFREQ_SYSFS_PATH_LEN];
 	unsigned int freq_khz = 0;
 	char buf[32];
+	int cpu_id;
 	ssize_t n;
 
-	if (cur_freq_fds && cpu >= 0 && cpu < cpu_count) {
-		int fd = cur_freq_fds[cpu];
+	if (tracked_idx < 0 || tracked_idx >= cpu_count)
+		return -1;
+
+	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
+	if (cpu_id < 0)
+		return -1;
+
+	if (cur_freq_fds) {
+		int fd = cur_freq_fds[tracked_idx];
 
 		if (fd < 0) {
-			snprintf(path, sizeof(path),
-				 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq",
-				 cpu);
+			cpu_sysfs_path(cpu_id, "cpufreq/scaling_cur_freq",
+				       path, sizeof(path));
 			if (cur_freq_fd_open_count < MAX_CUR_FREQ_FDS)
 				fd = open(path, O_RDONLY);
 			if (fd >= 0) {
-				cur_freq_fds[cpu] = fd;
+				cur_freq_fds[tracked_idx] = fd;
 				cur_freq_fd_open_count++;
 			}
 		}
@@ -201,9 +208,8 @@ int read_cpu_freq(int cpu, unsigned int *freq)
 	}
 
 	if (freq_khz == 0) {
-		snprintf(path, sizeof(path),
-			 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq",
-			 cpu);
+		cpu_sysfs_path(cpu_id, "cpufreq/scaling_cur_freq",
+			       path, sizeof(path));
 		freq_khz = read_sysfs_uint_slow(path);
 	}
 	if (freq_khz == 0)
@@ -213,32 +219,36 @@ int read_cpu_freq(int cpu, unsigned int *freq)
 	return 0;
 }
 
-int read_cpu_min_max_freq(int cpu, unsigned int *min, unsigned int *max)
+int read_cpu_min_max_freq(int tracked_idx, unsigned int *min, unsigned int *max)
 {
 	char path[CPUFREQ_SYSFS_PATH_LEN];
+	int cpu_id;
 
-	snprintf(path, sizeof(path),
-		 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_min_freq",
-		 cpu);
+	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
+	if (cpu_id < 0)
+		return -1;
+
+	cpu_sysfs_path(cpu_id, "cpufreq/scaling_min_freq", path, sizeof(path));
 	*min = read_sysfs_uint_slow(path);
 
-	snprintf(path, sizeof(path),
-		 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_max_freq",
-		 cpu);
+	cpu_sysfs_path(cpu_id, "cpufreq/scaling_max_freq", path, sizeof(path));
 	*max = read_sysfs_uint_slow(path);
 
 	return 0;
 }
 
-int read_cpu_governor(int cpu, char *governor, size_t len)
+int read_cpu_governor(int tracked_idx, char *governor, size_t len)
 {
 	char path[CPUFREQ_SYSFS_PATH_LEN];
 	char gov_buf[32];
 	char *gov;
+	int cpu_id;
 
-	snprintf(path, sizeof(path),
-		 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor",
-		 cpu);
+	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
+	if (cpu_id < 0)
+		return -1;
+
+	cpu_sysfs_path(cpu_id, "cpufreq/scaling_governor", path, sizeof(path));
 
 	gov = read_sysfs_file(path, gov_buf, sizeof(gov_buf));
 	if (!gov)
@@ -264,18 +274,18 @@ static int read_sysfs_uint_exists(const char *path, unsigned int *value)
 	return 0;
 }
 
-int read_cpu_boost(int cpu, int *boost)
+int read_cpu_boost(int tracked_idx, int *boost)
 {
 	char path[CPUFREQ_SYSFS_PATH_LEN];
 	unsigned int value = 0;
+	int cpu_id;
 
-	if (!boost)
+	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
+	if (!boost || cpu_id < 0)
 		return -1;
 
 	/* Try per-CPU boost file first */
-	snprintf(path, sizeof(path),
-		 "/sys/devices/system/cpu/cpu%d/cpufreq/boost",
-		 cpu);
+	cpu_sysfs_path(cpu_id, "cpufreq/boost", path, sizeof(path));
 	if (read_sysfs_uint_exists(path, &value) == 0) {
 		*boost = (int)value;
 		return 0;
@@ -342,7 +352,7 @@ const char *get_uncore_freq_device_name(void)
 
 int init_cpufreq(void)
 {
-	cpu_count = get_cpu_id_array_size();
+	cpu_count = get_tracked_cpu_count();
 	if (cpu_count <= 0)
 		return -1;
 

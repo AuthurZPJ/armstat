@@ -13,17 +13,17 @@ struct cpu_freq_info {
 	char governor[32];
 };
 
-/* Read current CPU frequency in kHz */
-int read_cpu_freq(int cpu, unsigned int *freq);
+/* Read current CPU frequency in kHz (tracked_idx) */
+int read_cpu_freq(int tracked_idx, unsigned int *freq);
 
-/* Read min/max frequency */
-int read_cpu_min_max_freq(int cpu, unsigned int *min, unsigned int *max);
+/* Read min/max frequency (tracked_idx) */
+int read_cpu_min_max_freq(int tracked_idx, unsigned int *min, unsigned int *max);
 
-/* Read CPU governor */
-int read_cpu_governor(int cpu, char *governor, size_t len);
+/* Read CPU governor (tracked_idx) */
+int read_cpu_governor(int tracked_idx, char *governor, size_t len);
 
-/* Read CPU boost state (0/1), returns -1 if unavailable */
-int read_cpu_boost(int cpu, int *boost);
+/* Read CPU boost state (0/1), returns -1 if unavailable (tracked_idx) */
+int read_cpu_boost(int tracked_idx, int *boost);
 
 /* Read uncore frequency from devfreq cur_freq in Hz */
 int read_uncore_freq(unsigned long long *freq_hz);

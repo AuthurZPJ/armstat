@@ -163,16 +163,6 @@ static int get_tracked_cpu_id(int tracked_idx)
 	return get_cpu_id_by_tracked_idx(tracked_idx);
 }
 
-static const struct cpu_freq_info *get_cpu_freq_entry(
-	const struct interval_record *rec,
-	int cpu_idx)
-{
-	if (!rec || !rec->raw || !rec->raw->freqs || cpu_idx < 0)
-		return NULL;
-
-	return &rec->raw->freqs[cpu_idx];
-}
-
 static double clamp_percent(double pct)
 {
 	if (pct < 0.0)
@@ -182,175 +172,43 @@ static double clamp_percent(double pct)
 	return pct;
 }
 
-static const struct idle_state *get_cpu_idle_state_entry(
-	const struct interval_record *rec,
-	int cpu_idx,
-	int state_idx)
+static const struct cpu_row *get_cpu_row(const struct interval_record *rec,
+					 int row_idx)
 {
-	int cpu_id;
-	int state_count;
-
-	if (!rec || !rec->raw || !rec->raw->idle || cpu_idx < 0)
+	if (!rec || row_idx < 0 || row_idx >= rec->cpu_row_count)
 		return NULL;
 
-	state_count = rec->raw->idle_state_count;
-	if (state_idx < 0 || state_idx >= state_count)
-		return NULL;
-
-	cpu_id = get_tracked_cpu_id(cpu_idx);
-	if (cpu_id < 0 || !rec->raw->idle[cpu_id])
-		return NULL;
-
-	return &rec->raw->idle[cpu_id][state_idx];
+	return &rec->cpu_rows[row_idx];
 }
 
-static const struct idle_state *get_usable_idle_state_entry(
-	const struct interval_record *rec,
-	int cpu_idx,
-	int state_idx)
+/*
+ * Raw cpuidle state lookup. Only used while materializing owned values during
+ * build_interval_record(); serializers read the materialized cpu_row instead.
+ */
+static const struct idle_state *get_raw_idle_state(const struct sys_snapshot *raw,
+						   int cpu_idx, int state_idx)
+{
+	if (!raw || !raw->idle || cpu_idx < 0)
+		return NULL;
+	if (state_idx < 0 || state_idx >= raw->idle_state_count)
+		return NULL;
+	if (!raw->idle[cpu_idx])
+		return NULL;
+
+	return &raw->idle[cpu_idx][state_idx];
+}
+
+static const struct idle_state *get_usable_raw_idle_state(
+	const struct sys_snapshot *raw,
+	int cpu_idx, int state_idx)
 {
 	const struct idle_state *state =
-		get_cpu_idle_state_entry(rec, cpu_idx, state_idx);
+		get_raw_idle_state(raw, cpu_idx, state_idx);
 
 	if (!state || !state->available || state->disabled)
 		return NULL;
 
 	return state;
-}
-
-static int idle_state_is_visible(int state_idx, int summary_mode)
-{
-	if (state_idx < 0 || state_idx >= ARRAY_SIZE(show_idle_state))
-		return 0;
-
-	return summary_mode ? show_summary_idle_state[state_idx] :
-			      show_idle_state[state_idx];
-}
-
-static const struct idle_state *get_visible_usable_idle_state_entry(
-	const struct interval_record *rec,
-	int cpu_idx,
-	int state_idx,
-	int summary_mode)
-{
-	if (!idle_state_is_visible(state_idx, summary_mode))
-		return NULL;
-
-	return get_usable_idle_state_entry(rec, cpu_idx, state_idx);
-}
-
-static int get_last_visible_usable_idle_state(const struct interval_record *rec,
-					      int cpu_idx, int summary_mode)
-{
-	int state_count;
-
-	if (!rec || !rec->raw)
-		return -1;
-
-	state_count = rec->raw->idle_state_count;
-	if (state_count > ARRAY_SIZE(show_idle_state))
-		state_count = ARRAY_SIZE(show_idle_state);
-
-	for (int state_idx = state_count - 1; state_idx >= 0; state_idx--) {
-		if (get_visible_usable_idle_state_entry(rec, cpu_idx, state_idx,
-							summary_mode))
-			return state_idx;
-	}
-
-	return -1;
-}
-
-/*
- * LPI display rule:
- *   - Busy/Idle comes from /proc/stat and is treated as authoritative.
- *   - Shallow states keep their raw cpuidle residency percentages.
- *   - The deepest usable state becomes the residual bucket so that
- *     sum(LPI-*) is forced to match Idle% for each CPU row.
- *
- * This keeps shallow state visibility intuitive on ARM while avoiding
- * short-interval drift where raw cpuidle state totals undercount idle.
- */
-static double get_cpu_idle_state_percent_internal(const struct interval_record *rec,
-						  int cpu_idx, int state_idx,
-						  int summary_mode)
-{
-	const struct idle_state *state;
-	int last_state;
-	double idle_pct;
-	double remaining;
-
-	state = get_visible_usable_idle_state_entry(rec, cpu_idx, state_idx,
-						   summary_mode);
-	if (!state)
-		return summary_mode ? 0.0 : NAN;
-
-	if (!rec->stats || cpu_idx >= rec->cpu_count)
-		return summary_mode ? 0.0 : NAN;
-
-	last_state = get_last_visible_usable_idle_state(rec, cpu_idx, summary_mode);
-	if (last_state < 0)
-		return summary_mode ? 0.0 : NAN;
-
-	idle_pct = clamp_percent(rec->stats->per_cpu_idle[cpu_idx]);
-
-	/*
-	 * Preserve shallower states first and let the deepest usable state absorb
-	 * the residual. This guarantees sum(LPI-*) == Idle% on each CPU.
-	 */
-	remaining = idle_pct;
-	for (int idx = 0; idx <= last_state; idx++) {
-		const struct idle_state *iter_state;
-		double raw_pct;
-		double displayed_pct;
-
-		iter_state = get_visible_usable_idle_state_entry(rec, cpu_idx, idx,
-								 summary_mode);
-		if (!iter_state)
-			continue;
-
-		if (idx == last_state)
-			displayed_pct = remaining;
-		else {
-			raw_pct = clamp_percent(iter_state->percentage);
-			displayed_pct = raw_pct;
-			if (displayed_pct > remaining)
-				displayed_pct = remaining;
-			remaining -= displayed_pct;
-			if (remaining < 0.0)
-				remaining = 0.0;
-		}
-
-		if (idx == state_idx)
-			return clamp_percent(displayed_pct);
-	}
-
-	return summary_mode ? 0.0 : NAN;
-}
-
-static double get_cpu_idle_state_percent(const struct interval_record *rec,
-					 int cpu_idx, int state_idx)
-{
-	return get_cpu_idle_state_percent_internal(rec, cpu_idx, state_idx, 0);
-}
-
-static double get_summary_idle_state_percent(const struct interval_record *rec,
-					     int state_idx)
-{
-	double total = 0.0;
-	int cpu_count;
-
-	if (!rec)
-		return 0.0;
-
-	cpu_count = rec->cpu_count;
-	if (cpu_count <= 0)
-		return 0.0;
-
-	for (int tracked_idx = 0; tracked_idx < cpu_count; tracked_idx++)
-		total += get_cpu_idle_state_percent_internal(rec, tracked_idx,
-							      state_idx, 1);
-
-	return total / cpu_count;
 }
 
 /* ============================================================================
@@ -360,125 +218,137 @@ static double get_summary_idle_state_percent(const struct interval_record *rec,
 /*
  * Get CPU package ID
  */
-static int get_cpu_package(const struct interval_record *rec, int cpu_idx)
+static int get_cpu_package(const struct interval_record *rec, int row_idx)
 {
 	(void)rec;
-	int cpu_id = get_tracked_cpu_id(cpu_idx);
+	int cpu_id = get_tracked_cpu_id(row_idx);
 	return get_package_id(cpu_id);
 }
 
 /*
  * Get CPU core ID
  */
-static int get_cpu_core(const struct interval_record *rec, int cpu_idx)
+static int get_cpu_core(const struct interval_record *rec, int row_idx)
 {
 	(void)rec;
-	int cpu_id = get_tracked_cpu_id(cpu_idx);
+	int cpu_id = get_tracked_cpu_id(row_idx);
 	return get_core_id(cpu_id);
 }
 
 /*
  * Get CPU NUMA node
  */
-static int get_cpu_numa_node(const struct interval_record *rec, int cpu_idx)
+static int get_cpu_numa_node(const struct interval_record *rec, int row_idx)
 {
 	(void)rec;
-	int cpu_id = get_tracked_cpu_id(cpu_idx);
+	int cpu_id = get_tracked_cpu_id(row_idx);
 	return get_numa_node(cpu_id);
 }
 
 /* --- Frequency getters --- */
 
-static double get_cpu_freq_mhz(const struct interval_record *rec, int cpu_idx)
+static double get_cpu_freq_mhz(const struct interval_record *rec, int row_idx)
 {
-	const struct cpu_freq_info *freq = get_cpu_freq_entry(rec, cpu_idx);
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!freq)
+	if (!row)
 		return 0;
-	return freq->cur_freq / 1000.0;
+	return row->freq.cur_freq / 1000.0;
 }
 
-static double get_cpu_min_freq_mhz(const struct interval_record *rec, int cpu_idx)
+static double get_cpu_min_freq_mhz(const struct interval_record *rec, int row_idx)
 {
-	const struct cpu_freq_info *freq = get_cpu_freq_entry(rec, cpu_idx);
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!freq)
+	if (!row)
 		return 0;
-	return freq->min_freq / 1000.0;
+	return row->freq.min_freq / 1000.0;
 }
 
-static double get_cpu_max_freq_mhz(const struct interval_record *rec, int cpu_idx)
+static double get_cpu_max_freq_mhz(const struct interval_record *rec, int row_idx)
 {
-	const struct cpu_freq_info *freq = get_cpu_freq_entry(rec, cpu_idx);
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!freq)
+	if (!row)
 		return 0;
-	return freq->max_freq / 1000.0;
+	return row->freq.max_freq / 1000.0;
 }
 
-static const char *get_cpu_governor(const struct interval_record *rec, int cpu_idx)
+static const char *get_cpu_governor(const struct interval_record *rec, int row_idx)
 {
-	const struct cpu_freq_info *freq = get_cpu_freq_entry(rec, cpu_idx);
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!freq)
+	if (!row)
 		return "";
-	return freq->governor;
+	return row->freq.governor;
 }
 
-static const char *get_cpu_boost(const struct interval_record *rec, int cpu_idx)
+static const char *get_cpu_boost(const struct interval_record *rec, int row_idx)
 {
 	static const char *const unavailable = "-";
 	static const char *const disabled = "0";
 	static const char *const enabled = "1";
-	const struct cpu_freq_info *freq = get_cpu_freq_entry(rec, cpu_idx);
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!freq)
+	if (!row)
 		return unavailable;
-	if (freq->boost < 0)
+	if (row->freq.boost < 0)
 		return unavailable;
 
-	return freq->boost ? enabled : disabled;
+	return row->freq.boost ? enabled : disabled;
 }
 
 /* --- Idle/busy getters --- */
 
-static double get_cpu_busy_percent(const struct interval_record *rec, int cpu_idx)
+static double get_cpu_busy_percent(const struct interval_record *rec, int row_idx)
 {
-	if (!rec || !rec->stats)
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
+
+	if (!row)
 		return 0;
-	return 100.0 - rec->stats->per_cpu_idle[cpu_idx];
+	return row->busy_percent;
 }
 
-static double get_cpu_idle_percent(const struct interval_record *rec, int cpu_idx)
+static double get_cpu_idle_percent(const struct interval_record *rec, int row_idx)
 {
-	if (!rec || !rec->stats)
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
+
+	if (!row)
 		return 0;
-	return rec->stats->per_cpu_idle[cpu_idx];
+	return row->idle_percent;
 }
 
-static double get_cpu_iowait_percent(const struct interval_record *rec, int cpu_idx)
+static double get_cpu_iowait_percent(const struct interval_record *rec, int row_idx)
 {
-	if (!rec || !rec->stats)
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
+
+	if (!row)
 		return 0;
-	return rec->stats->per_cpu_iowait[cpu_idx];
+	return row->iowait_percent;
 }
 
-static double get_cpu_ipc(const struct interval_record *rec, int cpu_idx)
+static double get_cpu_ipc(const struct interval_record *rec, int row_idx)
 {
-	if (!rec || !rec->stats || cpu_idx < 0)
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
+
+	if (!row)
 		return NAN;
 	if (!pmu_is_active())
 		return NAN;
-	return rec->stats->per_cpu_ipc[cpu_idx];
+	return row->ipc;
 }
 
 /* --- Per-idle-state getters --- */
 
 #define DEFINE_CPU_IDLE_STATE_GETTER(state_idx)					\
 static double get_cpu_idle_state##state_idx(const struct interval_record *rec,	\
-					    int cpu_idx)			\
+					    int row_idx)			\
 {										\
-	return get_cpu_idle_state_percent(rec, cpu_idx, state_idx);		\
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);			\
+										\
+	if (!row)								\
+		return NAN;							\
+	return row->idle_state_pct[state_idx];					\
 }
 
 DEFINE_CPU_IDLE_STATE_GETTER(0)
@@ -493,14 +363,14 @@ DEFINE_CPU_IDLE_STATE_GETTER(7)
 /* --- Idle-state wakeup getters --- */
 
 #define DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(state_idx)				\
-static double get_cpu_idle_state_wakeup##state_idx(const struct interval_record *rec, \
-					    int cpu_idx)			\
+static double get_cpu_idle_state_wakeup##state_idx(const struct interval_record *rec,	\
+					    int row_idx)			\
 {										\
-	const struct idle_state *state =					\
-		get_usable_idle_state_entry(rec, cpu_idx, state_idx);		\
-	if (!state)								\
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);			\
+										\
+	if (!row)								\
 		return 0;							\
-	return state->wakeups_per_sec;						\
+	return row->idle_state_wakeups[state_idx];			\
 }
 
 DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(0)
@@ -518,41 +388,28 @@ DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(7)
  * Get per-CPU temperature based on NUMA node
  * CPU belongs to NUMA 0 -> show vdie0, NUMA 1 -> show vdie1
  */
-static double get_cpu_temp_c(const struct interval_record *rec, int cpu_idx)
+static double get_cpu_temp_c(const struct interval_record *rec, int row_idx)
 {
-	int cpu_id;
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!rec || !rec->raw)
+	if (!row)
 		return 0;
-
-	cpu_id = get_tracked_cpu_id(cpu_idx);
-	if (cpu_id < 0)
-		return 0;
-
-	/* Get NUMA node for this CPU */
-	int numa = get_numa_node(cpu_id);
-	if (numa < 0 || numa >= rec->raw->numa_temp_count)
-		return 0;
-
-	/* Return temperature for this NUMA node */
-	return rec->raw->numa_temps[numa] / 1000.0;
+	return row->temp_c;
 }
 
 /* NUMA temperature getters for SUM level */
 static double get_temp_vdie_by_numa(const struct interval_record *rec, int numa)
 {
-	if (!rec || !rec->raw)
+	if (!rec || numa < 0 || numa >= rec->numa_temp_count)
 		return 0;
-	if (numa < 0 || numa >= rec->raw->numa_temp_count)
-		return 0;
-	return rec->raw->numa_temps[numa] / 1000.0;
+	return rec->numa_temps[numa] / 1000.0;
 }
 
-#define DEFINE_NUMA_TEMP_GETTER(numa_idx)					\
-static double get_temp_vdie##numa_idx(const struct interval_record *rec, int cpu)	\
+#define DEFINE_NUMA_TEMP_GETTER(numa_idx)				\
+static double get_temp_vdie##numa_idx(const struct interval_record *rec, int row_idx)	\
 {										\
-	(void)cpu;								\
-	return get_temp_vdie_by_numa(rec, numa_idx);				\
+	(void)row_idx;							\
+	return get_temp_vdie_by_numa(rec, numa_idx);			\
 }
 
 DEFINE_NUMA_TEMP_GETTER(0)
@@ -566,88 +423,89 @@ static const struct package_row *get_package_row(
 	const struct interval_record *rec,
 	int pkg_idx)
 {
-	if (!rec || !rec->stats ||
-	    pkg_idx < 0 || pkg_idx >= rec->stats->package_count)
+	if (!rec || pkg_idx < 0 || pkg_idx >= rec->package_count)
 		return NULL;
 
-	return &rec->stats->packages[pkg_idx];
+	return &rec->packages[pkg_idx];
 }
 
-static int get_pkg_package_id(const struct interval_record *rec, int cpu)
+static int get_pkg_package_id(const struct interval_record *rec, int row_idx)
 {
 	/* cpu parameter is actually package index for package-scope fields */
-	const struct package_row *pkg = get_package_row(rec, cpu);
+	const struct package_row *pkg = get_package_row(rec, row_idx);
 	return pkg ? pkg->package_id : 0;
 }
 
-static double get_pkg_avg_mhz(const struct interval_record *rec, int cpu)
+static double get_pkg_avg_mhz(const struct interval_record *rec, int row_idx)
 {
-	const struct package_row *pkg = get_package_row(rec, cpu);
+	const struct package_row *pkg = get_package_row(rec, row_idx);
 	return pkg ? pkg->avg_mhz : 0;
 }
 
-static double get_pkg_idle_percent(const struct interval_record *rec, int cpu)
+static double get_pkg_idle_percent(const struct interval_record *rec, int row_idx)
 {
-	const struct package_row *pkg = get_package_row(rec, cpu);
+	const struct package_row *pkg = get_package_row(rec, row_idx);
 	return pkg ? pkg->idle_percent : 0;
 }
 
-static double get_pkg_busy_percent(const struct interval_record *rec, int cpu)
+static double get_pkg_busy_percent(const struct interval_record *rec, int row_idx)
 {
-	const struct package_row *pkg = get_package_row(rec, cpu);
+	const struct package_row *pkg = get_package_row(rec, row_idx);
 	return pkg ? pkg->busy_percent : 0;
 }
 
-static double get_pkg_iowait_percent(const struct interval_record *rec, int cpu)
+static double get_pkg_iowait_percent(const struct interval_record *rec, int row_idx)
 {
-	const struct package_row *pkg = get_package_row(rec, cpu);
+	const struct package_row *pkg = get_package_row(rec, row_idx);
 	return pkg ? pkg->iowait_percent : 0;
 }
 
-static int get_pkg_cpu_count(const struct interval_record *rec, int cpu)
+static int get_pkg_cpu_count(const struct interval_record *rec, int row_idx)
 {
-	const struct package_row *pkg = get_package_row(rec, cpu);
+	const struct package_row *pkg = get_package_row(rec, row_idx);
 	return pkg ? pkg->cpu_count : 0;
 }
 
 /* --- Summary getters --- */
 
-static double get_summary_avg_mhz(const struct interval_record *rec, int cpu)
+static double get_summary_avg_mhz(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? rec->summary.avg_mhz : 0;
 }
 
-static double get_summary_uncore_freq_mhz(const struct interval_record *rec, int cpu)
+static double get_summary_uncore_freq_mhz(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? rec->summary.uncore_freq_mhz : 0;
 }
 
-static double get_summary_busy_percent(const struct interval_record *rec, int cpu)
+static double get_summary_busy_percent(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? rec->summary.busy_percent : 0;
 }
 
-static double get_summary_idle_percent(const struct interval_record *rec, int cpu)
+static double get_summary_idle_percent(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? rec->summary.idle_percent : 0;
 }
 
-static double get_summary_iowait_percent(const struct interval_record *rec, int cpu)
+static double get_summary_iowait_percent(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? rec->summary.iowait_percent : 0;
 }
 
 #define DEFINE_SUMMARY_IDLE_STATE_GETTER(state_idx)				\
 static double get_summary_idle_state##state_idx(const struct interval_record *rec,	\
-						int cpu)			\
+						int row_idx)			\
 {										\
-	(void)cpu;								\
-	return get_summary_idle_state_percent(rec, state_idx);			\
+	(void)row_idx;								\
+	if (!rec)								\
+		return 0;							\
+	return rec->summary_idle_state_pct[state_idx];				\
 }
 
 DEFINE_SUMMARY_IDLE_STATE_GETTER(0)
@@ -659,45 +517,45 @@ DEFINE_SUMMARY_IDLE_STATE_GETTER(5)
 DEFINE_SUMMARY_IDLE_STATE_GETTER(6)
 DEFINE_SUMMARY_IDLE_STATE_GETTER(7)
 
-static long long get_summary_power_mw(const struct interval_record *rec, int cpu)
+static long long get_summary_power_mw(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? rec->summary.power_mw : 0;
 }
 
-static double get_summary_energy_joules(const struct interval_record *rec, int cpu)
+static double get_summary_energy_joules(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? rec->summary.energy_joules : 0;
 }
 
-static long long get_summary_mem_bw(const struct interval_record *rec, int cpu)
+static long long get_summary_mem_bw(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? (long long)rec->summary.mem_bw : 0;
 }
 
-static long long get_summary_ctx_switches(const struct interval_record *rec, int cpu)
+static long long get_summary_ctx_switches(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? (long long)rec->summary.ctx_switches : 0;
 }
 
-static long long get_summary_interrupts(const struct interval_record *rec, int cpu)
+static long long get_summary_interrupts(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? (long long)rec->summary.interrupts : 0;
 }
 
-static long long get_summary_soft_interrupts(const struct interval_record *rec, int cpu)
+static long long get_summary_soft_interrupts(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	return rec ? (long long)rec->summary.soft_interrupts : 0;
 }
 
-static double get_summary_ipc(const struct interval_record *rec, int cpu)
+static double get_summary_ipc(const struct interval_record *rec, int row_idx)
 {
-	(void)cpu;
+	(void)row_idx;
 	if (!rec)
 		return NAN;
 	if (!pmu_is_active())
@@ -1111,13 +969,181 @@ static void fill_record_summary(struct interval_record *rec,
 		rec->summary.pmu[i] = stats->pmu_delta[i];
 }
 
-static void fill_cpu_rows(struct interval_record *rec, int tracked_count)
+/*
+ * LPI display rule (materialized once per interval, then owned by the record):
+ *   - Busy/Idle comes from /proc/stat and is treated as authoritative.
+ *   - Shallow states keep their raw cpuidle residency percentages.
+ *   - The deepest visible usable state becomes the residual bucket so that
+ *     sum(LPI-*) is forced to match Idle% for each CPU row.
+ *
+ * This keeps shallow state visibility intuitive on ARM while avoiding
+ * short-interval drift where raw cpuidle state totals undercount idle.
+ */
+static void compute_cpu_idle_state_display(struct cpu_row *row,
+					   const struct sys_snapshot *raw,
+					   int cpu_idx, double idle_pct,
+					   const int *visible, int summary_mode)
 {
+	double remaining = idle_pct;
+	int state_count = (raw && raw->idle) ? raw->idle_state_count : 0;
+	int last_state = -1;
+	double hidden_value = summary_mode ? 0.0 : NAN;
+
+	if (state_count > MAX_VISIBLE_IDLE_STATES)
+		state_count = MAX_VISIBLE_IDLE_STATES;
+
+	for (int s = state_count - 1; s >= 0; s--) {
+		const struct idle_state *state =
+			get_usable_raw_idle_state(raw, cpu_idx, s);
+
+		if (state && visible[s]) {
+			last_state = s;
+			break;
+		}
+	}
+
+	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++) {
+		const struct idle_state *state =
+			get_usable_raw_idle_state(raw, cpu_idx, s);
+		double displayed;
+
+		if (s >= state_count || !state || !visible[s]) {
+			row->idle_state_pct[s] = hidden_value;
+			continue;
+		}
+
+		if (s == last_state) {
+			displayed = remaining;
+		} else {
+			displayed = clamp_percent(state->percentage);
+			if (displayed > remaining)
+				displayed = remaining;
+			remaining -= displayed;
+			if (remaining < 0.0)
+				remaining = 0.0;
+		}
+		row->idle_state_pct[s] = clamp_percent(displayed);
+	}
+}
+
+static void materialize_cpu_idle_wakeups(struct cpu_row *row,
+					 const struct sys_snapshot *raw,
+					 int cpu_idx)
+{
+	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++) {
+		const struct idle_state *state =
+			get_usable_raw_idle_state(raw, cpu_idx, s);
+
+		row->idle_state_wakeups[s] = state ? state->wakeups_per_sec : 0.0;
+	}
+}
+
+static double compute_cpu_temp_c(const struct sys_snapshot *raw, int cpu_idx)
+{
+	int cpu_id;
+	int numa;
+
+	if (!raw || cpu_idx < 0)
+		return 0;
+
+	cpu_id = get_tracked_cpu_id(cpu_idx);
+	if (cpu_id < 0)
+		return 0;
+
+	numa = get_numa_node(cpu_id);
+	if (numa < 0 || numa >= raw->numa_temp_count)
+		return 0;
+
+	return raw->numa_temps[numa] / 1000.0;
+}
+
+static void materialize_cpu_rows(struct interval_record *rec,
+				 const struct sys_snapshot *raw,
+				 const struct interval_stats *stats,
+				 int tracked_count)
+{
+	int pmu_count = get_pmu_event_count();
+
 	if (tracked_count <= 0)
 		return;
 
-	for (int i = 0; i < tracked_count; i++)
-		rec->cpu_rows[i].cpu_idx = i;
+	for (int i = 0; i < tracked_count; i++) {
+		struct cpu_row *row = &rec->cpu_rows[i];
+		double idle_pct;
+
+		memset(row, 0, sizeof(*row));
+		row->cpu_idx = i;
+
+		if (raw && raw->freqs)
+			row->freq = raw->freqs[i];
+
+		idle_pct = stats ? clamp_percent(stats->per_cpu_idle[i]) : 0.0;
+		row->idle_percent = stats ? stats->per_cpu_idle[i] : 0.0;
+		row->iowait_percent = stats ? stats->per_cpu_iowait[i] : 0.0;
+		row->busy_percent = 100.0 - row->idle_percent;
+		row->ipc = stats ? stats->per_cpu_ipc[i] : NAN;
+
+		row->temp_c = compute_cpu_temp_c(raw, i);
+
+		compute_cpu_idle_state_display(row, raw, i, idle_pct,
+					      show_idle_state, 0);
+		materialize_cpu_idle_wakeups(row, raw, i);
+
+		if (stats) {
+			for (int ev = 0; ev < pmu_count && ev < MAX_PMU_EVENTS; ev++)
+				row->pmu[ev] = stats->per_cpu_pmu[i][ev];
+		}
+	}
+}
+
+static void materialize_packages(struct interval_record *rec,
+				 const struct interval_stats *stats)
+{
+	rec->package_count = stats ? stats->package_count : 0;
+	if (rec->package_count > MAX_PACKAGES)
+		rec->package_count = MAX_PACKAGES;
+
+	for (int i = 0; i < rec->package_count; i++)
+		rec->packages[i] = stats->packages[i];
+}
+
+static void materialize_numa_temps(struct interval_record *rec,
+				   const struct sys_snapshot *raw)
+{
+	rec->numa_temp_count = raw ? raw->numa_temp_count : 0;
+	if (rec->numa_temp_count > 16)
+		rec->numa_temp_count = 16;
+
+	for (int i = 0; i < rec->numa_temp_count; i++)
+		rec->numa_temps[i] = raw->numa_temps[i];
+}
+
+static void materialize_summary_idle_states(struct interval_record *rec,
+					    const struct sys_snapshot *raw,
+					    const struct interval_stats *stats,
+					    int tracked_count)
+{
+	double acc[MAX_VISIBLE_IDLE_STATES] = {0};
+
+	if (tracked_count <= 0) {
+		for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++)
+			rec->summary_idle_state_pct[s] = 0.0;
+		return;
+	}
+
+	for (int i = 0; i < tracked_count; i++) {
+		struct cpu_row row;
+		double idle_pct = stats ? clamp_percent(stats->per_cpu_idle[i]) : 0.0;
+
+		memset(&row, 0, sizeof(row));
+		compute_cpu_idle_state_display(&row, raw, i, idle_pct,
+					      show_summary_idle_state, 1);
+		for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++)
+			acc[s] += row.idle_state_pct[s];
+	}
+
+	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++)
+		rec->summary_idle_state_pct[s] = acc[s] / tracked_count;
 }
 
 struct interval_record *build_interval_record(
@@ -1138,13 +1164,12 @@ struct interval_record *build_interval_record(
 		return NULL;
 	}
 
-	/* Store pointers to source data */
-	rec->raw = raw;
-	rec->stats = stats;
-
 	fill_record_metadata(rec, raw, iteration, tracked_count);
 	fill_record_summary(rec, raw, stats);
-	fill_cpu_rows(rec, tracked_count);
+	materialize_cpu_rows(rec, raw, stats, tracked_count);
+	materialize_packages(rec, stats);
+	materialize_numa_temps(rec, raw);
+	materialize_summary_idle_states(rec, raw, stats, tracked_count);
 
 	return rec;
 }

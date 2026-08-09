@@ -116,8 +116,9 @@ It may also contain:
 Whether `cpus`, `packages`, and `summary` are present depends on output mode:
 
 - default CPU-oriented JSON
-  - usually contains `cpus`
+  - contains `cpus`
   - may also contain `summary` when summary-scope fields are explicitly enabled
+  - contains `packages` only when the package group is enabled (e.g. `-s pkg` or `-a`)
 - `-S` summary-only JSON
   - contains `summary`
   - omits `cpus`
