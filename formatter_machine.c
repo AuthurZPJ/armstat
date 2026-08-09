@@ -149,38 +149,6 @@ static void print_json_multiline_field(const struct field_desc *field,
 	*needs_comma = 1;
 }
 
-static void format_field_value(const struct field_desc *field,
-			       const struct interval_record *rec,
-			       int cpu_idx,
-			       char *buf,
-			       size_t buf_size)
-{
-	switch (field->type) {
-	case FIELD_TYPE_DOUBLE: {
-		double value = field->getter.get_double(rec, cpu_idx);
-		if (isnan(value))
-			buf[0] = '\0';
-		else
-			snprintf(buf, buf_size, "%.2f", value);
-		break;
-	}
-	case FIELD_TYPE_LLONG:
-		snprintf(buf, buf_size, "%lld", field->getter.get_llong(rec, cpu_idx));
-		break;
-	case FIELD_TYPE_INT:
-		snprintf(buf, buf_size, "%d", field->getter.get_int(rec, cpu_idx));
-		break;
-	case FIELD_TYPE_STRING: {
-		const char *value = field->getter.get_string(rec, cpu_idx);
-		snprintf(buf, buf_size, "%s", value ? value : "");
-		break;
-	}
-	default:
-		buf[0] = '\0';
-		break;
-	}
-}
-
 static void print_pmu_json_summary_object(const struct interval_record *rec)
 {
 	int pmu_count = rec->pmu_event_count;
@@ -528,7 +496,7 @@ static void serialize_csv_row(const struct interval_record *rec, int row_idx)
 	get_enabled_fields(FIELD_SCOPE_CPU, fields, &count);
 	for (int i = 0; i < count; i++) {
 		char tmp[64];
-		format_field_value(fields[i], rec, cpu_idx, tmp, sizeof(tmp));
+		format_field_value(fields[i], rec, cpu_idx, "", tmp, sizeof(tmp));
 
 		printf("%s", first ? "" : ",");
 		print_csv_cell(tmp);
@@ -557,7 +525,7 @@ static void serialize_csv_mixed_cpu_row(const struct interval_record *rec, int r
 	get_enabled_fields(FIELD_SCOPE_CPU, cpu_fields, &cpu_count);
 	for (int i = 0; i < cpu_count; i++) {
 		char tmp[64];
-		format_field_value(cpu_fields[i], rec, cpu_idx, tmp, sizeof(tmp));
+		format_field_value(cpu_fields[i], rec, cpu_idx, "", tmp, sizeof(tmp));
 		putchar(',');
 		print_csv_cell(tmp);
 	}
@@ -588,7 +556,7 @@ static void serialize_csv_summary_row(const struct interval_record *rec)
 	/* System fields */
 	for (int i = 0; i < count; i++) {
 		char tmp[64];
-		format_field_value(fields[i], rec, 0, tmp, sizeof(tmp));
+		format_field_value(fields[i], rec, 0, "", tmp, sizeof(tmp));
 
 		putchar(',');
 		print_csv_cell(tmp);
@@ -614,7 +582,7 @@ static void serialize_csv_mixed_summary_row(const struct interval_record *rec,
 
 	for (int i = 0; i < system_count; i++) {
 		char tmp[64];
-		format_field_value(system_fields[i], rec, 0, tmp, sizeof(tmp));
+		format_field_value(system_fields[i], rec, 0, "", tmp, sizeof(tmp));
 		if (i > 0)
 			putchar(',');
 		print_csv_cell(tmp);

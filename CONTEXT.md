@@ -95,3 +95,12 @@ current; add a term when a decision resolves one.
   cross-scope padding pattern. The idle-state pattern
   (`FIELD_SERIES_IDLE_STATE` + per-index visibility + runtime label
   mutation) is the template for the future implementation.
+
+- **field value formatting** — the shared `format_field_value()` function
+  declared in `columns.h` and implemented in `columns.c`. Renders a
+  `field_desc`'s value into a string buffer with a caller-supplied `nan_str`
+  for NaN placeholder rendering (`""` for CSV, `"-"` for text). Consolidates
+  the previously duplicated 4-case type switch from `formatter_machine.c`'s
+  CSV path and `formatter_text.c`'s text path. The JSON serializer keeps its
+  own `print_json_field_value` because JSON string escaping is stream-based
+  (per-character `putchar`), not buffer-based.

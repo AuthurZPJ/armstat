@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "columns.h"
 #include "formatter_fields.h"
@@ -563,4 +564,43 @@ void clear_columns(void)
 	clear_field_overrides();
 	reset_idle_state_overrides_internal();
 	clear_idle_state_columns();
+}
+
+/* ============================================================================
+ * FIELD VALUE FORMATTING
+ * ============================================================================ */
+
+void format_field_value(const struct field_desc *field,
+			const struct interval_record *rec,
+			int row_idx,
+			const char *nan_str,
+			char *buf, size_t buf_size)
+{
+	if (!buf || buf_size == 0)
+		return;
+
+	switch (field->type) {
+	case FIELD_TYPE_DOUBLE: {
+		double val = field->getter.get_double(rec, row_idx);
+		if (isnan(val))
+			snprintf(buf, buf_size, "%s", nan_str ? nan_str : "");
+		else
+			snprintf(buf, buf_size, "%.2f", val);
+		break;
+	}
+	case FIELD_TYPE_LLONG:
+		snprintf(buf, buf_size, "%lld", field->getter.get_llong(rec, row_idx));
+		break;
+	case FIELD_TYPE_INT:
+		snprintf(buf, buf_size, "%d", field->getter.get_int(rec, row_idx));
+		break;
+	case FIELD_TYPE_STRING: {
+		const char *val = field->getter.get_string(rec, row_idx);
+		snprintf(buf, buf_size, "%s", val ? val : "");
+		break;
+	}
+	default:
+		buf[0] = '\0';
+		break;
+	}
 }

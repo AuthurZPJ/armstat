@@ -10,7 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <math.h>
 
 #include "formatter.h"
 #include "formatter_section.h"
@@ -40,46 +39,6 @@ struct text_layout {
 /* ============================================================================
  * SECTION 1: TEXT OUTPUT HELPERS
  * ============================================================================ */
-
-/*
- * Print a single field using the same width logic as the header.
- * cpu_idx is 0 for summary/system fields and tracked CPU index for CPU fields.
- */
-static void write_text_value(const struct field_desc *field,
-			     const struct interval_record *rec,
-			     int cpu_idx,
-			     char *buf,
-			     size_t buf_len)
-{
-	if (!buf || buf_len == 0)
-		return;
-
-	switch (field->type) {
-	case FIELD_TYPE_DOUBLE: {
-		double val = field->getter.get_double(rec, cpu_idx);
-		if (isnan(val))
-			snprintf(buf, buf_len, "-");
-		else
-			snprintf(buf, buf_len, "%.2f", val);
-		break;
-	}
-	case FIELD_TYPE_LLONG: {
-		long long val = field->getter.get_llong(rec, cpu_idx);
-		snprintf(buf, buf_len, "%lld", val);
-		break;
-	}
-	case FIELD_TYPE_INT: {
-		int val = field->getter.get_int(rec, cpu_idx);
-		snprintf(buf, buf_len, "%d", val);
-		break;
-	}
-	case FIELD_TYPE_STRING: {
-		const char *val = field->getter.get_string(rec, cpu_idx);
-		snprintf(buf, buf_len, "%s", val ? val : "");
-		break;
-	}
-	}
-}
 
 static int get_default_field_width(const struct field_desc *field)
 {
@@ -121,7 +80,7 @@ static int measure_text_field_width(const struct field_desc *field,
 			width = label_len;
 	}
 
-	write_text_value(field, rec, cpu_idx, buf, sizeof(buf));
+	format_field_value(field, rec, cpu_idx, "-", buf, sizeof(buf));
 	{
 		int value_len = (int)strlen(buf);
 		if (value_len > width)
@@ -264,7 +223,7 @@ static void print_text_field_with_width(const struct field_desc *field,
 {
 	char buf[TEXT_VALUE_BUF_LEN];
 
-	write_text_value(field, rec, cpu_idx, buf, sizeof(buf));
+	format_field_value(field, rec, cpu_idx, "-", buf, sizeof(buf));
 	printf("%*s", width, buf);
 }
 

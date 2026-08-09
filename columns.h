@@ -212,4 +212,17 @@ void update_temp_field_visibility(void);
 void reset_columns(void);
 void clear_columns(void);
 
+/*
+ * Format a field value into buf as a string. The nan_str parameter controls
+ * how NaN doubles are rendered (e.g. "" for CSV, "-" for text). Non-NaN
+ * doubles use "%.2f". Shared by the CSV and text serializers; the JSON
+ * serializer keeps its own print_json_field_value because it needs
+ * stream-based string escaping.
+ */
+void format_field_value(const struct field_desc *field,
+			const struct interval_record *rec,
+			int row_idx,
+			const char *nan_str,
+			char *buf, size_t buf_size);
+
 #endif /* ARMSTAT_COLUMNS_H */
