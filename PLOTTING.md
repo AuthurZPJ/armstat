@@ -18,9 +18,10 @@ The current helper scripts are:
 - `scripts/plot_sum.py` for `SUM`-scope plots
 - `scripts/plot_cpu.py` for CPU-scope plots
 
-Both scripts import shared utilities from `plot_utils.py`, which is installed
-alongside them. Both scripts work with `armstat` JSON exports and current CSV
-exports.
+Both scripts import shared loaders and field aliases from
+`scripts/armstat_loader.py`, and matplotlib helpers from
+`scripts/plot_utils.py`. Both scripts work with `armstat` JSON exports and
+current CSV exports.
 
 The exact machine-readable export contract is documented separately in
 `EXPORTS.md`.

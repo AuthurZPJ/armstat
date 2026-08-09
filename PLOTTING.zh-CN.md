@@ -17,8 +17,9 @@
 - `scripts/plot_sum.py`：`SUM` 级画图
 - `scripts/plot_cpu.py`：CPU 级画图
 
-两个脚本都从 `plot_utils.py` 导入共享工具，安装时会一并安装。
-两个脚本都支持读取 `armstat` 的 JSON 导出，也支持当前版本的 CSV 导出。
+两个脚本都从 `scripts/armstat_loader.py` 导入共享的加载器和字段别名，
+从 `scripts/plot_utils.py` 导入 matplotlib 辅助工具。两个脚本都支持读取
+`armstat` 的 JSON 导出，也支持当前版本的 CSV 导出。
 
 更精确的机器可读导出结构，请参考独立文档 `EXPORTS.zh-CN.md`。
 

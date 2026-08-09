@@ -63,7 +63,7 @@ install : armstat
 		PLOTTING.md PLOTTING.zh-CN.md TESTING.md TESTING.zh-CN.md \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat
 	install -d $(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
-	install -m 755 scripts/plot_sum.py scripts/plot_cpu.py scripts/plot_utils.py \
+	install -m 755 scripts/plot_sum.py scripts/plot_cpu.py scripts/plot_utils.py scripts/armstat_loader.py \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
 
 .PHONY : uninstall

@@ -76,3 +76,12 @@ current; add a term when a decision resolves one.
   throwaway `struct cpu_row` — it calls the function directly with a
   `double[8]` output buffer. The rule is a display policy (depends on
   `visible[]`), not a cpuidle concern.
+
+- **armstat export loader** — the shared Python module
+  `scripts/armstat_loader.py` that owns the unified `FIELD_ALIASES` map,
+  JSON/CSV loaders (`load_summary_series`, `load_cpu_series`), the
+  `canonicalize_csv_key` canonicalizer, `resolve_field_name` field resolver,
+  series slicers, and CSV row counters. The deep module seam between the C
+  export contract and the Python plotting scripts. `plot_sum.py` and
+  `plot_cpu.py` import from it and retain only their distinct logic (presets,
+  CPU selection, plotting).

@@ -14,12 +14,8 @@ JSON carries real timestamps. CSV exports now include `timestamp` and
 from __future__ import annotations
 
 import argparse
-import csv
-import json
 import math
-import re
 import sys
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -28,380 +24,24 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+from armstat_loader import (  # noqa: E402
+    CpuSeriesData,
+    load_cpu_series,
+    resolve_field_name,
+    slice_cpu_series,
+)
 from plot_utils import (  # noqa: E402
-    SUPPORTED_SCHEMA_VERSION,
-    flatten_dict,
-    normalize_field_name,
     is_number,
-    to_float,
-    validate_schema_version,
-    parse_sample_range,
     smooth_series,
-    compute_legend_columns,
-    legend_font_size,
+    to_float,
     finalize_figure_layout,
     load_plotting_modules,
 )
-
-FIELD_ALIASES = {
-    "pkg": "package",
-    "package": "package",
-    "core": "core",
-    "node": "node",
-    "numa": "node",
-    "numa_node": "node",
-    "freq": "freq",
-    "freq_mhz": "freq",
-    "temp": "temp",
-    "temp(c)": "temp",
-    "cpu_temp_c": "temp",
-    "min": "min",
-    "min_freq_mhz": "min",
-    "max": "max",
-    "max_freq_mhz": "max",
-    "boost": "boost",
-    "idle%": "idle_percent",
-    "idle": "idle_percent",
-    "idle_percent": "idle_percent",
-    "cpu_idle_percent": "idle_percent",
-    "iowait%": "iowait_percent",
-    "iowait": "iowait_percent",
-    "iowait_percent": "iowait_percent",
-    "cpu_iowait_percent": "iowait_percent",
-    "busy%": "busy_percent",
-    "busy": "busy_percent",
-    "busy_percent": "busy_percent",
-    "cpu_busy_percent": "busy_percent",
-    "ipc": "ipc",
-    "cycles": "pmu.cycles",
-    "instructions": "pmu.instructions",
-}
-
-for idx in range(8):
-    FIELD_ALIASES[f"lpi{idx}"] = f"lpi{idx}"
-    FIELD_ALIASES[f"lpi-{idx}"] = f"lpi{idx}"
-    FIELD_ALIASES[f"idle_state{idx}"] = f"lpi{idx}"
 
 PRESET_NAMES = ("freq", "temp", "idle", "busy", "iowait", "ipc")
 DEFAULT_CPU_PLOT_LIMIT = 8
 GROUP_BY_CHOICES = ("node", "core")
 AGGREGATE_CHOICES = ("avg", "max", "min")
-
-
-@dataclass
-class CpuSeriesData:
-    x_values: List[object]
-    x_label: str
-    samples: List[Dict[int, Dict[str, object]]]
-    cpu_ids: List[int]
-    numeric_fields: List[str]
-
-
-def collect_numeric_fields(samples: Iterable[Dict[int, Dict[str, object]]]) -> List[str]:
-    seen: Dict[str, None] = {}
-    for sample in samples:
-        for row in sample.values():
-            for key, value in row.items():
-                if key.startswith("__"):
-                    continue
-                if is_number(value):
-                    seen.setdefault(key, None)
-    return sorted(seen.keys())
-
-
-def sample_x_value(timestamp: object, sample_index: int) -> object:
-    if isinstance(timestamp, (int, float)):
-        return datetime.fromtimestamp(timestamp)
-    if isinstance(timestamp, str) and timestamp and is_number(timestamp):
-        return datetime.fromtimestamp(to_float(timestamp))
-    return sample_index
-
-
-def load_json_cpu_series(path: Path) -> CpuSeriesData:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list):
-        raise SystemExit(f"{path} does not contain a JSON array.")
-
-    samples: List[Dict[int, Dict[str, object]]] = []
-    x_values: List[object] = []
-    cpu_ids: Set[int] = set()
-
-    for sample_index, item in enumerate(data, start=1):
-        if not isinstance(item, dict):
-            continue
-        validate_schema_version(item.get("schema_version"), path)
-        cpus = item.get("cpus")
-        if not isinstance(cpus, list):
-            continue
-
-        sample: Dict[int, Dict[str, object]] = {}
-        for cpu_entry in cpus:
-            if not isinstance(cpu_entry, dict):
-                continue
-            cpu_value = cpu_entry.get("cpu")
-            if cpu_value is None or not is_number(cpu_value):
-                continue
-
-            cpu_id = int(to_float(cpu_value))
-            row: Dict[str, object] = {}
-            for key, value in cpu_entry.items():
-                if key == "cpu":
-                    continue
-                flatten_dict(key, value, row)
-
-            sample[cpu_id] = row
-            cpu_ids.add(cpu_id)
-
-        if not sample:
-            continue
-
-        samples.append(sample)
-        x_values.append(sample_x_value(item.get("timestamp"), len(samples)))
-
-    if not samples:
-        raise SystemExit(
-            f"{path} does not contain per-CPU JSON records. "
-            "Use CPU JSON export, for example: armstat -f json -O cpus.json"
-        )
-
-    x_label = "time" if isinstance(x_values[0], datetime) else "sample"
-    return CpuSeriesData(
-        x_values=x_values,
-        x_label=x_label,
-        samples=samples,
-        cpu_ids=sorted(cpu_ids),
-        numeric_fields=collect_numeric_fields(samples),
-    )
-
-
-def count_csv_cpu_samples(path: Path) -> int:
-    """
-    Quick scan to count the number of samples in a CPU CSV file.
-    
-    CPU CSV files have multiple rows per sample (one per CPU), so we count
-    samples by detecting sample boundaries (changes in interval/timestamp/timestamp_iso).
-    """
-    count = 0
-    current_key = None
-    
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        
-        # Detect if this is mixed scope
-        is_mixed_scope = reader.fieldnames and "Scope" in reader.fieldnames
-        
-        for item in reader:
-            # Skip non-CPU rows in mixed scope
-            if is_mixed_scope and item.get("Scope") != "CPU":
-                continue
-            
-            # Skip rows without CPU value
-            if not item.get("CPU"):
-                continue
-            
-            # Detect sample boundary
-            key = (item.get("interval"), item.get("timestamp"), item.get("timestamp_iso"))
-            if key != current_key:
-                count += 1
-                current_key = key
-    
-    return count
-
-
-def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSeriesData:
-    """
-    Load per-CPU CSV data.
-    
-    When sample_range is provided, uses streaming to only load the requested
-    range, reducing memory usage from O(total_samples) to O(selected_samples).
-    """
-    # Determine range if specified
-    start_sample = 1
-    end_sample = None
-    
-    if sample_range:
-        total_samples = count_csv_cpu_samples(path)
-        parsed = parse_sample_range(sample_range, total_samples)
-        if parsed:
-            start_sample, end_sample = parsed
-
-    samples: List[Dict[int, Dict[str, object]]] = []
-    x_values: List[object] = []
-    cpu_ids: Set[int] = set()
-
-    def canonicalize_csv_key(key: str) -> str:
-        normalized = normalize_field_name(key)
-        if normalized.startswith("cpu."):
-            normalized = normalized.split(".", 1)[1]
-        elif normalized.startswith("summary."):
-            normalized = normalized.split(".", 1)[1]
-        alias_target = FIELD_ALIASES.get(normalized)
-        if alias_target:
-            return alias_target
-        return normalized
-
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit(f"{path} does not contain a CSV header.")
-
-        is_mixed_scope = "Scope" in reader.fieldnames
-
-        if "CPU" not in reader.fieldnames:
-            raise SystemExit(
-                f"{path} does not look like per-CPU CSV. "
-                "Use CPU CSV export, for example: armstat -f csv -O cpus.csv"
-            )
-
-        current_key: Optional[Tuple[object, object, object]] = None
-        current_sample: Dict[int, Dict[str, object]] = {}
-        sample_index = 0
-
-        def flush_sample() -> None:
-            nonlocal current_key, current_sample, sample_index
-
-            if not current_sample or current_key is None:
-                return
-
-            sample_index += 1
-            
-            # Streaming: only keep samples in the requested range
-            if sample_index >= start_sample and (end_sample is None or sample_index <= end_sample):
-                samples.append(current_sample)
-                x_values.append(sample_x_value(current_key[1], sample_index))
-            
-            current_sample = {}
-
-        for item in reader:
-            if is_mixed_scope and item.get("Scope") != "CPU":
-                continue
-
-            cpu_value = item.get("CPU")
-            if not cpu_value:
-                continue
-            validate_schema_version(item.get("schema_version"), path)
-
-            key = (item.get("interval"), item.get("timestamp"), item.get("timestamp_iso"))
-            if current_key is None:
-                current_key = key
-            elif key != current_key:
-                flush_sample()
-                current_key = key
-
-            if not is_number(cpu_value):
-                continue
-
-            cpu_id = int(to_float(cpu_value))
-            row = {}
-            for key, value in item.items():
-                normalized = normalize_field_name(key)
-
-                if key in {
-                    "Scope",
-                    "schema_version",
-                    "interval",
-                    "timestamp",
-                    "timestamp_iso",
-                    "CPU",
-                }:
-                    continue
-                if is_mixed_scope and normalized.startswith("summary."):
-                    continue
-                row[canonicalize_csv_key(key)] = value
-            current_sample[cpu_id] = row
-            cpu_ids.add(cpu_id)
-
-        flush_sample()
-
-    if not samples:
-        raise SystemExit(f"{path} does not contain per-CPU rows.")
-
-    if x_values and isinstance(x_values[0], datetime):
-        x_label = "time"
-    else:
-        x_label = "sample"
-
-    return CpuSeriesData(
-        x_values=x_values,
-        x_label=x_label,
-        samples=samples,
-        cpu_ids=sorted(cpu_ids),
-        numeric_fields=collect_numeric_fields(samples),
-    )
-
-
-def load_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSeriesData:
-    """
-    Load per-CPU data from JSON or CSV.
-    
-    For CSV files with sample_range, uses streaming to reduce memory usage.
-    For JSON files, sample_range is ignored here and should be applied via
-    slice_cpu_series() after loading.
-    """
-    suffix = path.suffix.lower()
-    if suffix == ".json":
-        return load_json_cpu_series(path)
-    if suffix == ".csv":
-        return load_csv_cpu_series(path, sample_range)
-
-    raise SystemExit(
-        f"Unsupported input format for {path}. "
-        "Use CPU JSON or CPU CSV exported by armstat."
-    )
-
-
-def slice_cpu_series(series: CpuSeriesData,
-                     sample_range: Optional[str]) -> CpuSeriesData:
-    parsed = parse_sample_range(sample_range, len(series.samples))
-    if parsed is None:
-        return series
-
-    start, end = parsed
-    start_idx = start - 1
-    end_idx = end
-    sliced_samples = series.samples[start_idx:end_idx]
-    cpu_ids: Set[int] = set()
-    for sample in sliced_samples:
-        cpu_ids.update(sample.keys())
-
-    return CpuSeriesData(
-        x_values=series.x_values[start_idx:end_idx],
-        x_label=series.x_label,
-        samples=sliced_samples,
-        cpu_ids=sorted(cpu_ids),
-        numeric_fields=collect_numeric_fields(sliced_samples),
-    )
-
-
-def resolve_field_name(requested: str, available_fields: Iterable[str]) -> str:
-    available = list(available_fields)
-    if requested in available:
-        return requested
-
-    normalized_map = {normalize_field_name(field): field for field in available}
-    normalized = normalize_field_name(requested)
-
-    if normalized in normalized_map:
-        return normalized_map[normalized]
-
-    alias_target = FIELD_ALIASES.get(normalized)
-    if alias_target and alias_target in available:
-        return alias_target
-
-    match = re.fullmatch(r"lpi-(\d+)", normalized)
-    if match:
-        idle_field = f"lpi{match.group(1)}"
-        if idle_field in available:
-            return idle_field
-
-    for field in available:
-        if normalize_field_name(field.rsplit(".", 1)[-1]) == normalized:
-            return field
-
-    raise SystemExit(
-        f"Unknown CPU field '{requested}'. "
-        "Use --list-fields to inspect fields available in this export."
-    )
 
 
 def resolve_preset(series: CpuSeriesData, preset: str) -> Tuple[str, Optional[str], str]:
@@ -516,6 +156,16 @@ def build_cpu_groups(series: CpuSeriesData,
         )
 
     return groups, group_field, group_label
+
+
+def extract_series(samples: Sequence[Dict[int, Dict[str, object]]],
+                   cpu_id: int,
+                   field: str) -> List[float]:
+    values: List[float] = []
+    for sample in samples:
+        row = sample.get(cpu_id, {})
+        values.append(to_float(row.get(field)))
+    return values
 
 
 def average_field_value(series: CpuSeriesData, cpu_id: int, field: str) -> float:
@@ -665,16 +315,6 @@ def build_output_path(input_path: Path,
     if output_dir is not None:
         return output_dir / filename
     return input_path.with_name(filename)
-
-
-def extract_series(samples: Sequence[Dict[int, Dict[str, object]]],
-                   cpu_id: int,
-                   field: str) -> List[float]:
-    values: List[float] = []
-    for sample in samples:
-        row = sample.get(cpu_id, {})
-        values.append(to_float(row.get(field)))
-    return values
 
 
 def list_fields(series: CpuSeriesData) -> None:
@@ -929,12 +569,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     input_path = Path(args.input)
-    
-    # Load data with optional sample_range for CSV streaming optimization
+
     series = load_cpu_series(input_path, args.sample_range)
-    
-    # For JSON files (which load fully), apply sample_range slicing
-    # For CSV files, sample_range was already applied during streaming load
+
     if input_path.suffix.lower() == ".json":
         series = slice_cpu_series(series, args.sample_range)
 
