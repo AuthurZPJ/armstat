@@ -360,7 +360,7 @@ static void serialize_text_cpu_row(const struct interval_record *rec,
 				   const struct text_layout *layout)
 {
 	int cpu_idx = rec->cpu_rows[row_idx].cpu_idx;
-	int cpu_id = get_cpu_id_by_tracked_idx(cpu_idx);
+	int cpu_id = get_cpu_row_id(rec, row_idx);
 
 	/* CPU column */
 	if (section_emit_cpu_identity())

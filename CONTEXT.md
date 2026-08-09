@@ -104,3 +104,13 @@ current; add a term when a decision resolves one.
   CSV path and `formatter_text.c`'s text path. The JSON serializer keeps its
   own `print_json_field_value` because JSON string escaping is stream-based
   (per-character `putchar`), not buffer-based.
+
+- **cpu row identity** — the `get_cpu_row_id(rec, row_idx)` function declared
+  in `formatter.h` and implemented in `formatter_record.c`. Hides the
+  `tracked_idx → cpu_id` translation from the serializers, which previously
+  called `get_cpu_id_by_tracked_idx()` directly (importing `cpu_inventory.h`
+  for an implementation detail). The "cpu" column remains a row-identity
+  special case (always first, no leading comma/separator, gated by
+  `section_emit_cpu_identity()`) rather than a field-table entry, because its
+  positional requirements are incompatible with the generic field-iteration
+  loop.

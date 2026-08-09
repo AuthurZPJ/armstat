@@ -349,7 +349,7 @@ void serialize_json(const struct interval_record *rec, int iteration)
 		printf("    \"cpus\": [\n");
 		for (int i = 0; i < rec->cpu_row_count; i++) {
 			int cpu_idx = rec->cpu_rows[i].cpu_idx;
-			int cpu_id = get_cpu_id_by_tracked_idx(cpu_idx);
+			int cpu_id = get_cpu_row_id(rec, i);
 			int is_last = (i == rec->cpu_row_count - 1);
 
 			printf("      {\"cpu\": %d", cpu_id);
@@ -481,7 +481,7 @@ static void serialize_csv_row(const struct interval_record *rec, int row_idx)
 	int count;
 
 	int cpu_idx = rec->cpu_rows[row_idx].cpu_idx;
-	int cpu_id = get_cpu_id_by_tracked_idx(cpu_idx);
+	int cpu_id = get_cpu_row_id(rec, row_idx);
 
 	/* CPU column */
 	print_csv_metadata_prefix(rec);
@@ -516,7 +516,7 @@ static void serialize_csv_mixed_cpu_row(const struct interval_record *rec, int r
 	int cpu_count;
 
 	int cpu_idx = rec->cpu_rows[row_idx].cpu_idx;
-	int cpu_id = get_cpu_id_by_tracked_idx(cpu_idx);
+	int cpu_id = get_cpu_row_id(rec, row_idx);
 
 	print_csv_metadata_prefix(rec);
 	printf("CPU,%d", cpu_id);

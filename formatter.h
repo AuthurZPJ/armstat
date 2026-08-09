@@ -141,6 +141,13 @@ struct interval_record *build_interval_record(
 void free_interval_record(struct interval_record *rec);
 
 /*
+ * Get the real Linux CPU ID for a row in the record.
+ * Hides the tracked_idx → cpu_id translation from the serializers.
+ * Returns -1 if rec is NULL or row_idx is out of bounds.
+ */
+int get_cpu_row_id(const struct interval_record *rec, int row_idx);
+
+/*
  * Text serializer
  */
 void serialize_text(const struct interval_record *rec, int iteration);

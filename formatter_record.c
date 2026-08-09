@@ -74,6 +74,16 @@ static const struct cpu_row *get_cpu_row(const struct interval_record *rec,
 	return &rec->cpu_rows[row_idx];
 }
 
+int get_cpu_row_id(const struct interval_record *rec, int row_idx)
+{
+	const struct cpu_row *row = get_cpu_row(rec, row_idx);
+
+	if (!row)
+		return -1;
+
+	return get_cpu_id_by_tracked_idx(row->cpu_idx);
+}
+
 /*
  * Raw cpuidle state lookup. Only used while materializing owned values during
  * build_interval_record(); serializers read the materialized cpu_row instead.
