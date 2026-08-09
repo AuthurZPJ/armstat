@@ -58,3 +58,11 @@ current; add a term when a decision resolves one.
   single-consumer fields remain directly accessed. A future step can make
   `struct sys_snapshot` fully opaque by adding the remaining getters and
   moving the struct definition into `collector.c`.
+
+- **sysfs I/O primitives** — the shared read functions in `sysfs_util.c` /
+  `sysfs_util.h` (`sysfs_read_int_checked`, `sysfs_read_ull_checked`,
+  `sysfs_read_str`, `sysfs_path_exists`, `fd_read_ull_checked`). The seam
+  between all sysfs/procfs/fd readers and the modules that consume them
+  (`topology.c`, `power_sensor.c`, `cpufreq.c`, `cpuidle.c`). Consolidates
+  previously duplicated patterns with a single checked convention (0 on
+  success, -1 on failure, value via out-param).

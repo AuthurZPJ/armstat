@@ -185,6 +185,7 @@ armstat.c              主循环与模块生命周期
 armstat_cli.c          命令行解析与列选择
 collector.c            采样编排
 sample_cache.c         内存池与快路径采样
+sysfs_util.c           共享 sysfs/procfs/fd 读取原语
 idle_backend.c         busy-source 策略辅助（/proc/stat 与 /proc/schedstat）
 aggregator.c           区间统计与 delta 计算
 columns.c              列可见性标志与字段描述符表

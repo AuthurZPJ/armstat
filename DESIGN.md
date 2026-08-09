@@ -637,6 +637,18 @@ guarantees**:
 All sensor policies are isolated in `power_sensor.c` so that future platforms
 can swap the discovery logic without touching the collector/formatter pipeline.
 
+### Shared sysfs I/O primitives
+
+All sysfs/procfs single-value reads and cached-fd reads go through
+`sysfs_util.c` (`sysfs_read_int_checked`, `sysfs_read_ull_checked`,
+`sysfs_read_str`, `sysfs_path_exists`, `fd_read_ull_checked`). This
+consolidates the previously duplicated `fopen`/`fscanf`/`fclose` and
+`lseek`/`read`/`strtoull` patterns that were copy-pasted across `topology.c`,
+`power_sensor.c`, `cpufreq.c`, and `cpuidle.c` with subtly different error
+conventions. All numeric readers use the checked convention (return 0 on
+success, -1 on failure, value via out-param) so callers can choose their own
+error sentinel.
+
 ### File descriptor budget
 
 armstat keeps file descriptors open across intervals for performance:

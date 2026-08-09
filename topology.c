@@ -22,6 +22,7 @@
 
 #include "topology.h"
 #include "cpu_inventory.h"
+#include "sysfs_util.h"
 
 /*
  * Topology summary statistics cached for quick access.
@@ -31,28 +32,6 @@ static int cores_per_socket = 0;
 static int sockets = 0;
 static int cpus_per_core = 1;
 static int numa_nodes = 0;
-
-/*
- * read_sysfs_int - Read integer from sysfs file
- * @path: sysfs file path
- *
- * Returns: value read, or -1 on error
- */
-static int read_sysfs_int(const char *path)
-{
-	FILE *fp;
-	int value = -1;
-
-	fp = fopen(path, "r");
-	if (!fp)
-		return -1;
-
-	if (fscanf(fp, "%d", &value) != 1)
-		value = -1;
-
-	fclose(fp);
-	return value;
-}
 
 /*
  * read_cpu_numa_node - Discover NUMA node for a CPU via cpuN/node*
@@ -124,16 +103,14 @@ static void populate_cpu_topology_attrs(struct cpu_desc *cpu)
 	snprintf(path, sizeof(path),
 		 "/sys/devices/system/cpu/cpu%d/topology/core_id",
 		 cpu->cpu_id);
-	cpu->core_id = read_sysfs_int(path);
-	if (cpu->core_id < 0)
+	if (sysfs_read_int_checked(path, &cpu->core_id) < 0)
 		cpu->core_id = cpu->cpu_id;  /* Fallback to CPU ID */
 
 	/* Read physical_package_id (socket/package) */
 	snprintf(path, sizeof(path),
 		 "/sys/devices/system/cpu/cpu%d/topology/physical_package_id",
 		 cpu->cpu_id);
-	cpu->package_id = read_sysfs_int(path);
-	if (cpu->package_id < 0)
+	if (sysfs_read_int_checked(path, &cpu->package_id) < 0)
 		cpu->package_id = 0;  /* Fallback to package 0 */
 
 	/* Read NUMA node - prefer cpuN/node* symlink membership */
@@ -144,7 +121,7 @@ static void populate_cpu_topology_attrs(struct cpu_desc *cpu)
 		snprintf(path, sizeof(path),
 			 "/sys/devices/system/cpu/cpu%d/topology/node_id",
 			 cpu->cpu_id);
-		cpu->numa_node = read_sysfs_int(path);
+		sysfs_read_int_checked(path, &cpu->numa_node);
 	}
 
 	if (cpu->numa_node < 0)

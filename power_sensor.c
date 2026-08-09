@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include "power.h"
+#include "sysfs_util.h"
 #define POWER_METER_NAME "power_meter"
 #define PACKAGE_POWER_FILE "power1_average"
 #define MAX_NUMA_TEMP_SENSORS 16
@@ -63,75 +64,8 @@ static int numa_temp_fds[MAX_NUMA_TEMP_SENSORS] = {
 };
 
 /* ============================================================================
- * SYSFS HELPERS
- * ============================================================================ */
-
-static long long read_sysfs_ll(const char *path)
-{
-	FILE *fp;
-	long long value = 0;
-
-	fp = fopen(path, "r");
-	if (!fp)
-		return 0;
-
-	if (fscanf(fp, "%lld", &value) != 1)
-		value = 0;
-
-	fclose(fp);
-	return value;
-}
-
-static int read_sysfs_int(const char *path)
-{
-	FILE *fp;
-	int value = 0;
-
-	fp = fopen(path, "r");
-	if (!fp)
-		return 0;
-
-	if (fscanf(fp, "%d", &value) != 1)
-		value = 0;
-
-	fclose(fp);
-	return value;
-}
-
-static char *read_sysfs_str(const char *path, char *buf, size_t len)
-{
-	FILE *fp;
-
-	if (!buf || len == 0)
-		return NULL;
-
-	fp = fopen(path, "r");
-	if (!fp)
-		return NULL;
-
-	if (fgets(buf, len, fp)) {
-		/* Remove trailing newline */
-		char *nl = strchr(buf, '\n');
-		if (nl) *nl = '\0';
-		fclose(fp);
-		return buf;
-	}
-
-	fclose(fp);
-	return NULL;
-}
-
-/* ============================================================================
  * SENSOR DISCOVERY
  * ============================================================================ */
-
-/*
- * Read power value, handling microwatts conversion
- */
-static int path_exists(const char *path)
-{
-	return access(path, R_OK) == 0;
-}
 
 static void free_sensor_name(char **name)
 {
@@ -202,46 +136,6 @@ static int count_numa_nodes_sysfs(void)
 	return count;
 }
 
-static long long read_fd_ll(int fd)
-{
-	char buf[64];
-	ssize_t n;
-
-	if (fd < 0)
-		return 0;
-
-	lseek(fd, 0, SEEK_SET);
-	n = read(fd, buf, sizeof(buf) - 1);
-	if (n <= 0)
-		return 0;
-
-	buf[n] = '\0';
-	if (n > 0 && buf[n - 1] == '\n')
-		buf[n - 1] = '\0';
-
-	return atoll(buf);
-}
-
-static int read_fd_int(int fd)
-{
-	char buf[64];
-	ssize_t n;
-
-	if (fd < 0)
-		return 0;
-
-	lseek(fd, 0, SEEK_SET);
-	n = read(fd, buf, sizeof(buf) - 1);
-	if (n <= 0)
-		return 0;
-
-	buf[n] = '\0';
-	if (n > 0 && buf[n - 1] == '\n')
-		buf[n - 1] = '\0';
-
-	return atoi(buf);
-}
-
 static void reset_sensor_state(void)
 {
 	if (package_power_fd >= 0) {
@@ -270,15 +164,17 @@ static void reset_sensor_state(void)
 
 static long long read_package_power_value(void)
 {
-	long long value;
+	unsigned long long raw = 0;
 
 	if (!package_power_available)
 		return 0;
 
 	if (package_power_fd >= 0)
-		value = read_fd_ll(package_power_fd);
+		fd_read_ull_checked(package_power_fd, &raw);
 	else
-		value = read_sysfs_ll(package_power_sensor.sensor_path);
+		sysfs_read_ull_checked(package_power_sensor.sensor_path, &raw);
+
+	long long value = (long long)raw;
 	if (package_power_sensor.is_microwatts)
 		value /= 1000;
 
@@ -304,8 +200,8 @@ static int discover_package_power_sensor(void)
 
 		snprintf(name_path, sizeof(name_path),
 			 "/sys/class/hwmon/%s/name", entry->d_name);
-		name = read_sysfs_str(name_path, name_buf, sizeof(name_buf));
-		if (!name)
+		name = sysfs_read_str(name_path, name_buf, sizeof(name_buf));
+		if (!*name)
 			continue;
 
 		if (strcmp(name, POWER_METER_NAME) != 0)
@@ -313,7 +209,7 @@ static int discover_package_power_sensor(void)
 
 		snprintf(power_path, sizeof(power_path),
 			 "/sys/class/hwmon/%s/%s", entry->d_name, PACKAGE_POWER_FILE);
-		if (!path_exists(power_path))
+		if (!sysfs_path_exists(power_path))
 			continue;
 
 		package_power_sensor.sensor_name = strdup(POWER_METER_NAME);
@@ -347,7 +243,7 @@ static void discover_numa_temp_sensors_direct_index(void)
 
 		snprintf(temp_path, sizeof(temp_path),
 			 "/sys/class/thermal/thermal_zone%d/temp", zone);
-		if (!path_exists(temp_path))
+		if (!sysfs_path_exists(temp_path))
 			continue;
 
 		sensor = &numa_temp_sensors[numa_temp_sensor_count];
@@ -457,10 +353,13 @@ int read_all_numa_temps(int *temps, int max_numas)
 		if (sensor_idx < 0)
 			continue;
 
+		unsigned long long raw = 0;
+
 		if (numa_temp_fds[sensor_idx] >= 0)
-			temps[i] = read_fd_int(numa_temp_fds[sensor_idx]);
+			fd_read_ull_checked(numa_temp_fds[sensor_idx], &raw);
 		else
-			temps[i] = read_sysfs_int(numa_temp_sensors[sensor_idx].sensor_path);
+			sysfs_read_ull_checked(numa_temp_sensors[sensor_idx].sensor_path, &raw);
+		temps[i] = (int)raw;
 	}
 
 	return 0;

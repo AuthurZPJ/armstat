@@ -35,6 +35,7 @@
 
 #include "cpuidle.h"
 #include "cpu_inventory.h"
+#include "sysfs_util.h"
 
 /*
  * Idle state tracking
@@ -82,26 +83,6 @@ static int state_fd_index(int cpu, int state)
 	return cpu * max_idle_states + state;
 }
 
-static unsigned long long read_fd_ull(int fd)
-{
-	char buf[64];
-	ssize_t n;
-
-	if (fd < 0)
-		return 0;
-
-	lseek(fd, 0, SEEK_SET);
-	n = read(fd, buf, sizeof(buf) - 1);
-	if (n <= 0)
-		return 0;
-
-	buf[n] = '\0';
-	if (n > 0 && buf[n - 1] == '\n')
-		buf[n - 1] = '\0';
-
-	return strtoull(buf, NULL, 10);
-}
-
 static int get_state_time_fd(int tracked_idx, int state)
 {
 	char path[256];
@@ -143,51 +124,6 @@ static int get_state_time_fd(int tracked_idx, int state)
 	return fd;
 }
 
-/*
- * read_sysfs_ull - Read unsigned long long from sysfs file
- * @path: sysfs file path
- *
- * Returns: value read, or 0 on error
- */
-static unsigned long long read_sysfs_ull(const char *path)
-{
-	FILE *fp;
-	unsigned long long value = 0;
-
-	fp = fopen(path, "r");
-	if (!fp)
-		return 0;
-
-	if (fscanf(fp, "%llu", &value) != 1)
-		value = 0;
-
-	fclose(fp);
-	return value;
-}
-
-static int read_sysfs_ull_checked(const char *path, unsigned long long *value)
-{
-	FILE *fp;
-	unsigned long long tmp = 0;
-
-	if (value)
-		*value = 0;
-
-	fp = fopen(path, "r");
-	if (!fp)
-		return -1;
-
-	if (fscanf(fp, "%llu", &tmp) != 1) {
-		fclose(fp);
-		return -1;
-	}
-
-	fclose(fp);
-	if (value)
-		*value = tmp;
-	return 0;
-}
-
 static void copy_idle_state_name(char dest[32], const char *src)
 {
 	size_t len;
@@ -200,26 +136,6 @@ static void copy_idle_state_name(char dest[32], const char *src)
 	len = strnlen(src, 31);
 	memcpy(dest, src, len);
 	dest[len] = '\0';
-}
-
-static char *read_sysfs_file(const char *path, char *buf, size_t len)
-{
-	FILE *fp;
-
-	if (!buf || len == 0)
-		return NULL;
-
-	fp = fopen(path, "r");
-	if (!fp)
-		return NULL;
-
-	if (fgets(buf, len, fp))
-		buf[strcspn(buf, "\n")] = 0;
-	else
-		buf[0] = 0;
-
-	fclose(fp);
-	return buf;
 }
 
 static void refresh_disable_bits_for_cpu(int tracked_idx)
@@ -242,7 +158,7 @@ static void refresh_disable_bits_for_cpu(int tracked_idx)
 		snprintf(sub, sizeof(sub), "cpuidle/state%d/disable", state);
 		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) < 0)
 			continue;
-		if (read_sysfs_ull_checked(path, &disable) == 0)
+		if (sysfs_read_ull_checked(path, &disable) == 0)
 			cpu_idle_state_disabled[tracked_idx * max_idle_states + state] =
 				disable ? 1 : 0;
 		else
@@ -369,18 +285,18 @@ static int read_idle_state(int tracked_idx, int state, struct idle_state *info)
 	/* DYNAMIC LAYER: Read time and usage every interval */
 	fd = get_state_time_fd(tracked_idx, state);
 	if (fd >= 0) {
-		info->time = read_fd_ull(fd);
+		fd_read_ull_checked(fd, &info->time);
 		/* usage is in a separate file; read it the slow way */
 		snprintf(sub, sizeof(sub), "cpuidle/state%d/usage", state);
 		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0)
-			info->usage = read_sysfs_ull(path);
+			sysfs_read_ull_checked(path, &info->usage);
 	} else {
 		snprintf(sub, sizeof(sub), "cpuidle/state%d/time", state);
 		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0)
-			info->time = read_sysfs_ull(path);
+			sysfs_read_ull_checked(path, &info->time);
 		snprintf(sub, sizeof(sub), "cpuidle/state%d/usage", state);
 		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0)
-			info->usage = read_sysfs_ull(path);
+			sysfs_read_ull_checked(path, &info->usage);
 	}
 
 	if (cpu_idle_state_disabled)
@@ -568,9 +484,9 @@ int init_cpuidle(void)
 				snprintf(path, sizeof(path),
 					 "/sys/devices/system/cpu/cpu%d/cpuidle/state%d/name",
 					 cpu_id, s);
-				name = read_sysfs_file(path, name_buf,
+				name = sysfs_read_str(path, name_buf,
 						      sizeof(name_buf));
-				if (!name || !*name)
+				if (!*name)
 					continue;
 
 				if (!idle_state_names[s][0]) {

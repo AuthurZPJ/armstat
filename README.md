@@ -208,6 +208,7 @@ armstat.c              main loop and module lifecycle
 armstat_cli.c          command-line parsing and column selection
 collector.c            orchestrates one interval of collection
 sample_cache.c         memory pools + fast-path sampling
+sysfs_util.c           shared sysfs/procfs/fd read primitives
 idle_backend.c         busy-source policy helpers (/proc/stat vs /proc/schedstat)
 aggregator.c           delta/interval calculations
 columns.c              column visibility flags + field descriptor table

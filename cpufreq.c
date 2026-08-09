@@ -21,6 +21,7 @@
 #include "cpufreq.h"
 #include "collector.h"
 #include "cpu_inventory.h"
+#include "sysfs_util.h"
 
 static int cpu_count;
 static int *cur_freq_fds;
@@ -83,47 +84,6 @@ static int devfreq_name_looks_like_uncore(const char *name)
 	return 0;
 }
 
-/*
- * read_sysfs_uint_slow — slow-layer sysfs uint reader via fopen/fclose.
- * Used for min/max freq, boost (refreshed every ~5s, not on the hot path).
- */
-static unsigned int read_sysfs_uint_slow(const char *path)
-{
-	FILE *fp;
-	unsigned int value = 0;
-
-	fp = fopen(path, "r");
-	if (fp) {
-		if (fscanf(fp, "%u", &value) != 1)
-			value = 0;
-		fclose(fp);
-	}
-	return value;
-}
-
-/*
- * read_sysfs_file — read a sysfs string value via fopen/fclose.
- */
-static char *read_sysfs_file(const char *path, char *buf, size_t len)
-{
-	FILE *fp;
-
-	if (!buf || len == 0)
-		return NULL;
-
-	fp = fopen(path, "r");
-	if (!fp)
-		return NULL;
-
-	if (fgets(buf, len, fp))
-		buf[strcspn(buf, "\n")] = 0;
-	else
-		buf[0] = 0;
-
-	fclose(fp);
-	return buf;
-}
-
 static int discover_uncore_freq_source(void)
 {
 	DIR *dir;
@@ -143,7 +103,7 @@ static int discover_uncore_freq_source(void)
 		snprintf(path, sizeof(path),
 			 "/sys/class/devfreq/%s/cur_freq",
 			 entry->d_name);
-		if (access(path, R_OK) != 0)
+		if (!sysfs_path_exists(path))
 			continue;
 
 		if (!devfreq_name_looks_like_uncore(entry->d_name))
@@ -169,10 +129,9 @@ static int discover_uncore_freq_source(void)
 int read_cpu_freq(int tracked_idx, unsigned int *freq)
 {
 	char path[CPUFREQ_SYSFS_PATH_LEN];
+	unsigned long long freq_raw = 0;
 	unsigned int freq_khz = 0;
-	char buf[32];
 	int cpu_id;
-	ssize_t n;
 
 	if (tracked_idx < 0 || tracked_idx >= cpu_count)
 		return -1;
@@ -195,22 +154,16 @@ int read_cpu_freq(int tracked_idx, unsigned int *freq)
 			}
 		}
 
-		if (fd >= 0) {
-			lseek(fd, 0, SEEK_SET);
-			n = read(fd, buf, sizeof(buf) - 1);
-			if (n > 0) {
-				buf[n] = '\0';
-				if (n > 0 && buf[n - 1] == '\n')
-					buf[n - 1] = '\0';
-				freq_khz = (unsigned int)atoi(buf);
-			}
-		}
+		if (fd >= 0)
+			freq_khz = (fd_read_ull_checked(fd, &freq_raw) == 0)
+				? (unsigned int)freq_raw : 0;
 	}
 
 	if (freq_khz == 0) {
 		cpu_sysfs_path(cpu_id, "cpufreq/scaling_cur_freq",
 			       path, sizeof(path));
-		freq_khz = read_sysfs_uint_slow(path);
+		if (sysfs_read_ull_checked(path, &freq_raw) == 0)
+			freq_khz = (unsigned int)freq_raw;
 	}
 	if (freq_khz == 0)
 		return -1;
@@ -222,6 +175,7 @@ int read_cpu_freq(int tracked_idx, unsigned int *freq)
 int read_cpu_min_max_freq(int tracked_idx, unsigned int *min, unsigned int *max)
 {
 	char path[CPUFREQ_SYSFS_PATH_LEN];
+	unsigned long long raw = 0;
 	int cpu_id;
 
 	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
@@ -229,10 +183,16 @@ int read_cpu_min_max_freq(int tracked_idx, unsigned int *min, unsigned int *max)
 		return -1;
 
 	cpu_sysfs_path(cpu_id, "cpufreq/scaling_min_freq", path, sizeof(path));
-	*min = read_sysfs_uint_slow(path);
+	if (sysfs_read_ull_checked(path, &raw) == 0)
+		*min = (unsigned int)raw;
+	else
+		*min = 0;
 
 	cpu_sysfs_path(cpu_id, "cpufreq/scaling_max_freq", path, sizeof(path));
-	*max = read_sysfs_uint_slow(path);
+	if (sysfs_read_ull_checked(path, &raw) == 0)
+		*max = (unsigned int)raw;
+	else
+		*max = 0;
 
 	return 0;
 }
@@ -250,34 +210,18 @@ int read_cpu_governor(int tracked_idx, char *governor, size_t len)
 
 	cpu_sysfs_path(cpu_id, "cpufreq/scaling_governor", path, sizeof(path));
 
-	gov = read_sysfs_file(path, gov_buf, sizeof(gov_buf));
-	if (!gov)
+	gov = sysfs_read_str(path, gov_buf, sizeof(gov_buf));
+	if (!*gov)
 		return -1;
 
 	copy_cstring(governor, len, gov);
 	return 0;
 }
 
-/*
- * read_sysfs_uint_exists — check whether a sysfs uint file exists and is readable.
- */
-static int read_sysfs_uint_exists(const char *path, unsigned int *value)
-{
-	FILE *fp = fopen(path, "r");
-
-	if (!fp)
-		return -1;
-
-	if (fscanf(fp, "%u", value) != 1)
-		*value = 0;
-	fclose(fp);
-	return 0;
-}
-
 int read_cpu_boost(int tracked_idx, int *boost)
 {
 	char path[CPUFREQ_SYSFS_PATH_LEN];
-	unsigned int value = 0;
+	unsigned long long value = 0;
 	int cpu_id;
 
 	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
@@ -286,7 +230,7 @@ int read_cpu_boost(int tracked_idx, int *boost)
 
 	/* Try per-CPU boost file first */
 	cpu_sysfs_path(cpu_id, "cpufreq/boost", path, sizeof(path));
-	if (read_sysfs_uint_exists(path, &value) == 0) {
+	if (sysfs_read_ull_checked(path, &value) == 0) {
 		*boost = (int)value;
 		return 0;
 	}
@@ -294,7 +238,7 @@ int read_cpu_boost(int tracked_idx, int *boost)
 	/* Fall back to global boost file */
 	snprintf(path, sizeof(path),
 		 "/sys/devices/system/cpu/cpufreq/boost");
-	if (read_sysfs_uint_exists(path, &value) == 0) {
+	if (sysfs_read_ull_checked(path, &value) == 0) {
 		*boost = (int)value;
 		return 0;
 	}
@@ -304,8 +248,6 @@ int read_cpu_boost(int tracked_idx, int *boost)
 
 int read_uncore_freq(unsigned long long *freq_hz)
 {
-	char buf[64];
-	ssize_t n;
 	unsigned long long value = 0;
 
 	if (!freq_hz || !uncore_freq_available || uncore_freq_path[0] == '\0')
@@ -314,25 +256,12 @@ int read_uncore_freq(unsigned long long *freq_hz)
 	if (uncore_freq_fd < 0)
 		uncore_freq_fd = open(uncore_freq_path, O_RDONLY);
 
-	if (uncore_freq_fd >= 0) {
-		lseek(uncore_freq_fd, 0, SEEK_SET);
-		n = read(uncore_freq_fd, buf, sizeof(buf) - 1);
-		if (n > 0) {
-			buf[n] = '\0';
-			if (n > 0 && buf[n - 1] == '\n')
-				buf[n - 1] = '\0';
-			value = strtoull(buf, NULL, 10);
-		}
-	}
+	if (uncore_freq_fd >= 0)
+		fd_read_ull_checked(uncore_freq_fd, &value);
 
-	if (value == 0) {
-		FILE *fp = fopen(uncore_freq_path, "r");
-		if (fp) {
-			if (fscanf(fp, "%llu", &value) != 1)
-				value = 0;
-			fclose(fp);
-		}
-	}
+	if (value == 0)
+		sysfs_read_ull_checked(uncore_freq_path, &value);
+
 	if (value == 0)
 		return -1;
 

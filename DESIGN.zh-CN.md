@@ -582,6 +582,16 @@ armstat 做出以下假设——它们在很多 ARM 服务器平台上成立，�
 所有传感器策略集中在 `power_sensor.c`，未来平台可以替换发现逻辑而
 不触及 collector/formatter 管道。
 
+### 共享 sysfs I/O 原语
+
+所有 sysfs/procfs 单值读取和缓存 fd 读取都通过 `sysfs_util.c`
+（`sysfs_read_int_checked`、`sysfs_read_ull_checked`、`sysfs_read_str`、
+`sysfs_path_exists`、`fd_read_ull_checked`）。这合并了此前在 `topology.c`、
+`power_sensor.c`、`cpufreq.c`、`cpuidle.c` 中以不同错误约定复制的
+`fopen`/`fscanf`/`fclose` 和 `lseek`/`read`/`strtoull` 模式。所有数值读取器
+使用 checked 约定（成功返回 0，失败返回 -1，值通过 out-param 传出），调用者
+自行选择错误哨兵。
+
 ### 文件描述符预算
 
 armstat 为了性能在 interval 之间保持文件描述符打开：
