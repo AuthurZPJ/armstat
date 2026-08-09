@@ -212,6 +212,7 @@ sysfs_util.c           shared sysfs/procfs/fd read primitives
 idle_backend.c         busy-source policy helpers (/proc/stat vs /proc/schedstat)
 aggregator.c           delta/interval calculations
 columns.c              column visibility flags + field descriptor table
+idle_display.c         LPI residual display rule (pure function)
 formatter_record.c     interval_record builder (value getters + materialization)
 formatter_text.c       text output
 formatter_machine.c    JSON/CSV output

@@ -30,6 +30,7 @@
 
 #include "formatter.h"
 #include "formatter_fields.h"
+#include "idle_display.h"
 #include "aggregator.h"
 #include "pmu.h"
 #include "topology.h"
@@ -546,63 +547,6 @@ static void fill_record_summary(struct interval_record *rec,
 		rec->summary.pmu[i] = stats->pmu_delta[i];
 }
 
-/*
- * LPI display rule (materialized once per interval, then owned by the record):
- *   - Busy/Idle comes from /proc/stat and is treated as authoritative.
- *   - Shallow states keep their raw cpuidle residency percentages.
- *   - The deepest visible usable state becomes the residual bucket so that
- *     sum(LPI-*) is forced to match Idle% for each CPU row.
- *
- * This keeps shallow state visibility intuitive on ARM while avoiding
- * short-interval drift where raw cpuidle state totals undercount idle.
- */
-static void compute_cpu_idle_state_display(struct cpu_row *row,
-					   const struct sys_snapshot *raw,
-					   int cpu_idx, double idle_pct,
-					   const int *visible, int summary_mode)
-{
-	double remaining = idle_pct;
-	int state_count = (raw && raw->idle) ? raw->idle_state_count : 0;
-	int last_state = -1;
-	double hidden_value = summary_mode ? 0.0 : NAN;
-
-	if (state_count > MAX_VISIBLE_IDLE_STATES)
-		state_count = MAX_VISIBLE_IDLE_STATES;
-
-	for (int s = state_count - 1; s >= 0; s--) {
-		const struct idle_state *state =
-			get_usable_raw_idle_state(raw, cpu_idx, s);
-
-		if (state && visible[s]) {
-			last_state = s;
-			break;
-		}
-	}
-
-	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++) {
-		const struct idle_state *state =
-			get_usable_raw_idle_state(raw, cpu_idx, s);
-		double displayed;
-
-		if (s >= state_count || !state || !visible[s]) {
-			row->idle_state_pct[s] = hidden_value;
-			continue;
-		}
-
-		if (s == last_state) {
-			displayed = remaining;
-		} else {
-			displayed = clamp_percent(state->percentage);
-			if (displayed > remaining)
-				displayed = remaining;
-			remaining -= displayed;
-			if (remaining < 0.0)
-				remaining = 0.0;
-		}
-		row->idle_state_pct[s] = clamp_percent(displayed);
-	}
-}
-
 static void materialize_cpu_idle_wakeups(struct cpu_row *row,
 					 const struct sys_snapshot *raw,
 					 int cpu_idx)
@@ -663,8 +607,12 @@ static void materialize_cpu_rows(struct interval_record *rec,
 
 		row->temp_c = compute_cpu_temp_c(raw, i);
 
-		compute_cpu_idle_state_display(row, raw, i, idle_pct,
-					      show_idle_state, 0);
+		compute_idle_state_display(row->idle_state_pct,
+					   raw ? (const struct idle_state **)raw->idle : NULL,
+					   i,
+					   raw ? raw->idle_state_count : 0,
+					   idle_pct,
+					   show_idle_state, 0);
 		materialize_cpu_idle_wakeups(row, raw, i);
 
 		if (stats) {
@@ -710,14 +658,17 @@ static void materialize_summary_idle_states(struct interval_record *rec,
 	}
 
 	for (int i = 0; i < tracked_count; i++) {
-		struct cpu_row row;
+		double tmp[MAX_VISIBLE_IDLE_STATES];
 		double idle_pct = stats ? clamp_percent(stats->per_cpu_idle[i]) : 0.0;
 
-		memset(&row, 0, sizeof(row));
-		compute_cpu_idle_state_display(&row, raw, i, idle_pct,
-					      show_summary_idle_state, 1);
+		compute_idle_state_display(tmp,
+					   raw ? (const struct idle_state **)raw->idle : NULL,
+					   i,
+					   raw ? raw->idle_state_count : 0,
+					   idle_pct,
+					   show_summary_idle_state, 1);
 		for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++)
-			acc[s] += row.idle_state_pct[s];
+			acc[s] += tmp[s];
 	}
 
 	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++)

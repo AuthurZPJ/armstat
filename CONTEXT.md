@@ -66,3 +66,13 @@ current; add a term when a decision resolves one.
   (`topology.c`, `power_sensor.c`, `cpufreq.c`, `cpuidle.c`). Consolidates
   previously duplicated patterns with a single checked convention (0 on
   success, -1 on failure, value via out-param).
+
+- **LPI residual display rule** — the pure function
+  `compute_idle_state_display()` in `idle_display.c` / `idle_display.h` that
+  transforms raw cpuidle per-state residency percentages into display
+  percentages where the deepest visible usable state absorbs the remainder so
+  `sum(LPI-*)` matches the authoritative `Idle%`. Extracted from
+  `formatter_record.c` so the summary averaging path no longer synthesizes a
+  throwaway `struct cpu_row` — it calls the function directly with a
+  `double[8]` output buffer. The rule is a display policy (depends on
+  `visible[]`), not a cpuidle concern.

@@ -540,7 +540,9 @@ idle。
 
 相比之下，`/proc/stat` 能正确地把这段时间计入 idle。
 
-formatter 层的残差调整正是为了弥合这一差距：
+残差调整正是为了弥合这一差距。它位于 `idle_display.c` 中，是一个纯函数
+（`compute_idle_state_display`），接收原始 cpuidle 百分比、权威 `Idle%` 和
+可见性数组，输出调整后的显示百分比：
 
 - **浅层状态**（进出频繁）：保留原始 cpuidle 驻留百分比，因为计数器更新
   频繁，数据可靠
@@ -551,6 +553,10 @@ formatter 层的残差调整正是为了弥合这一差距：
 的层面保留了 ARM 特有的分状态 idle 信息。formatter 最多暴露八列 LPI。
 残差归入最深的**可见且可用**状态；如果该状态被禁用（`stateN/disable = 1`），
 残差上移到次深可用状态。
+
+将规则提取到独立模块意味着 summary 平均路径不再需要在栈上合成临时
+`struct cpu_row` 仅为复用该函数——它直接用 `double[8]` 输出缓冲区调用
+`compute_idle_state_display`。
 
 没有这个调整，在短采样 interval 下 `sum(LPI-*)` 会系统性地低估 `Idle%`，
 使分状态 idle 列产生误导。

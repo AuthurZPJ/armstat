@@ -589,7 +589,10 @@ that state, even though the CPU was idle for the entire interval.
 
 `/proc/stat`, by contrast, correctly accounts for this time as idle.
 
-The residual adjustment in the formatter bridges this gap:
+The residual adjustment bridges this gap. It lives in `idle_display.c` as a
+pure function (`compute_idle_state_display`) that takes raw cpuidle
+percentages, the authoritative `Idle%`, and the visibility array, and
+produces display percentages where:
 
 - **shallow states** (frequent entry/exit): keep raw cpuidle residency
   percentages, which are reliable because the counters are updated often
@@ -603,6 +606,11 @@ most reliable. The formatter exposes at most eight LPI columns. The residual
 goes to the deepest **visible usable** state, and if a deeper state is disabled
 (`stateN/disable = 1`), unavailable, or beyond that visible limit, the residual
 shifts to the deepest remaining visible usable state.
+
+Extracting the rule into its own module means the summary averaging path
+no longer synthesizes a throwaway `struct cpu_row` on the stack just to
+reuse the function — it calls `compute_idle_state_display` directly with a
+plain `double[8]` output buffer.
 
 Without this adjustment, `sum(LPI-*)` would systematically undercount `Idle%`
 on short sampling intervals, making the split-idle columns misleading.

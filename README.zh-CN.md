@@ -189,6 +189,7 @@ sysfs_util.c           共享 sysfs/procfs/fd 读取原语
 idle_backend.c         busy-source 策略辅助（/proc/stat 与 /proc/schedstat）
 aggregator.c           区间统计与 delta 计算
 columns.c              列可见性标志与字段描述符表
+idle_display.c         LPI 残差显示规则（纯函数）
 formatter_record.c     interval_record 构建（值 getter 与物化）
 formatter_text.c       文本输出
 formatter_machine.c    JSON/CSV 输出
