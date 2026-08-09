@@ -85,3 +85,13 @@ current; add a term when a decision resolves one.
   export contract and the Python plotting scripts. `plot_sum.py` and
   `plot_cpu.py` import from it and retain only their distinct logic (presets,
   CPU selection, plotting).
+
+- **PMU rendering** — the 9 PMU-specific functions across
+  `formatter_machine.c` (6) and `formatter_text.c` (3) that bypass
+  `all_fields[]`. Unification into the field table is deferred per
+  ADR-0001 (`docs/adr/0001-defer-pmu-field-table-unification.md`) due to
+  three structural blockers: the 64-field bitmask cap, the missing
+  `FIELD_TYPE_ULLONG` in the type system, and the mixed-scope CSV
+  cross-scope padding pattern. The idle-state pattern
+  (`FIELD_SERIES_IDLE_STATE` + per-index visibility + runtime label
+  mutation) is the template for the future implementation.
