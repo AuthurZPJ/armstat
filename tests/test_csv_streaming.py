@@ -28,9 +28,9 @@ def generate_summary_csv(num_samples: int) -> Path:
     """Generate a test summary CSV file."""
     path = secure_temp_path(".csv")
     with path.open("w") as f:
-        f.write("schema_version,interval,timestamp,timestamp_iso,SUM,avg_freq,uncore_freq,busy_percent,idle_percent,temp0,temp1\n")
+        f.write("schema_version,interval,timestamp,timestamp_iso,SUM,freq,uncore_freq,busy_percent,idle_percent,temp0,temp1\n")
         for i in range(1, num_samples + 1):
-            f.write(f"5,{i},1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1600.00,50.00,50.00,45.00,46.00\n")
+            f.write(f"8,{i},1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1600.00,50.00,50.00,45.00,46.00\n")
     return path
 
 
@@ -41,7 +41,7 @@ def generate_cpu_csv(num_samples: int, num_cpus: int) -> Path:
         f.write("schema_version,interval,timestamp,timestamp_iso,CPU,freq,busy_percent,idle_percent,temp\n")
         for i in range(1, num_samples + 1):
             for cpu in range(num_cpus):
-                f.write(f"5,{i},1774665600,2026-03-28T10:40:00+0800,{cpu},2200.00,50.00,50.00,45.00\n")
+                f.write(f"8,{i},1774665600,2026-03-28T10:40:00+0800,{cpu},2200.00,50.00,50.00,45.00\n")
     return path
 
 
@@ -133,10 +133,10 @@ def test_json_unchanged():
     import json
     data = [
         {
-            "schema_version": 4,
+            "schema_version": 8,
             "interval": i,
             "timestamp": 1774665600 + i,
-            "summary": {"avg_freq": 2200.0, "busy_percent": 50.0}
+            "summary": {"freq": 2200.0, "busy_percent": 50.0}
         }
         for i in range(1, 101)
     ]

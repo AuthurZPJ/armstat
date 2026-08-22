@@ -31,7 +31,7 @@ int section_emit_mixed_csv(void);
 /* Summary-mode state (set by -S). */
 int section_is_summary_mode(void);
 
-/* Default-summary-output state (set by -a). */
+/* Default-summary-output state (enabled by default; also retained by -a/-s). */
 int section_default_summary_output(void);
 
 /* Whether the configured mode can emit at least one meaningful data row. */

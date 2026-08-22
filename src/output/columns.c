@@ -29,7 +29,7 @@
  * ============================================================================ */
 
 /* Column visibility flags - exposed to main for -s/-H options */
-int show_cpu = 1;
+int show_cpu = 0;
 int show_freq = 1;
 int show_idle = 1;
 int show_iowait = 0;
@@ -38,7 +38,7 @@ int show_temp = 1;
 int show_pmu = 0;
 int show_sysstat = 0;
 int show_membw = 0;
-int show_package = 0;
+int show_package = 1;
 int show_core = 0;
 int show_numa = 0;
 int show_ipc = 0;
@@ -67,17 +67,17 @@ static char idle_state_labels[8][16] = {
 	"LPI-0", "LPI-1", "LPI-2", "LPI-3",
 	"LPI-4", "LPI-5", "LPI-6", "LPI-7"
 };
-static char idle_state_wakeup_labels[8][24] = {
-	"LPI-0_wake", "LPI-1_wake", "LPI-2_wake", "LPI-3_wake",
-	"LPI-4_wake", "LPI-5_wake", "LPI-6_wake", "LPI-7_wake"
+static char idle_state_usage_labels[8][24] = {
+	"LPI-0_usage", "LPI-1_usage", "LPI-2_usage", "LPI-3_usage",
+	"LPI-4_usage", "LPI-5_usage", "LPI-6_usage", "LPI-7_usage"
 };
 
 static void set_default_idle_state_labels(void)
 {
 	for (int i = 0; i < ARRAY_SIZE(idle_state_labels); i++) {
 		snprintf(idle_state_labels[i], sizeof(idle_state_labels[i]), "LPI-%d", i);
-		snprintf(idle_state_wakeup_labels[i],
-			 sizeof(idle_state_wakeup_labels[i]), "LPI-%d_wake", i);
+		snprintf(idle_state_usage_labels[i],
+			 sizeof(idle_state_usage_labels[i]), "LPI-%d_usage", i);
 	}
 }
 
@@ -142,12 +142,12 @@ void set_idle_state_override(int state_idx, int enable, int whitelist)
 	 &show_temp,							\
 	 .getter.get_double = get_temp_vdie##idx}
 
-#define CPU_IDLE_WAKEUP_FIELD(idx)						\
-	{"idle_state_wakeup" #idx, idle_state_wakeup_labels[idx], "lpi" #idx "_wake", "/s", \
+#define CPU_IDLE_USAGE_FIELD(idx)						\
+	{"idle_state_usage" #idx, idle_state_usage_labels[idx], "lpi" #idx "_usage", "/s", \
 	 FIELD_SCOPE_CPU, FIELD_TYPE_DOUBLE, 2, FIELD_GROUP_IDLE,	\
 	 FIELD_SERIES_IDLE_STATE, idx,					\
 	 &show_idle_state[idx],						\
-	 .getter.get_double = get_cpu_idle_state_wakeup##idx}
+	 .getter.get_double = get_cpu_idle_state_usage##idx}
 
 #define CPU_IDLE_FIELD(idx)							\
 	{"idle_state" #idx, idle_state_labels[idx], "lpi" #idx, "%",		\
@@ -204,7 +204,7 @@ struct field_desc all_fields[] = {
 	/* Per-package fields */
 	PACKAGE_INT_FIELD("pkg_id", "Pkg", "package", "", FIELD_GROUP_PACKAGE,
 			  &show_package, get_pkg_package_id),
-	PACKAGE_DOUBLE_FIELD("pkg_avg_freq", "Freq", "freq", "MHz", 2, FIELD_GROUP_FREQ,
+	PACKAGE_DOUBLE_FIELD("pkg_freq_mhz", "Freq", "freq", "MHz", 2, FIELD_GROUP_FREQ,
 			 &show_freq, get_pkg_avg_mhz),
 	PACKAGE_DOUBLE_FIELD("pkg_idle_percent", "Idle%", "idle_percent", "%", 2, FIELD_GROUP_IDLE,
 			 &show_idle, get_pkg_idle_percent),
@@ -216,7 +216,7 @@ struct field_desc all_fields[] = {
 		      &show_package, get_pkg_cpu_count),
 
 	/* System-wide fields (shown in SUM row) */
-	SYSTEM_DOUBLE_FIELD("avg_mhz", "AvgFreq", "avg_freq", "MHz", 2, FIELD_GROUP_FREQ,
+	SYSTEM_DOUBLE_FIELD("summary_freq_mhz", "Freq", "freq", "MHz", 2, FIELD_GROUP_FREQ,
 			    &show_freq, get_summary_avg_mhz),
 	SYSTEM_DOUBLE_FIELD("uncore_freq", "UncoreFreq", "uncore_freq", "MHz", 2, FIELD_GROUP_FREQ,
 			    &show_freq, get_summary_uncore_freq_mhz),
@@ -280,14 +280,14 @@ struct field_desc all_fields[] = {
 	CPU_IDLE_FIELD(5),
 	CPU_IDLE_FIELD(6),
 	CPU_IDLE_FIELD(7),
-	CPU_IDLE_WAKEUP_FIELD(0),
-	CPU_IDLE_WAKEUP_FIELD(1),
-	CPU_IDLE_WAKEUP_FIELD(2),
-	CPU_IDLE_WAKEUP_FIELD(3),
-	CPU_IDLE_WAKEUP_FIELD(4),
-	CPU_IDLE_WAKEUP_FIELD(5),
-	CPU_IDLE_WAKEUP_FIELD(6),
-	CPU_IDLE_WAKEUP_FIELD(7),
+	CPU_IDLE_USAGE_FIELD(0),
+	CPU_IDLE_USAGE_FIELD(1),
+	CPU_IDLE_USAGE_FIELD(2),
+	CPU_IDLE_USAGE_FIELD(3),
+	CPU_IDLE_USAGE_FIELD(4),
+	CPU_IDLE_USAGE_FIELD(5),
+	CPU_IDLE_USAGE_FIELD(6),
+	CPU_IDLE_USAGE_FIELD(7),
 	CPU_DOUBLE_FIELD("cpu_idle_percent", "Idle%", "idle_percent", "%", 2, FIELD_GROUP_IDLE,
 			 &show_idle, get_cpu_idle_percent),
 	CPU_DOUBLE_FIELD("cpu_iowait_percent", "IOWait%", "iowait_percent", "%", 2, FIELD_GROUP_IDLE,
@@ -320,7 +320,7 @@ static uint64_t field_hide_mask;
 
 #undef SUMMARY_IDLE_FIELD
 #undef TEMP_VDIE_FIELD
-#undef CPU_IDLE_WAKEUP_FIELD
+#undef CPU_IDLE_USAGE_FIELD
 #undef CPU_IDLE_FIELD
 #undef SYSTEM_DOUBLE_FIELD
 #undef SYSTEM_LLONG_FIELD
@@ -487,10 +487,10 @@ void update_idle_state_visibility(void)
 		} else {
 			snprintf(idle_state_labels[i], sizeof(idle_state_labels[i]), "LPI-%d", i);
 		}
-		snprintf(idle_state_wakeup_labels[i],
-			 sizeof(idle_state_wakeup_labels[i]), "%.*s_wake",
-			 (int)(sizeof(idle_state_wakeup_labels[i]) -
-			       sizeof("_wake")),
+		snprintf(idle_state_usage_labels[i],
+			 sizeof(idle_state_usage_labels[i]), "%.*s_usage",
+			 (int)(sizeof(idle_state_usage_labels[i]) -
+			       sizeof("_usage")),
 			 idle_state_labels[i]);
 
 		if (!available) {
@@ -567,6 +567,9 @@ static void set_all_show_flags(int val)
 void reset_columns(void)
 {
 	set_all_show_flags(1);
+	/* The basic view is concise: SUM + package rows.  -a expands CPU rows. */
+	show_cpu = 0;
+	show_package = 1;
 	update_temp_field_visibility();
 	clear_field_overrides();
 	reset_idle_state_overrides_internal();

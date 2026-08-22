@@ -94,8 +94,8 @@ static void test_sysfs_path(void)
 {
 	char buf[256];
 
-	assert(cpu_sysfs_path(0, "cpufreq/scaling_cur_freq", buf, sizeof(buf)) == 0);
-	assert(strcmp(buf, "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") == 0);
+	assert(cpu_sysfs_path(0, "cpufreq/cpuinfo_cur_freq", buf, sizeof(buf)) == 0);
+	assert(strcmp(buf, "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq") == 0);
 
 	assert(cpu_sysfs_path(12, "cpuidle/state0/time", buf, sizeof(buf)) == 0);
 	assert(strcmp(buf, "/sys/devices/system/cpu/cpu12/cpuidle/state0/time") == 0);
@@ -105,7 +105,7 @@ static void test_sysfs_path(void)
 	assert(strcmp(buf, "/sys/devices/system/cpu/cpu4/") == 0);
 
 	/* Truncation is reported, not silently accepted. */
-	assert(cpu_sysfs_path(4, "cpufreq/scaling_cur_freq", buf, 8) == -1);
+	assert(cpu_sysfs_path(4, "cpufreq/cpuinfo_cur_freq", buf, 8) == -1);
 
 	printf("  sysfs path builder ok\n");
 }

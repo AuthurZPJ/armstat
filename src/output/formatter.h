@@ -49,7 +49,7 @@ struct cpu_row {
 
 	/* Display-adjusted per-idle-state residency (NAN when column hidden) */
 	double idle_state_pct[MAX_VISIBLE_IDLE_STATES];
-	double idle_state_wakeups[MAX_VISIBLE_IDLE_STATES];
+	double idle_state_usage[MAX_VISIBLE_IDLE_STATES];
 
 	/* Owned per-CPU PMU counters */
 	unsigned long long pmu[MAX_PMU_EVENTS];

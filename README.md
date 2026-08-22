@@ -22,11 +22,17 @@ scripts are included, so you can go from `armstat -f json -O data.json` to
 time-series charts without manual data wrangling. See the
 [integration reference](docs/REFERENCE.md#output-contract).
 
-Current exports use `schema_version = 7`. Version 5 introduced explicit
-unavailable telemetry, and version 6 added unambiguous package CSV rows.
-Version 7 adds the measured `duration_us`, emits RFC 3339 timestamps, makes
-Boost a JSON boolean, applies missing-value semantics to strings, and removes
-redundant package identity fields.
+Current exports use `schema_version = 8`. This is the only supported machine
+contract: the project has not shipped a historical export format that needs
+backward compatibility.
+
+## Supported Platform
+
+The initial supported platform family is **Huawei Kunpeng ARM64 Linux
+servers**. The generic Linux sources can make basic metrics available on other
+ARM64 machines, but those platforms are not part of the initial support claim.
+Each Kunpeng server model still has to pass the capability-enforced target and
+soak procedure before production deployment.
 
 ## Documentation
 
@@ -44,7 +50,7 @@ Python 3 plus matplotlib.
 make
 ./armstat --probe
 ./armstat -i 1 -n 5
-./armstat -S -a -i 1 -n 5
+./armstat -a -i 1 -n 5
 ./armstat -S -a -f json -O armstat.json -i 1 -n 5
 sudo make install
 ```
@@ -58,8 +64,8 @@ production rollout, run the capability-enforced target procedure in
 
 `armstat` uses a `SUM + package + CPU rows` model:
 
-- Default text mode prints one row per tracked CPU (no summary or package rows)
-- `-a` enables all supported base column groups and adds the package aggregation rows plus the `SUM` summary row on top of the per-CPU rows
+- Default output is the concise aggregate view: one `SUM` row plus one row per package
+- `-a` enables all supported base column groups and expands the default view with per-CPU rows
 - `-S` prints a single `SUM` row per interval
 - JSON writes an array of interval objects
 - CSV writes summary-only, package-only, CPU-only, or explicitly scoped mixed
@@ -134,13 +140,13 @@ Three ideas help interpret the output correctly:
 - `IOWait%` is also derived from `/proc/stat` and represents the interval share
   spent in iowait accounting; Linux reports iowait within the idle counter, so
   it is included in `Idle%` and is not counted as busy
-- Per-state idle residency and wakeup columns use cpuidle `stateN/name`
-  labels such as `LPI-0`, `LPI-1`, ..., and `LPI-0_wake` (wakeups/s)
+- Per-state idle residency and usage-rate columns use cpuidle `stateN/name`
+  labels such as `LPI-0`, `LPI-1`, ..., and `LPI-0_usage` (`usage` delta/s)
 - cpuidle is used for split `LPI-*` residency only
 - Per-state idle columns are hidden when cpuidle data is unavailable
 - a transient cpuidle counter failure or reset makes the visible LPI set
   unavailable until a fresh baseline has been established
-- a missing or disabled state reports its wakeup rate as unavailable, not zero
+- a missing or disabled state reports its usage rate as unavailable, not zero
 - The formatter exposes up to eight `LPI-*` columns (`LPI-0` ... `LPI-7`);
   platforms with deeper cpuidle state inventories are folded into the deepest
   visible usable residual bucket
@@ -176,11 +182,11 @@ So when reading `SUM`:
 - with `--cpu`, tracked-CPU-derived `SUM` fields such as frequency, idle, LPI,
   and PMU are based on the filtered tracked CPU set; platform/global fields
   keep their natural summary scope
-- the automatic mixed `SUM` section is still suppressed when `--cpu` is used,
-  so filtered CPU rows are not silently shown beside a summary section
+- the default aggregate view remains available with `--cpu` and is calculated
+  from the filtered tracked set
 - aggregate sections are suppressed when they would be implicitly mixed beside
   filtered CPU rows; an explicit aggregate-only request such as
-  `-s pkg_avg_freq --cpu 0-3` remains visible and uses the filtered tracked set
+  `-s pkg_freq_mhz --cpu 0-3` remains visible and uses the filtered tracked set
 
 ### Power and temperature
 
@@ -503,9 +509,9 @@ JSON carries the same metadata. Consumers should use `duration_us`, rather than
 the requested interval, when they need the actual measured window length.
 
 Summary CSV uses a `Scope` identity column containing `SUM`. When multiple
-scopes are selected, schema 7 CSV additionally uses `CPU,Package` identity
+scopes are selected, schema 8 CSV additionally uses `CPU,Package` identity
 columns and emits `SUM`, `PKG`, or `CPU` rows. Exact package fields such as
-`-s pkg_avg_freq` produce a usable package-only export instead of an empty file.
+`-s pkg_freq_mhz` produce a usable package-only export instead of an empty file.
 
 Detailed JSON/CSV field and structure documentation lives in the
 [English](docs/REFERENCE.md#output-contract) and
@@ -518,16 +524,15 @@ armstat -S
 armstat -S -a
 ```
 
-`-S` enables summary-only output. `-a` enables all supported base column
-groups and intentionally does not auto-enable PMU/IPC.
-In text/JSON mode, using `-a` or explicitly selecting summary-scope groups via
-`-s` prints a `SUM` section when system-scope fields are enabled. Package
-aggregation rows appear only when the package group is also enabled (`-s pkg` or
-`-a`).
+The normal default already contains `SUM` and package rows. `-S` removes the
+package section, while `-a` expands the view with CPU rows and intentionally
+does not auto-enable PMU/IPC. Explicit `-s` selection emits only the requested
+levels: include `cpu` to request CPU rows and `pkg` to request package rows.
 
-When `--cpu` filtering is active, this automatic mixed `SUM` section is
-suppressed to avoid surprising mixed-scope output. Use `-S --cpu ...` when you
-want a filtered tracked-CPU summary.
+With `--cpu`, the default aggregate rows use the filtered tracked CPU set. If
+CPU rows are explicitly expanded, implicit aggregate rows are suppressed to
+avoid mixed-scope surprises. Use `-S --cpu ...` for an explicitly filtered
+summary.
 
 ### CPU filtering
 
@@ -660,7 +665,7 @@ The current field model is scope-aware.
 
 ### Summary-scope fields
 
-- `AvgFreq`
+- `Freq`
 - `UncoreFreq`
 - idle state residency columns (`LPI-*`, using cpuidle `stateN/name`) when
   cpuidle data exists
@@ -726,11 +731,11 @@ display-oriented adjustments.
 
 - **Freq**
   - source:
-    `/sys/devices/system/cpu/cpuN/cpufreq/scaling_cur_freq`
+    `/sys/devices/system/cpu/cpuN/cpufreq/cpuinfo_cur_freq`
   - unit:
     MHz
   - formula:
-    `Freq = scaling_cur_freq / 1000`
+    `Freq = cpuinfo_cur_freq / 1000`
 
 - **Min / Max**
   - source:
@@ -754,15 +759,14 @@ display-oriented adjustments.
     text/CSV use `1` and `0`; JSON uses `true` and `false`; unavailable values
     are `-` in text, JSON `null`, and an empty CSV cell
 
-- **AvgFreq**
-  - per-CPU formula:
-    `(prev_cur_freq + cur_freq) / 2`
-  - summary formula:
-    average of per-CPU interval MHz across valid tracked CPUs
+- **Freq** at summary/package scope
+  - per-CPU sample:
+    current `cpuinfo_cur_freq` read at the end of the interval
+  - summary/package formula:
+    average of the current samples across valid tracked CPUs in that scope
   - note:
-    this is an interval-average approximation derived from two samples, not a
-    hardware APERF/MPERF style average; a failed read is unavailable and the
-    next successful read starts a new averaging baseline
+    this is a sampled cpufreq value, not a hardware-counter-derived effective
+    or busy frequency; a failed read is unavailable
 
 - **UncoreFreq** / `uncore_freq`
   - scope:

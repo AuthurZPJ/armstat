@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
-SUPPORTED_SCHEMA_VERSION = 7
-SUPPORTED_SCHEMA_VERSIONS = {4, 5, 6, 7}
+SUPPORTED_SCHEMA_VERSION = 8
+SUPPORTED_SCHEMA_VERSIONS = {SUPPORTED_SCHEMA_VERSION}
 
 
 def load_plotting_modules():

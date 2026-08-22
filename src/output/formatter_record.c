@@ -166,15 +166,15 @@ static void fill_record_summary(struct interval_record *rec,
 		rec->summary.pmu[i] = stats->pmu_delta[i];
 }
 
-static void materialize_cpu_idle_wakeups(struct cpu_row *row,
-					 const struct sys_snapshot *raw,
-					 int cpu_idx)
+static void materialize_cpu_idle_usage(struct cpu_row *row,
+				       const struct sys_snapshot *raw,
+				       int cpu_idx)
 {
 	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++) {
 		const struct idle_state *state =
 			get_usable_raw_idle_state(raw, cpu_idx, s);
 
-		row->idle_state_wakeups[s] = state ? state->wakeups_per_sec : NAN;
+		row->idle_state_usage[s] = state ? state->usage_per_sec : NAN;
 	}
 }
 
@@ -233,7 +233,7 @@ static void materialize_cpu_rows(struct interval_record *rec,
 					   raw ? raw->idle_state_count : 0,
 					   idle_pct,
 					   show_idle_state, 0);
-		materialize_cpu_idle_wakeups(row, raw, i);
+		materialize_cpu_idle_usage(row, raw, i);
 
 		if (stats) {
 			row->pmu_valid = stats->per_cpu_pmu_valid[i];

@@ -60,11 +60,8 @@ FIELD_ALIASES: Dict[str, str] = {
     "ipc": "ipc",
 
     # --- summary-scope ---
-    "freq": "avg_freq",
-    "avgfreq": "avg_freq",
-    "avgmhz": "avg_freq",
-    "avg_mhz": "avg_freq",
-    "avg_freq": "avg_freq",
+    "freq": "freq",
+    "summary_freq_mhz": "freq",
     "uncore": "uncore_freq",
     "uncorefreq": "uncore_freq",
     "uncoremhz": "uncore_freq",
@@ -117,19 +114,6 @@ FIELD_ALIASES: Dict[str, str] = {
     "max_freq_mhz": "max",
     "cycles": "pmu.cycles",
     "instructions": "pmu.instructions",
-}
-
-# CPU-scope aliases that should not override summary-scope "freq" -> "avg_freq"
-# when looked up in summary context.  Since resolve_field_name checks
-# available_fields, "freq" resolves to "avg_freq" in summary (where avg_freq
-# exists) and to "freq" in CPU scope (where freq exists).  Both targets are
-# in the alias map; the one that matches available_fields wins.
-FIELD_ALIASES["freq"] = "freq"  # CPU-scope override — but summary has avg_freq too
-
-# Some human aliases are intentionally scope-dependent. Resolve these against
-# the fields actually present instead of forcing one global alias target.
-CONTEXTUAL_FIELD_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "freq": ("freq", "avg_freq"),
 }
 
 # Generate LPI aliases
@@ -217,10 +201,6 @@ def resolve_field_name(requested: str, available_fields: Iterable[str]) -> str:
 
     if normalized in normalized_map:
         return normalized_map[normalized]
-
-    for alias_target in CONTEXTUAL_FIELD_ALIASES.get(normalized, ()):
-        if alias_target in available:
-            return alias_target
 
     alias_target = FIELD_ALIASES.get(normalized)
     if alias_target and alias_target in available:

@@ -312,6 +312,23 @@ if "$armstat_bin" --probe -o /dev/full 2>"$tmp_dir/probe-full.stderr"; then
 fi
 grep -F 'failed to finalize output' "$tmp_dir/probe-full.stderr" >/dev/null
 
+"$armstat_bin" -f json -i "$sample_interval" -n 1 \
+	>"$tmp_dir/default.json"
+python3 - "$tmp_dir/default.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    samples = json.load(stream)
+
+assert len(samples) == 1
+sample = samples[0]
+assert sample.get("schema_version") == 8
+assert isinstance(sample.get("summary"), dict)
+assert isinstance(sample.get("packages"), list) and sample["packages"]
+assert "cpus" not in sample
+PY
+
 printf '%s\n' 'previous-valid-export' >"$tmp_dir/existing.out"
 if "$armstat_bin" -S -s cpu -o "$tmp_dir/existing.out" -i "$sample_interval" \
 	-n 1 >"$tmp_dir/invalid.stdout" 2>"$tmp_dir/invalid.stderr"; then
@@ -345,7 +362,7 @@ with open(path, encoding="utf-8") as stream:
     samples = json.load(stream, parse_constant=reject_constant)
 expected = int(expected_text)
 assert len(samples) == expected, (len(samples), expected)
-assert all(sample.get("schema_version") == 7 for sample in samples)
+assert all(sample.get("schema_version") == 8 for sample in samples)
 assert [sample.get("interval") for sample in samples] == list(range(1, expected + 1))
 assert all(isinstance(sample.get("duration_us"), int) and
            sample["duration_us"] > 0 for sample in samples)
@@ -372,7 +389,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
     samples = json.load(stream)
 
 assert len(samples) == 1
-assert samples[0].get("schema_version") == 7
+assert samples[0].get("schema_version") == 8
 assert isinstance(samples[0].get("summary", {}).get("ctx_switches"), int)
 PY
 
@@ -397,7 +414,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 
 assert len(samples) == 1
 sample = samples[0]
-assert sample.get("schema_version") == 7
+assert sample.get("schema_version") == 8
 assert all("package_id" not in package
            for package in sample.get("packages", []))
 for cpu in sample.get("cpus", []):
@@ -508,7 +525,7 @@ assert rows[0][:7] == [
     "schema_version", "interval", "duration_us", "timestamp", "timestamp_ns",
     "timestamp_iso", "Scope",
 ]
-assert all(row[0] == "7" for row in rows[1:])
+assert all(row[0] == "8" for row in rows[1:])
 assert [int(row[1]) for row in rows[1:]] == list(range(1, expected + 1))
 assert all(int(row[2]) > 0 for row in rows[1:])
 assert all(int(row[4]) // 1_000_000_000 == int(row[3]) for row in rows[1:])
@@ -535,7 +552,7 @@ assert len({len(row) for row in rows}) == 1
 scopes = {row[6] for row in rows[1:]}
 assert {"SUM", "PKG", "CPU"}.issubset(scopes), scopes
 for row in rows[1:]:
-    assert row[0] == "7"
+    assert row[0] == "8"
     assert int(row[2]) > 0
     if row[6] == "SUM":
         assert row[7] == "" and row[8] == ""
@@ -545,7 +562,7 @@ for row in rows[1:]:
         assert row[7] != "" and row[8] == ""
 PY
 
-"$armstat_bin" -s pkg_avg_freq -f csv -i "$sample_interval" -n 1 \
+"$armstat_bin" -s pkg_freq_mhz -f csv -i "$sample_interval" -n 1 \
 	>"$tmp_dir/package.csv"
 python3 - "$tmp_dir/package.csv" <<'PY'
 import csv
@@ -559,7 +576,7 @@ assert rows[0][:8] == [
     "timestamp_iso", "Package", "Freq",
 ]
 assert len({len(row) for row in rows}) == 1
-assert all(row[0] == "7" and int(row[2]) > 0 and row[6] != ""
+assert all(row[0] == "8" and int(row[2]) > 0 and row[6] != ""
            for row in rows[1:])
 PY
 
@@ -661,7 +678,7 @@ with open(path, encoding="utf-8") as stream:
     samples = json.load(stream, parse_constant=reject_constant)
 expected = int(expected_text)
 assert len(samples) == expected, (len(samples), expected)
-assert all(sample.get("schema_version") == 7 for sample in samples)
+assert all(sample.get("schema_version") == 8 for sample in samples)
 assert [sample.get("interval") for sample in samples] == list(range(1, expected + 1))
 assert all(isinstance(sample.get("duration_us"), int) and
            sample["duration_us"] > 0 for sample in samples)

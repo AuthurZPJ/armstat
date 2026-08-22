@@ -118,7 +118,7 @@ int get_tracked_cpu_count(void);
  * Build a sysfs path under /sys/devices/system/cpu/cpu<id>/.
  *
  * @cpu_id:  real Linux CPU ID
- * @subpath: path relative to the cpu directory, e.g. "cpufreq/scaling_cur_freq"
+ * @subpath: path relative to the cpu directory, e.g. "cpufreq/cpuinfo_cur_freq"
  *           or "cpuidle/state0/time" (state index formatted by the caller)
  * @buf / @buflen: output buffer
  * Returns: 0 on success, -1 if the result would be truncated.

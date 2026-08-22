@@ -20,12 +20,16 @@
 MSR/RAPL/TSC 模型。
 
 **关键差异点**：armstat 产出机器可读的 JSON 和 CSV 导出，带每样本
-时间戳和稳定的 `schema_version`（当前为 7）。schema 5 开始把瞬时缺失
-明确输出为 JSON `null`、CSV 空单元格和 text `-`；schema 6 为 CSV
-加入了不会与 CPU / summary 混淆的 package 行；schema 7 又加入真实采样
-时长、RFC 3339 时区格式以及一致的布尔值与 scope 身份语义。内置画图脚本，可以从
+时间戳和稳定的 `schema_version`（当前为 8）。这是当前唯一支持的机器契约；
+项目尚未正式上线，因此不保留历史导出格式兼容。内置画图脚本，可以从
 `armstat -f json -O data.json` 直接生成时序图表，无需手动数据处理。
 详见[综合参考](docs/REFERENCE.zh-CN.md#输出契约)。
+
+## 支持平台
+
+首发支持平台为 **华为鲲鹏 ARM64 Linux 服务器**。通用 Linux 数据源可能让其它
+ARM64 机器也能显示部分基础指标，但它们不属于首发支持声明。具体鲲鹏服务器型号在
+生产部署前仍须通过带能力强制项的目标测试与稳定性运行。
 
 ## 文档导航
 
@@ -41,7 +45,7 @@ MSR/RAPL/TSC 模型。
 make
 ./armstat --probe
 ./armstat -i 1 -n 5
-./armstat -S -a -i 1 -n 5
+./armstat -a -i 1 -n 5
 ./armstat -S -a -f json -O armstat.json -i 1 -n 5
 sudo make install
 ```
@@ -55,8 +59,8 @@ sudo make install
 
 `armstat` 当前使用 `SUM + package + CPU 行` 模型：
 
-- 默认 text 模式每个 tracked CPU 只输出一行（不打印汇总或 package 行）
-- `-a` 打开所有支持的基础列组，并在每核 CPU 行之上附加 package 聚合行和 `SUM` 汇总行
+- 默认输出是简洁聚合视图：一行 `SUM` 加每个 package 一行
+- `-a` 打开所有支持的基础列组，并在默认聚合视图下展开 per-CPU 行
 - `-S` 每个 interval 只输出一行 `SUM`
 - JSON 输出 interval 对象数组
 - CSV 根据所选字段输出 summary-only、package-only、CPU-only，或带明确
@@ -118,13 +122,13 @@ armstat 会跳过错过的 deadline，而不是突发追赶采样。指标公式
 - `IOWait%` 也来自 `/proc/stat`，表示本采样区间内处于 iowait 记账的
   时间占比；Linux 的 iowait 属于 idle 计数，因此已包含在 `Idle%` 中，
   不会算作 busy
-- 分 idle state 驻留列和唤醒列使用 cpuidle `stateN/name`，例如 `LPI-0`、
-  `LPI-1`……以及 `LPI-0_wake`（每秒唤醒次数）
+- 分 idle state 驻留列和 usage rate 列使用 cpuidle `stateN/name`，例如
+  `LPI-0`、`LPI-1`……以及 `LPI-0_usage`（`usage` 区间增量/秒）
 - cpuidle 只用于拆分 `LPI-*` 驻留，不作为 Busy/Idle 的权威来源
 - 当没有 cpuidle 数据时，分 state 列会自动隐藏
 - cpuidle 计数瞬时失败或回退时，可见 LPI 集会保持不可用，直到重新建立
   baseline
-- state 缺失或被禁用时，其唤醒率为不可用，而不是 `0`
+- state 缺失或被禁用时，其 usage rate 为不可用，而不是 `0`
 - formatter 最多暴露八列 `LPI-*`（`LPI-0` ... `LPI-7`）；更深的 cpuidle
   state 会被折叠到最深可见的可用 residual bucket
 - `Busy%` 的计算方式是 `100 - Idle%`
@@ -150,10 +154,9 @@ armstat 会跳过错过的 deadline，而不是突发追赶采样。指标公式
 
 - 计数类字段更接近全机 interval 总量 / 聚合量
 - 百分比类字段更接近 tracked CPU 的平均视角
-- 当启用 `--cpu` 过滤时，默认不会再自动混出 `SUM`，避免把过滤后的 CPU 行和
-  全系统 summary 混在一起
+- 启用 `--cpu` 时，默认聚合视图仍然保留，并基于过滤后的 tracked CPU 集计算
 - 聚合 section 只有在会与 filtered CPU 行隐式混排时才被抑制；像
-  `-s pkg_avg_freq --cpu 0-3` 这样的显式 aggregate-only 请求仍会输出，
+  `-s pkg_freq_mhz --cpu 0-3` 这样的显式 aggregate-only 请求仍会输出，
   并基于过滤后的 tracked CPU 集计算
 - 使用 `--cpu` 时，tracked-CPU-derived 的 SUM 字段（如 frequency、idle、LPI、PMU）基于过滤后的 tracked CPU 集；平台/全局字段保持其自然 summary scope
 
@@ -444,9 +447,9 @@ CSV 导出现在会在每行前面附带 `schema_version`、`interval`、真实�
 `timestamp_iso`，方便后处理脚本直接按真实时间对齐亚秒样本，并识别当前
 导出契约版本。JSON 使用相同元数据。
 
-当只输出 summary 时，schema 7 CSV 使用 `Scope` 表头与 `SUM` 值，而不是把
+当只输出 summary 时，schema 8 CSV 使用 `Scope` 表头与 `SUM` 值，而不是把
 数据值写成列名。当同时选择多个 scope 时，CSV 使用 `Scope,CPU,Package` 身份列，
-并输出 `SUM`、`PKG` 或 `CPU` 行。像 `-s pkg_avg_freq` 这样的 package 精确
+并输出 `SUM`、`PKG` 或 `CPU` 行。像 `-s pkg_freq_mhz` 这样的 package 精确
 字段也会生成可用的 package-only 导出，不会只留下空文件。
 
 更完整的 JSON/CSV 字段与结构说明见[中文综合参考](docs/REFERENCE.zh-CN.md#输出契约)
@@ -459,15 +462,14 @@ armstat -S
 armstat -S -a
 ```
 
-`-S` 表示只输出摘要行，`-a` 表示打开所有支持的基础列组，并且不会
-隐式启用 PMU/IPC。
-在 text/JSON 模式下，如果使用 `-a`，或者通过 `-s` 显式选择了
-summary 级列组，那么启用了 system 级字段时会额外打印 `SUM` 区域。
-package 聚合行只有在同时启用 package 列组（`-s pkg` 或 `-a`）时才会出现。
+普通默认输出已经包含 `SUM` 和 package 行。`-S` 去掉 package 区域，只保留
+summary；`-a` 在默认聚合视图下展开 CPU 行，并且不会隐式启用 PMU/IPC。
+使用 `-s` 时只输出请求的层级：需要 CPU 行时包含 `cpu`，需要 package 行时
+包含 `pkg`。
 
-当启用了 `--cpu` 过滤时，为避免“过滤后的 CPU 行”和“全系统 SUM”
-混在一起，默认不会再自动附加这个 `SUM` 区域；如果确实要只看摘要，
-请显式使用 `-S`。
+启用 `--cpu` 时，默认聚合行基于过滤后的 tracked CPU 集计算。如果显式展开
+CPU 行，则隐式聚合行会被抑制，避免混合 scope 造成误解；需要明确的过滤后摘要时
+使用 `-S --cpu ...`。
 
 ### CPU 过滤
 
@@ -588,7 +590,7 @@ package 功耗与内存带宽 sysfs 路径、候选数量与歧义说明，以�
 
 ### Summary 级字段
 
-- `AvgFreq`
+- `Freq`
 - `UncoreFreq`
 - 分 idle state 驻留列（使用 cpuidle `stateN/name`，例如 `LPI-*`）
 - `Idle%`
@@ -648,11 +650,11 @@ package 功耗与内存带宽 sysfs 路径、候选数量与歧义说明，以�
 
 - **Freq**
   - 来源：
-    `/sys/devices/system/cpu/cpuN/cpufreq/scaling_cur_freq`
+    `/sys/devices/system/cpu/cpuN/cpufreq/cpuinfo_cur_freq`
   - 单位：
     MHz
   - 公式：
-    `Freq = scaling_cur_freq / 1000`
+    `Freq = cpuinfo_cur_freq / 1000`
 
 - **Min / Max**
   - 来源：
@@ -676,14 +678,14 @@ package 功耗与内存带宽 sysfs 路径、候选数量与歧义说明，以�
     text/CSV 使用 `1`、`0`；JSON 使用 `true`、`false`；不可用时分别为
     text `-`、JSON `null`、CSV 空单元格
 
-- **AvgFreq**
-  - 每 CPU 公式：
-    `(prev_cur_freq + cur_freq) / 2`
-  - summary 公式：
-    对所有有效 tracked CPU 的 per-CPU interval MHz 求平均
+- **summary/package 级 `Freq`**
+  - per-CPU 采样：
+    interval 结束时读取到的当前 `cpuinfo_cur_freq`
+  - summary/package 公式：
+    对该 scope 内所有有效 tracked CPU 的本轮采样值求平均
   - 备注：
-    这是基于两个采样点的 interval-average 近似值，不是 APERF/MPERF 那类
-    硬件平均频率
+    这是 cpufreq 采样值，不是基于硬件计数器计算的有效频率或忙时频率；读取失败
+    时保持不可用
 
 - **UncoreFreq** / `uncore_freq`
   - 作用域：

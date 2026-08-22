@@ -136,7 +136,7 @@ static double jiffies_percent(unsigned long long jiffies,
 	return (double)delta_jiffies_us * 100.0 / (double)delta_us;
 }
 
-static void test_frequency_average_does_not_overflow(void)
+static void test_frequency_sample_handles_max_value(void)
 {
 	struct cpu_freq_info freq;
 	struct sys_snapshot snap;
@@ -156,7 +156,7 @@ static void test_frequency_average_does_not_overflow(void)
 
 	freq.cur_freq = UINT_MAX;
 	calculate_interval_stats(&snap, &stats);
-	expected_mhz = (UINT_MAX - 1ULL) / 1000.0;
+	expected_mhz = UINT_MAX / 1000.0;
 	assert(fabs(stats.per_cpu_mhz[0] - expected_mhz) < 0.001);
 	assert(fabs(stats.avg_mhz - expected_mhz) < 0.001);
 	cleanup_aggregator();
@@ -793,7 +793,7 @@ int main(void)
 {
 	test_checked_numeric_readers_reject_malformed_values();
 	test_incomplete_idle_state_data_stays_unavailable();
-	test_frequency_average_does_not_overflow();
+	test_frequency_sample_handles_max_value();
 	test_aggregator_idle_100_pct();
 	test_aggregator_busy_50_pct();
 	test_aggregator_iowait_independent();

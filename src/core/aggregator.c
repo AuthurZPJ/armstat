@@ -18,8 +18,6 @@
 /* Previous raw counters for delta calculation */
 static struct raw_counters prev_counters;
 
-/* Previous frequencies for interval average calculation */
-static unsigned int prev_freqs[MAX_CPUS];
 static unsigned long long prev_pmu_per_cpu[MAX_CPUS][MAX_PMU_EVENTS];
 static unsigned long long prev_authoritative_idle_jiffies[MAX_CPUS];
 static unsigned long long prev_authoritative_iowait_jiffies[MAX_CPUS];
@@ -41,7 +39,6 @@ struct package_accumulator {
 static void clear_aggregator_baselines(void)
 {
 	memset(&prev_counters, 0, sizeof(prev_counters));
-	memset(prev_freqs, 0, sizeof(prev_freqs));
 	memset(prev_pmu_per_cpu, 0, sizeof(prev_pmu_per_cpu));
 	memset(prev_authoritative_idle_jiffies, 0,
 	       sizeof(prev_authoritative_idle_jiffies));
@@ -114,23 +111,14 @@ static void calculate_frequency_stats(const struct sys_snapshot *raw,
 
 	for (int i = 0; i < cpu_count; i++) {
 		unsigned int cur_freq = freqs[i].cur_freq;
-		unsigned long long avg_freq;
 
-		if (!freqs[i].cur_freq_valid || cur_freq == 0) {
-			prev_freqs[i] = 0;
+		if (!freqs[i].cur_freq_valid || cur_freq == 0)
 			continue;
-		}
 
-		/* Trapezoid over the previous and current frequency samples. */
-		if (prev_freqs[i] > 0)
-			avg_freq = ((unsigned long long)prev_freqs[i] + cur_freq) / 2;
-		else
-			avg_freq = cur_freq;
-
-		stats->per_cpu_mhz[i] = avg_freq / 1000.0;
-		total_freq += avg_freq;
+		/* A point sample, aggregated across the current tracked CPU set. */
+		stats->per_cpu_mhz[i] = cur_freq / 1000.0;
+		total_freq += cur_freq;
 		valid_cpus++;
-		prev_freqs[i] = cur_freq;
 	}
 
 	if (valid_cpus > 0)

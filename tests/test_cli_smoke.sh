@@ -20,7 +20,7 @@ grep -F -- "0 = unlimited" "$tmp_dir/help.txt" >/dev/null
 "$armstat_bin" -l >"$tmp_dir/list.txt" 2>"$tmp_dir/list.stderr"
 test ! -s "$tmp_dir/list.stderr"
 grep -F -- "Exact fields (stable ID" "$tmp_dir/list.txt" >/dev/null
-grep -F -- "avg_mhz" "$tmp_dir/list.txt" >/dev/null
+grep -F -- "summary_freq_mhz" "$tmp_dir/list.txt" >/dev/null
 grep -F -- "cpu_temp_c" "$tmp_dir/list.txt" >/dev/null
 grep -F -- "unit=MHz" "$tmp_dir/list.txt" >/dev/null
 grep -F -- "unit=MiB/s" "$tmp_dir/list.txt" >/dev/null

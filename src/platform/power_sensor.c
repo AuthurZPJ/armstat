@@ -2,7 +2,7 @@
 /*
  * power_sensor.c - Platform power and temperature sensor access
  *
- * This platform exposes:
+ * The initial Kunpeng platform profile expects:
  *   - One package power source via hwmon "power_meter"/power1_average
  *   - Summary temperatures via thermal_zoneN/temp, where N maps to NUMA/Vdie N
  *     under the current thermal-zone-index policy

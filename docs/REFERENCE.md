@@ -110,8 +110,9 @@ maintainer invariants that calculations and serializers must preserve:
   system counters and PMU counters are interval deltas or aggregates.
 - Package rows group tracked CPUs by the physical package ID supplied by
   topology.
-- Frequency uses the trapezoid of the previous and current valid
-  `scaling_cur_freq` readings for a CPU.
+- `Freq` is the current `cpuinfo_cur_freq` sample. Summary and package values
+  are cross-CPU averages of the current samples, not time averages or
+  hardware-counter-derived effective frequencies.
 - Energy is derived from interval-average package power and measured duration.
 - IPC is emitted only when named `cycles` and `instructions` deltas are both
   valid and cycles is nonzero.
@@ -122,7 +123,7 @@ Primary kernel interfaces are:
 |---|---|---|
 | current/min/max frequency, governor, boost | CPU `cpufreq` sysfs | MHz/string/bool |
 | Busy/Idle and IOWait | `/proc/stat`, optionally `/proc/schedstat` | % |
-| split idle states and wakeups | CPU `cpuidle` sysfs | %, /s |
+| split idle states and usage rates | CPU `cpuidle` sysfs | %, /s |
 | package power | one unambiguous `power_meter`/`power1_average` source | mW |
 | interval energy | derived from power and duration | J |
 | temperature | selected `thermal_zone` policy | degC |
@@ -141,7 +142,7 @@ re-baselining interval, or an unsupported capability.
 
 ## Output contract
 
-Machine-readable output currently uses `schema_version = 7`. Run
+Machine-readable output currently uses `schema_version = 8`. Run
 `armstat --list` for the authoritative current field IDs, scopes, types, units,
 text labels, and JSON keys; that view is generated from the same field
 registry used by the serializers.
@@ -172,9 +173,9 @@ always contains the metadata above and may contain:
 - `packages`: one object per package, each identified once by `package`;
 - `cpus`: one object per tracked CPU, each identified by real Linux `cpu`.
 
-Section presence follows the selected scope. `-S` emits only `summary`;
-default CPU-oriented output emits `cpus`; explicitly mixing scopes can emit
-multiple sections.
+Section presence follows the selected level. The default emits `summary` and
+`packages`; `-S` emits only `summary`; `-a` expands the output with `cpus`.
+Explicit selection can emit any valid combination.
 
 Unavailable numbers and strings are JSON `null`. Available `boost` values are
 JSON booleans. Non-finite internal floating-point values are normalized to
@@ -203,15 +204,13 @@ rows by their identity fields.
 
 ### Units and compatibility
 
-Canonical units are MHz, percent, degC, mW, J, MiB/s, wakeups per second,
+Canonical units are MHz, percent, degC, mW, J, MiB/s, usage delta per second,
 count per interval, and instructions per cycle. Rendered decimal precision is
 a presentation choice, not a sensor-accuracy guarantee.
 
-Consumers must gate on `schema_version`. Bundled plotting loaders accept
-schema versions 4 through 7. Within version 7, adding an optional field is
-compatible; removing, renaming, or reshaping an existing field requires a new
-schema version. Consumers must preserve missing values rather than converting
-them to zero.
+Consumers must require `schema_version = 8`; the project has not shipped an
+older contract that needs compatibility. Consumers must preserve missing
+values rather than converting them to zero.
 
 ## Plotting exports
 
@@ -226,8 +225,8 @@ Create summary or CPU inputs with:
 ```bash
 armstat -S -f json -O summary.json
 armstat -S -f csv -O summary.csv
-armstat -f json -O cpus.json
-armstat -f csv -O cpus.csv
+armstat -a -f json -O cpus.json
+armstat -a -f csv -O cpus.csv
 ```
 
 `scripts/plot_sum.py` handles summary series; `scripts/plot_cpu.py` handles
@@ -273,8 +272,8 @@ make O=/tmp/armstat-build
 
 ### ARM64 target acceptance
 
-Host-independent tests cannot prove hardware behavior. On the intended ARM64
-Linux deployment server, first inspect capabilities and then run:
+Host-independent tests cannot prove hardware behavior. On each supported
+Kunpeng ARM64 Linux deployment model, first inspect capabilities and then run:
 
 ```bash
 ./armstat --probe

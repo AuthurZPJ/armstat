@@ -10,7 +10,7 @@
 
 #include "formatter.h"
 
-#define MACHINE_SCHEMA_VERSION 7
+#define MACHINE_SCHEMA_VERSION 8
 #define MACHINE_FIELD_CAPACITY 64
 
 unsigned long long machine_record_timestamp_ns(

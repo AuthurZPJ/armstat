@@ -41,7 +41,7 @@ static void test_static_default_column_state_inherits_group_visibility(void)
 {
 	struct field_desc *power = require_field("power_mw");
 
-	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "avg_freq"));
+	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "freq"));
 	assert(scope_has_field(FIELD_SCOPE_CPU, "freq"));
 	assert(scope_has_field(FIELD_SCOPE_CPU, "idle_percent"));
 	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "uncore_freq"));
@@ -71,7 +71,7 @@ static void test_hide_exact_summary_field_keeps_group_alive(void)
 	parse_column_option("uncore_freq", 0);
 
 	assert(show_freq == 1);
-	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "avg_freq"));
+	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "freq"));
 	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "uncore_freq"));
 }
 
@@ -92,7 +92,7 @@ static void test_show_exact_field_whitelists_only_that_field(void)
 	parse_column_option("uncore_freq", 1);
 
 	assert(show_freq == 1);
-	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "avg_freq"));
+	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "freq"));
 	if (has_uncore_freq_support())
 		assert(scope_has_field(FIELD_SCOPE_SYSTEM, "uncore_freq"));
 	else
@@ -103,11 +103,11 @@ static void test_show_exact_package_field_enables_package_section(void)
 {
 	clear_columns();
 	set_section_default_summary_output(1);
-	parse_column_option("pkg_avg_freq", 1);
+	parse_column_option("pkg_freq_mhz", 1);
 
 	assert(show_package == 1);
 	assert(scope_has_field(FIELD_SCOPE_PACKAGE, "freq"));
-	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "avg_freq"));
+	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "freq"));
 	assert(!scope_has_field(FIELD_SCOPE_CPU, "freq"));
 	assert(section_emit_package() == 1);
 }
@@ -154,7 +154,7 @@ static void test_temp_and_idle_field_metadata(void)
 	struct field_desc *summary_temp = require_field("temp_vdie0");
 	struct field_desc *cpu_temp = require_field("cpu_temp_c");
 	struct field_desc *cpu_lpi0 = require_field("idle_state0");
-	struct field_desc *cpu_lpi0_wake = require_field("idle_state_wakeup0");
+	struct field_desc *cpu_lpi0_usage = require_field("idle_state_usage0");
 
 	assert((summary_temp->group_mask & FIELD_GROUP_TEMP) != 0);
 	assert(summary_temp->series == FIELD_SERIES_SUMMARY_TEMP);
@@ -164,10 +164,10 @@ static void test_temp_and_idle_field_metadata(void)
 	assert(cpu_temp->series == FIELD_SERIES_NONE);
 	assert(cpu_lpi0->series == FIELD_SERIES_IDLE_STATE);
 	assert(cpu_lpi0->series_index == 0);
-	assert(cpu_lpi0_wake->series == FIELD_SERIES_IDLE_STATE);
-	assert(cpu_lpi0_wake->series_index == 0);
-	assert(strcmp(cpu_lpi0_wake->json_label, "lpi0_wake") == 0);
-	assert(strcmp(cpu_lpi0->label, cpu_lpi0_wake->label) != 0);
+	assert(cpu_lpi0_usage->series == FIELD_SERIES_IDLE_STATE);
+	assert(cpu_lpi0_usage->series_index == 0);
+	assert(strcmp(cpu_lpi0_usage->json_label, "lpi0_usage") == 0);
+	assert(strcmp(cpu_lpi0->label, cpu_lpi0_usage->label) != 0);
 }
 
 static void test_all_columns_enable_base_groups_but_not_pmu_or_ipc(void)
@@ -193,9 +193,9 @@ static void test_all_columns_enable_base_groups_but_not_pmu_or_ipc(void)
 static void test_show_all_remains_union_with_later_tokens(void)
 {
 	clear_columns();
-	assert(parse_column_option("all,avg_mhz", 1) == 0);
+	assert(parse_column_option("all,summary_freq_mhz", 1) == 0);
 
-	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "avg_freq"));
+	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "freq"));
 	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "power"));
 	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "ctx_switches"));
 	assert(scope_has_field(FIELD_SCOPE_CPU, "freq"));
@@ -203,7 +203,7 @@ static void test_show_all_remains_union_with_later_tokens(void)
 	clear_columns();
 	assert(parse_column_option("all,freq", 1) == 0);
 
-	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "avg_freq"));
+	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "freq"));
 	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "power"));
 	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "ctx_switches"));
 	assert(scope_has_field(FIELD_SCOPE_CPU, "freq"));

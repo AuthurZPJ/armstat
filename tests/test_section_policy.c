@@ -5,7 +5,7 @@
  * Drives the policy directly with controlled field visibility, summary-mode
  * state, and CPU filter state, asserting which output sections are emitted.
  * These cover the decisions previously buried in each serializer:
- *   - default mode: per-CPU rows only
+ *   - default mode: SUM + package rows
  *   - -a: SUM + package + CPU sections
  *   - -S: summary-only mode
  *   - --cpu filter: suppresses implicit aggregation beside CPU rows, while
@@ -36,7 +36,7 @@ static void reset_policy_state(void)
 	reset_columns();
 	clear_field_overrides();
 	set_section_summary_mode(0);
-	set_section_default_summary_output(0);
+	set_section_default_summary_output(1);
 	set_cpu_inventory_filter(NULL);
 }
 
@@ -62,11 +62,11 @@ static void test_default_mode(void)
 	reset_policy_state();
 
 	CHECK(section_is_summary_mode() == 0);
-	CHECK(section_emit_cpu() == 1);
-	CHECK(section_emit_cpu_identity() == 1);
-	CHECK(section_emit_package() == 0);
-	CHECK(section_emit_default_summary() == 0);
-	CHECK(section_emit_mixed_csv() == 0);
+	CHECK(section_emit_cpu() == 0);
+	CHECK(section_emit_cpu_identity() == 0);
+	CHECK(section_emit_package() == 1);
+	CHECK(section_emit_default_summary() == 1);
+	CHECK(section_emit_mixed_csv() == 1);
 }
 
 static void test_all_columns_mode(void)
@@ -126,7 +126,7 @@ static void test_cpu_filter_keeps_explicit_aggregate_only_output(void)
 {
 	reset_policy_state();
 	clear_columns();
-	select_exact_field("pkg_avg_freq");
+	select_exact_field("pkg_freq_mhz");
 	CHECK(set_cpu_inventory_filter("0") == 0);
 
 	CHECK(section_emit_cpu() == 0);

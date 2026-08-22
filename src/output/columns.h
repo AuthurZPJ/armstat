@@ -37,8 +37,8 @@
  * Field scope - defines where field data comes from
  */
 enum field_scope {
-	FIELD_SCOPE_SYSTEM,    /* System-wide: avg_mhz, busy_percent, power, etc. */
-	FIELD_SCOPE_PACKAGE,   /* Per-package: avg_mhz, idle, busy, iowait */
+	FIELD_SCOPE_SYSTEM,    /* System-wide: sampled freq, busy, power, etc. */
+	FIELD_SCOPE_PACKAGE,   /* Per-package: sampled frequency, idle, busy, iowait */
 	FIELD_SCOPE_CPU,       /* Per-CPU: freq, idle, power, temp */
 };
 
@@ -110,8 +110,8 @@ typedef const char *(*getter_string)(const struct interval_record *rec, int row_
  * This enables centralized field management instead of scattered printf logic
  */
 struct field_desc {
-	const char *id;           /* Stable CLI field ID: "avg_mhz", "freq_mhz" */
-	const char *label;        /* Column header: "AvgFreq", "cpu0_cycles" */
+	const char *id;           /* Stable CLI field ID: "summary_freq_mhz", "freq_mhz" */
+	const char *label;        /* Column header: "Freq", "cpu0_cycles" */
 	const char *json_label;   /* JSON label (can differ from id) */
 	const char *unit;         /* Human-readable unit, empty if dimensionless */
 	enum field_scope scope;   /* Data scope */

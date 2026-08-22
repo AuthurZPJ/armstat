@@ -80,7 +80,7 @@ static void reset_test_state(void)
 	clear_idle_state_overrides();
 	set_text_quiet(0);
 	set_section_summary_mode(0);
-	set_section_default_summary_output(0);
+	set_section_default_summary_output(1);
 	set_text_header_interval(0);
 	enable_pmu(0);
 	enable_ipc(0);
@@ -636,7 +636,7 @@ static void test_mixed_scope_csv_serializer_uses_scoped_headers(void)
 	struct cpu_freq_info freqs[1];
 	struct serializer_args args;
 	char *output;
-	char *argv[] = {"armstat", "-f", "csv", "-s", "freq,power", NULL};
+	char *argv[] = {"armstat", "-f", "csv", "-s", "cpu,freq,power", NULL};
 
 	parse_test_args(5, argv);
 	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
@@ -644,8 +644,8 @@ static void test_mixed_scope_csv_serializer_uses_scoped_headers(void)
 	args.rec = &rec;
 
 	output = capture_stdout(emit_csv_mixed_scope, &args);
-	assert(strstr(output, "7,2147483648,1000000,") != NULL);
-	assert(strstr(output, "summary.avg_freq") != NULL);
+	assert(strstr(output, "8,2147483648,1000000,") != NULL);
+	assert(strstr(output, "summary.freq") != NULL);
 	assert(strstr(output, "summary.power") != NULL);
 	assert(strstr(output, "cpu.freq") != NULL);
 	assert(strstr(output, "Scope,CPU,Package") != NULL);
@@ -673,7 +673,7 @@ static void test_summary_json_serializer_emits_schema_and_summary_only(void)
 	args.rec = &rec;
 
 	output = capture_stdout(emit_json_record, &args);
-	assert(strstr(output, "\"schema_version\": 7") != NULL);
+	assert(strstr(output, "\"schema_version\": 8") != NULL);
 	assert(strstr(output, "\"interval\": 2147483648") != NULL);
 	assert(strstr(output, "\"duration_us\": 1000000") != NULL);
 	assert(strstr(output, "\"timestamp_ns\": 1774665600123456789") != NULL);
@@ -876,7 +876,7 @@ static void test_text_serializer_emits_column_headers_and_values(void)
 	free(output);
 }
 
-static void test_default_text_suppresses_package_rows(void)
+static void test_default_text_emits_summary_and_package_rows(void)
 {
 	struct interval_record rec;
 	struct sys_snapshot raw;
@@ -893,10 +893,11 @@ static void test_default_text_suppresses_package_rows(void)
 	rec.packages[0].cpu_count = 1;
 	args.rec = &rec;
 
-	/* Default mode: per-CPU rows only — no package aggregation rows. */
+	/* Default mode: concise SUM + package rows, without per-CPU expansion. */
 	output = capture_stdout(emit_text_record, &args);
-	assert(strstr(output, "Pkg") == NULL);
-	assert(strstr(output, "CPU") != NULL);
+	assert(strstr(output, "Pkg0") != NULL);
+	assert(strstr(output, "SUM") != NULL);
+	assert(section_emit_cpu() == 0);
 	free(output);
 
 	/* -a enables the package and SUM sections alongside per-CPU rows. */
@@ -905,6 +906,7 @@ static void test_default_text_suppresses_package_rows(void)
 	output = capture_stdout(emit_text_record, &args);
 	assert(strstr(output, "Pkg0") != NULL);
 	assert(strstr(output, "SUM") != NULL);
+	assert(section_emit_cpu() == 1);
 	/* The SUM, Pkg, and CPU sections are separated by blank lines. */
 	assert(strstr(output, "\n\n") != NULL);
 	/* The package id is shown once, in the row key — the redundant
@@ -1007,7 +1009,7 @@ static void test_multi_cpu_csv_serializer_emits_all_cpu_rows(void)
 
 	reset_test_state();
 	set_section_default_summary_output(1);
-	parse_column_option("freq,idle", 1);
+	parse_column_option("cpu,freq,idle", 1);
 	reset_machine_state();
 	make_multi_cpu_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
 	args.rec = &rec;
@@ -1040,7 +1042,7 @@ static void test_package_csv_serializer_emits_package_rows(void)
 	struct cpu_freq_info freqs[1];
 	struct serializer_args args;
 	char *output;
-	char *argv[] = {"armstat", "-f", "csv", "-s", "pkg_avg_freq", NULL};
+	char *argv[] = {"armstat", "-f", "csv", "-s", "pkg_freq_mhz", NULL};
 
 	parse_test_args(5, argv);
 	reset_machine_state();
@@ -1053,7 +1055,7 @@ static void test_package_csv_serializer_emits_package_rows(void)
 
 	output = capture_stdout(emit_csv_mixed_scope, &args);
 	assert(strstr(output, "Package,Freq") != NULL);
-	assert(strstr(output, "7,1,1000000,") != NULL);
+	assert(strstr(output, "8,1,1000000,") != NULL);
 	assert(strstr(output, ",7,2134.50") != NULL);
 	assert(strstr(output, "Scope") == NULL);
 	assert_csv_rows_are_rectangular(output);
@@ -1125,11 +1127,11 @@ static void test_summary_csv_serializer_emits_metadata_and_summary_fields(void)
 	assert(strstr(output, "duration_us") != NULL);
 
 	/* Header should contain summary-scoped field labels */
-	assert(strstr(output, "AvgFreq") != NULL);
+	assert(strstr(output, "Freq") != NULL);
 	assert(strstr(output, "Power") != NULL);
 
 	/* Data row should have the schema_version value */
-	assert(strstr(output, "7,") != NULL);
+	assert(strstr(output, "8,") != NULL);
 	assert(strstr(output, "timestamp_iso,Scope,") != NULL);
 
 	/* Should contain a summary row */
@@ -1181,11 +1183,11 @@ static void test_interval_record_materializes_owned_values(void)
 	states[0].available = 1;
 	states[0].disabled = 0;
 	states[0].percentage = 20.0;
-	states[0].wakeups_per_sec = 100.0;
+	states[0].usage_per_sec = 100.0;
 	states[1].available = 1;
 	states[1].disabled = 0;
 	states[1].percentage = 60.0;
-	states[1].wakeups_per_sec = 10.0;
+	states[1].usage_per_sec = 10.0;
 	idle_arr[0] = states;
 
 	raw.cpu_count = 1;
@@ -1260,10 +1262,10 @@ static void test_interval_record_materializes_owned_values(void)
 	       rec->cpu_rows[0].idle_state_pct[1] == 95.0);
 	assert(isnan(rec->cpu_rows[0].idle_state_pct[2]));
 	assert(isnan(rec->cpu_rows[0].idle_state_pct[3]));
-	/* Wakeups owned per state; hidden states remain unavailable. */
-	assert(rec->cpu_rows[0].idle_state_wakeups[0] == 100.0);
-	assert(rec->cpu_rows[0].idle_state_wakeups[1] == 10.0);
-	assert(isnan(rec->cpu_rows[0].idle_state_wakeups[2]));
+	/* Usage rates are owned per state; hidden states remain unavailable. */
+	assert(rec->cpu_rows[0].idle_state_usage[0] == 100.0);
+	assert(rec->cpu_rows[0].idle_state_usage[1] == 10.0);
+	assert(isnan(rec->cpu_rows[0].idle_state_usage[2]));
 
 	/*
 	 * Summary idle-state residency is the average of per-CPU display values,
@@ -1302,7 +1304,7 @@ int main(void)
 	test_empty_json_selection_has_no_dangling_comma();
 	test_empty_json_stream_closes_as_empty_array();
 	test_text_serializer_emits_column_headers_and_values();
-	test_default_text_suppresses_package_rows();
+	test_default_text_emits_summary_and_package_rows();
 	test_multi_cpu_csv_serializer_emits_all_cpu_rows();
 	test_package_csv_serializer_emits_package_rows();
 	test_all_scope_csv_serializer_emits_package_rows();

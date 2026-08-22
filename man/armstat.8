@@ -19,22 +19,22 @@ and
 
 The current output model is:
 .IP \(bu 2
-default mode: one row per tracked CPU (no summary or package rows)
+default mode: one \fBSUM\fR row plus per-package aggregation rows
 .IP \(bu 2
 \fB-a\fR mode: \fBSUM\fR row + per-package aggregation rows + per-CPU rows
 .IP \(bu 2
 summary mode (\fB-S\fR): one \fBSUM\fR row per interval
 .IP \(bu 2
-in text/JSON mode, explicitly enabling summary-scope groups (for example via
-\fB-a\fR or \fB-s sysstat,membw,energy\fR) prints a \fBSUM\fR section in
-addition to CPU rows; package aggregation rows appear only when the package
-group is also enabled (\fB-s pkg\fR or \fB-a\fR)
+explicit \fB-s\fR selection emits only scopes requested by the selected groups
+or exact fields; use \fBcpu\fR to request CPU rows and \fBpkg\fR to request
+package rows
 
 .PP
-When \fB--cpu\fR is active, tracked-CPU-derived summary fields are based on the
-filtered tracked CPU set, while platform/global fields keep their natural
-summary scope. The automatic mixed \fBSUM\fR section is suppressed in that mode
-to avoid surprising mixed-scope output.
+When \fB--cpu\fR is active, the default aggregate rows are based on the filtered
+tracked CPU set, while platform/global fields keep their natural summary scope.
+If CPU rows are explicitly expanded, implicit aggregate rows are suppressed to
+avoid surprising mixed-scope output. Use \fB-S --cpu\fR for an explicitly
+filtered summary.
 .PP
 The first visible line always represents one complete sampling interval, not an
 instantaneous snapshot at process start.
@@ -47,6 +47,12 @@ calculations continue to use the measured interval delta.
 .PP
 If armstat rebuilds runtime state after CPU topology change, that sample
 becomes a new baseline and is not printed as a normal interval row.
+
+.SH SUPPORTED PLATFORM
+The initial supported hardware family is Huawei Kunpeng running ARM64 Linux.
+Other ARM64 systems may expose compatible Linux interfaces, but they are not
+part of the initial support claim. Each Kunpeng model claimed for deployment
+must pass the target acceptance test and a sustained soak run on that model.
 
 .SH OPTIMIZATION STRATEGY
 The implementation is optimized around interval sampling overhead:
@@ -114,7 +120,7 @@ Write output to file
 .BI \-O ", " \-\-export " file"
 Export text, JSON, or CSV output to file. This is an explicit alias of
 \fB-o\fR / \fB--output\fR and is especially convenient for machine-readable
-formats. Current JSON/CSV exports carry \fBschema_version=7\fR. The detailed
+formats. Current JSON/CSV exports carry \fBschema_version=8\fR. The detailed
 export contract is documented in \fBREFERENCE.md\fR and
 \fBREFERENCE.zh-CN.md\fR
 .TP
@@ -129,8 +135,9 @@ keeps its banner and column header unless \fB-q\fR is also specified
 Summary-only mode. Output one \fBSUM\fR row/object per interval
 .TP
 .B \-a, \-\-all
-Enable all supported base column groups. PMU and IPC remain explicit and are
-not auto-enabled by \fB-a\fR
+Enable all supported base column groups and expand the default aggregate view
+with per-CPU rows. PMU and IPC remain explicit and are not auto-enabled by
+\fB-a\fR
 .TP
 .BI \-f ", " \-\-format " text|json|csv"
 Select output format. Default: text
@@ -291,7 +298,7 @@ CPU fields, and reads task runtime from field 7. Unknown versions or invalid
 records fall back to procstat through the per-CPU busy-source policy.
 
 .SH OUTPUT MODEL
-Machine-readable output uses schema version 7. Unavailable numeric and string
+Machine-readable output uses schema version 8. Unavailable numeric and string
 data is rendered as \fB-\fR in text, \fBnull\fR in JSON, and an empty CSV cell.
 A real zero remains numeric zero. \fBBoost\fR is a JSON boolean when available
 and uses 1 or 0 in text/CSV. CSV can represent summary, package, and CPU data
@@ -299,8 +306,8 @@ in one stream. Summary-only CSV uses a \fBScope\fR column containing \fBSUM\fR.
 Mixed output uses the identity columns
 \fBScope,CPU,Package\fR and \fBSUM\fR, \fBPKG\fR, or \fBCPU\fR rows; fields are
 prefixed with \fBsummary.\fR, \fBpackage.\fR, or \fBcpu.\fR. A package-only
-selection such as \fB-s pkg_avg_freq\fR uses a compact \fBPackage\fR layout;
-the physical package identity is serialized once. Schema 7 JSON and CSV also
+selection such as \fB-s pkg_freq_mhz\fR uses a compact \fBPackage\fR layout;
+the physical package identity is serialized once. Schema 8 JSON and CSV also
 include the measured sampling window in \fBduration_us\fR and nanosecond Unix
 time in \fBtimestamp_ns\fR. The existing \fBtimestamp\fR remains whole seconds,
 and \fBtimestamp_iso\fR is RFC 3339 with nine fractional digits.
@@ -309,7 +316,7 @@ and \fBtimestamp_iso\fR is RFC 3339 with nine fractional digits.
 Typical summary fields include:
 
 .IP \(bu 2
-\fBAvgFreq\fR
+\fBFreq\fR
 .IP \(bu 2
 \fBUncoreFreq\fR
 .IP \(bu 2
@@ -334,7 +341,7 @@ if a visible usable cpuidle state lacks a current value or previous baseline,
 all visible split-state values for that CPU are unavailable for the interval;
 the recovered sample establishes a new baseline
 .IP \(bu 2
-wakeup rates for missing, disabled, or otherwise unusable cpuidle states are
+usage rates for missing, disabled, or otherwise unusable cpuidle states are
 unavailable rather than zero
 .IP \(bu 2
 \fBPower\fR
@@ -383,7 +390,8 @@ rather than a pure raw cpuidle percentage
 per-CPU PMU counters
 
 .SS Package-scope fields
-Package rows include the package ID, tracked CPU count, average frequency,
+Package rows include the package ID, tracked CPU count, current sampled
+frequency averaged across valid tracked CPUs,
 Busy/Idle, and I/O-wait fields selected for that package. They are enabled by
 \fB-s pkg\fR, an exact package field, or \fB-a\fR. With \fB--cpu\fR, aggregate
 sections are suppressed only when they would be implicitly mixed with CPU
@@ -391,13 +399,14 @@ rows; an explicit package-only selection uses the filtered tracked CPU set.
 
 .SH DATA SOURCES AND FORMULAS
 .IP \(bu 2
-\fBFreq\fR: \fBscaling_cur_freq / 1000\fR
+\fBFreq\fR: \fBcpuinfo_cur_freq / 1000\fR
 .IP \(bu 2
 \fBMin\fR / \fBMax\fR: \fBscaling_min_freq\fR and \fBscaling_max_freq\fR,
 converted from kHz to MHz
 .IP \(bu 2
-\fBAvgFreq\fR: per-CPU midpoint of previous and current frequency, then averaged
-across tracked CPUs for summary output
+Summary/package \fBFreq\fR: arithmetic mean of the current readable per-CPU
+\fBcpuinfo_cur_freq\fR samples in that scope. This is a cpufreq sample, not a
+time average, hardware-counter-derived effective frequency, or busy frequency
 .IP \(bu 2
 \fBUncoreFreq\fR: a unique readable
 \fB/sys/class/devfreq/<device>/cur_freq\fR whose device name looks like an
@@ -519,8 +528,11 @@ before armstat returns 1.
 
 .SH EXAMPLES
 .TP
-Default per-CPU output:
+Default aggregate output:
 .B armstat
+.TP
+Expand with per-CPU rows:
+.B armstat -a
 .TP
 5-second interval:
 .B armstat -i 5

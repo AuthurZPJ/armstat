@@ -555,12 +555,14 @@ int parse_column_option(const char *arg, int enable)
 			 *   data source gets sampled.
 			 * - Hide/blacklist mode must not clear the group flag, otherwise
 			 *   hiding a single field such as "uncore_freq" would also hide
-			 *   its siblings (AvgMHz/Freq/Min/Max/Governor/Boost).
+			 *   its siblings (Freq/Min/Max/Governor/Boost).
 			 */
 			if (enable)
 				*fields[i].enabled_ptr = 1;
 			if (enable && fields[i].scope == FIELD_SCOPE_PACKAGE)
 				enable_package(1);
+			if (enable && fields[i].scope == FIELD_SCOPE_CPU)
+				enable_cpu(1);
 			if (!(enable && all_selected))
 				set_field_override_by_index(i, enable, enable);
 			matched = 1;
@@ -598,6 +600,8 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 	int show_option_seen = 0;
 
 	set_cpu_inventory_filter(NULL);
+	set_section_summary_mode(0);
+	set_section_default_summary_output(1);
 
 	while ((opt = getopt_long(argc, argv, "i:n:N:c:B:o:O:qDSf:s:H:df:p:lJIPv?ah",
 				  long_options, NULL)) != -1) {

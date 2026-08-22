@@ -74,7 +74,7 @@ def resolve_preset(series: SeriesData, preset: str) -> Tuple[List[str], List[str
     lpi_fields = get_available_lpi_fields(series)
 
     if preset == "freq":
-        fields = ["avg_freq"]
+        fields = ["freq"]
         if "uncore_freq" in set(series.numeric_fields):
             fields.append("uncore_freq")
         return fields, [], "armstat summary: frequency"

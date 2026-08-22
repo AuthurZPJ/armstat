@@ -261,7 +261,7 @@ static int read_idle_state(int tracked_idx, int state, struct idle_state *info)
 
 	memset(info, 0, sizeof(*info));
 	info->percentage = NAN;
-	info->wakeups_per_sec = NAN;
+	info->usage_per_sec = NAN;
 
 	if (tracked_idx < 0 || state < 0 ||
 	    !cpu_idle_state_counts ||
@@ -438,7 +438,7 @@ int init_cpuidle(void)
 		return -1;
 	}
 
-	/* Allocate per-CPU previous state usage counters (for wakeup deltas) */
+	/* Allocate per-CPU previous state usage counters (for interval rates). */
 	prev_state_usages = calloc(total_cpus * max_idle_states,
 				  sizeof(unsigned long long));
 	if (!prev_state_usages) {
@@ -591,13 +591,13 @@ void update_idle_states(unsigned long long elapsed_us)
 					idle_states[tracked_idx][state].percentage = 100.0;
 			}
 
-			/* Wakeups per second = usage_delta / interval_seconds. */
+			/* Usage rate = stateN/usage delta / interval_seconds. */
 			if (idle_states[tracked_idx][state].usage_valid &&
 			    prev_state_usage_valid[idx] && elapsed_us > 0 &&
 			    idle_states[tracked_idx][state].usage >= prev_state_usages[idx]) {
 				usage_delta = idle_states[tracked_idx][state].usage -
 					prev_state_usages[idx];
-				idle_states[tracked_idx][state].wakeups_per_sec =
+				idle_states[tracked_idx][state].usage_per_sec =
 					(double)usage_delta * 1000000.0 /
 					(double)elapsed_us;
 			}

@@ -42,15 +42,15 @@ double get_cpu_idle_state5(const struct interval_record *rec, int row_idx);
 double get_cpu_idle_state6(const struct interval_record *rec, int row_idx);
 double get_cpu_idle_state7(const struct interval_record *rec, int row_idx);
 
-/* Per-idle-state wakeup getters (CPU scope) */
-double get_cpu_idle_state_wakeup0(const struct interval_record *rec, int row_idx);
-double get_cpu_idle_state_wakeup1(const struct interval_record *rec, int row_idx);
-double get_cpu_idle_state_wakeup2(const struct interval_record *rec, int row_idx);
-double get_cpu_idle_state_wakeup3(const struct interval_record *rec, int row_idx);
-double get_cpu_idle_state_wakeup4(const struct interval_record *rec, int row_idx);
-double get_cpu_idle_state_wakeup5(const struct interval_record *rec, int row_idx);
-double get_cpu_idle_state_wakeup6(const struct interval_record *rec, int row_idx);
-double get_cpu_idle_state_wakeup7(const struct interval_record *rec, int row_idx);
+/* Per-idle-state usage-rate getters (CPU scope) */
+double get_cpu_idle_state_usage0(const struct interval_record *rec, int row_idx);
+double get_cpu_idle_state_usage1(const struct interval_record *rec, int row_idx);
+double get_cpu_idle_state_usage2(const struct interval_record *rec, int row_idx);
+double get_cpu_idle_state_usage3(const struct interval_record *rec, int row_idx);
+double get_cpu_idle_state_usage4(const struct interval_record *rec, int row_idx);
+double get_cpu_idle_state_usage5(const struct interval_record *rec, int row_idx);
+double get_cpu_idle_state_usage6(const struct interval_record *rec, int row_idx);
+double get_cpu_idle_state_usage7(const struct interval_record *rec, int row_idx);
 
 /* Summary NUMA temp getters (system scope) */
 double get_temp_vdie0(const struct interval_record *rec, int row_idx);

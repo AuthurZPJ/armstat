@@ -3,7 +3,7 @@
  * ARM CPU frequency monitoring
  *
  * Two cached-FD strategies:
- *   1. cur_freq_fds[]  — per-CPU cached fd for scaling_cur_freq (hot path)
+ *   1. cur_freq_fds[]  — per-CPU cached fd for cpuinfo_cur_freq (hot path)
  *   2. uncore_freq_fd  — single persistent fd for devfreq/cur_freq (hot path)
  *
  * Slow-layer reads (min/max freq, governor, boost) use plain fopen/fclose.
@@ -145,7 +145,7 @@ int read_cpu_freq(int tracked_idx, unsigned int *freq)
 		int fd = cur_freq_fds[tracked_idx];
 
 		if (fd < 0) {
-			cpu_sysfs_path(cpu_id, "cpufreq/scaling_cur_freq",
+			cpu_sysfs_path(cpu_id, "cpufreq/cpuinfo_cur_freq",
 				       path, sizeof(path));
 			if (cur_freq_fd_open_count < MAX_CUR_FREQ_FDS)
 				fd = open(path, O_RDONLY);
@@ -168,7 +168,7 @@ int read_cpu_freq(int tracked_idx, unsigned int *freq)
 	}
 
 	if (freq_khz == 0) {
-		cpu_sysfs_path(cpu_id, "cpufreq/scaling_cur_freq",
+		cpu_sysfs_path(cpu_id, "cpufreq/cpuinfo_cur_freq",
 			       path, sizeof(path));
 		if (sysfs_read_ull_checked(path, &freq_raw) == 0 &&
 		    freq_raw > 0 && freq_raw <= UINT_MAX)

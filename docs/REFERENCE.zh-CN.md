@@ -90,7 +90,8 @@ README 保存完整的用户字段说明。实现与序列化必须维持以下�
 - `SUM` 百分比与频率是有效 tracked CPU 的平均；系统计数器与 PMU 是区间 delta
   或聚合值。
 - Package 行按 topology 提供的 physical package ID 聚合 tracked CPU。
-- 单 CPU 区间频率使用前后两次有效 `scaling_cur_freq` 的梯形平均。
+- `Freq` 是本轮当前 `cpuinfo_cur_freq` 采样值；summary 与 package 值是当前
+  CPU 采样值的跨 CPU 均值，不是时间平均，也不是硬件计数器推导的有效频率。
 - Energy 由区间平均 package 功耗与实测时长推导。
 - 只有命名为 `cycles` 与 `instructions` 的 delta 都有效且 cycles 非零时才输出 IPC。
 
@@ -100,7 +101,7 @@ README 保存完整的用户字段说明。实现与序列化必须维持以下�
 |---|---|---|
 | 当前/最小/最大频率、governor、boost | CPU `cpufreq` sysfs | MHz/string/bool |
 | Busy/Idle 与 IOWait | `/proc/stat`，可选 `/proc/schedstat` | % |
-| split idle 与 wakeups | CPU `cpuidle` sysfs | %, /s |
+| split idle 与 usage rate | CPU `cpuidle` sysfs | %, /s |
 | package 功耗 | 唯一且明确的 `power_meter`/`power1_average` 来源 | mW |
 | 区间能量 | 由功耗与时长推导 | J |
 | 温度 | 选定的 `thermal_zone` 策略 | degC |
@@ -117,7 +118,7 @@ Unavailable 必须贯穿整个数据链保持 unavailable。有效的零是数�
 
 ## 输出契约
 
-当前机器输出使用 `schema_version = 7`。`armstat --list` 是当前精确字段 ID、
+当前机器输出使用 `schema_version = 8`。`armstat --list` 是当前精确字段 ID、
 scope、类型、单位、text label 与 JSON key 的权威查询；它与序列化器读取同一份
 field registry。
 
@@ -145,8 +146,8 @@ JSON 是顶层数组，每个可见区间对应一个对象。对象始终含上
 - `packages`：每个 package 一个对象，只用 `package` 标识一次；
 - `cpus`：每个 tracked CPU 一个对象，用真实 Linux `cpu` 标识。
 
-Section 是否存在由 scope 选择决定。`-S` 只输出 `summary`；默认 CPU 导向输出含
-`cpus`；显式混合 scope 时可以同时包含多个 section。
+Section 是否存在由层级选择决定。默认输出 `summary` 和 `packages`；`-S` 只输出
+`summary`；`-a` 再展开 `cpus`。显式选择可以输出任意有效组合。
 
 不可用的数字和字符串输出 JSON `null`。可用 Boost 输出 JSON boolean。内部非有限
 浮点数会被归一化成 `null`，不会生成非标准 `NaN` 或 infinity token。字符串经过
@@ -171,12 +172,11 @@ unavailable 值为空；有效零保持为零。含逗号、双引号、换行�
 
 ### 单位与兼容性
 
-标准单位为 MHz、百分比、degC、mW、J、MiB/s、wakeups/s、count/interval 与
+标准单位为 MHz、百分比、degC、mW、J、MiB/s、usage delta/s、count/interval 与
 instructions/cycle。显示小数位是呈现策略，不等同于传感器精度声明。
 
-消费者必须以 `schema_version` 做兼容判断。内置画图 loader 接受 schema 4 到 7。
-在 schema 7 内增加 optional field 属于兼容变化；删除、改名或重塑已有字段必须
-提升 schema。消费者不得把缺失值转成零。
+消费者必须要求 `schema_version = 8`；项目尚未上线，不保留更早机器契约兼容。
+消费者不得把缺失值转成零。
 
 ## 导出画图
 
@@ -191,8 +191,8 @@ python3 -m pip install matplotlib
 ```bash
 armstat -S -f json -O summary.json
 armstat -S -f csv -O summary.csv
-armstat -f json -O cpus.json
-armstat -f csv -O cpus.csv
+armstat -a -f json -O cpus.json
+armstat -a -f csv -O cpus.csv
 ```
 
 `scripts/plot_sum.py` 处理 summary 序列；`scripts/plot_cpu.py` 处理 per-CPU 与分组
@@ -217,7 +217,6 @@ python3 scripts/plot_cpu.py cpus.csv --group-by node --y busy
 ```bash
 make clean
 make
-make test
 make debug-test
 make analyze
 ```
@@ -236,8 +235,8 @@ make O=/tmp/armstat-build
 
 ### ARM64 目标机验收
 
-主机无关测试不能证明硬件行为。应在实际部署的 ARM64 Linux 服务器上先检查能力，
-再运行：
+主机无关测试不能证明硬件行为。应在每个声明支持的鲲鹏 ARM64 Linux 服务器型号上
+先检查能力，再运行：
 
 ```bash
 ./armstat --probe

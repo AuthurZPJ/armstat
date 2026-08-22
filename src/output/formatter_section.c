@@ -18,11 +18,17 @@
 
 /* Section emission state, configured by the CLI (-S / -a). */
 static int summary_mode = 0;
-static int default_summary_output = 0;
+static int default_summary_output = 1;
 
 int section_emit_cpu(void)
 {
-	return show_cpu || show_pmu || any_fields_enabled(FIELD_SCOPE_CPU);
+	/*
+	 * CPU-scope fields share group visibility with summary/package fields, so
+	 * field availability alone must not expand a many-core default view.
+	 * show_cpu is the explicit row-level switch set by -a, -s cpu, or an exact
+	 * CPU field request. PMU remains an implicit CPU-row request.
+	 */
+	return show_cpu || show_pmu;
 }
 
 int section_emit_cpu_identity(void)
@@ -38,9 +44,8 @@ int section_emit_cpu_identity(void)
 int section_emit_package(void)
 {
 	/*
-	 * Package rows are aggregation rows. They only appear when the package
-	 * column group is explicitly requested (via -a or -s package); the
-	 * default output is per-CPU rows only.
+	 * Package rows are aggregation rows. They are part of the concise default
+	 * view and remain selectable explicitly via -a or -s package.
 	 *
 	 * With --cpu, avoid implicitly mixing filtered CPU rows with aggregate
 	 * rows. An explicit package-only selection remains useful and is computed
@@ -53,7 +58,7 @@ int section_emit_package(void)
 
 int section_emit_default_summary(void)
 {
-	if (!default_summary_output ||
+	if (summary_mode || !default_summary_output ||
 	    !any_fields_enabled(FIELD_SCOPE_SYSTEM))
 		return 0;
 	return !cpu_inventory_filter_is_active() || !section_emit_cpu();

@@ -192,27 +192,27 @@ DEFINE_CPU_IDLE_STATE_GETTER(5)
 DEFINE_CPU_IDLE_STATE_GETTER(6)
 DEFINE_CPU_IDLE_STATE_GETTER(7)
 
-/* --- Idle-state wakeup getters --- */
+/* --- Idle-state usage-rate getters --- */
 
-#define DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(state_idx)				\
-double get_cpu_idle_state_wakeup##state_idx(const struct interval_record *rec,	\
+#define DEFINE_CPU_IDLE_STATE_USAGE_GETTER(state_idx)				\
+double get_cpu_idle_state_usage##state_idx(const struct interval_record *rec,	\
 				    int row_idx)			\
 {									\
 	const struct cpu_row *row = get_cpu_row(rec, row_idx);		\
 									\
 	if (!row)							\
 		return NAN;						\
-	return row->idle_state_wakeups[state_idx];			\
+	return row->idle_state_usage[state_idx];				\
 }
 
-DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(0)
-DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(1)
-DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(2)
-DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(3)
-DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(4)
-DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(5)
-DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(6)
-DEFINE_CPU_IDLE_STATE_WAKEUP_GETTER(7)
+DEFINE_CPU_IDLE_STATE_USAGE_GETTER(0)
+DEFINE_CPU_IDLE_STATE_USAGE_GETTER(1)
+DEFINE_CPU_IDLE_STATE_USAGE_GETTER(2)
+DEFINE_CPU_IDLE_STATE_USAGE_GETTER(3)
+DEFINE_CPU_IDLE_STATE_USAGE_GETTER(4)
+DEFINE_CPU_IDLE_STATE_USAGE_GETTER(5)
+DEFINE_CPU_IDLE_STATE_USAGE_GETTER(6)
+DEFINE_CPU_IDLE_STATE_USAGE_GETTER(7)
 
 /* --- Temperature getters --- */
 
