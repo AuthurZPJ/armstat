@@ -16,17 +16,17 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 
-#include "../collector.h"
-#include "../aggregator.h"
-#include "../formatter.h"
-#include "../cpu_inventory.h"
-#include "../idle_backend.h"
-#include "../power.h"
-#include "../pmu.h"
-#include "../sysstat.h"
-#include "../sysfs_util.h"
-#include "../idle_display.h"
-#include "../sampling_deadline.h"
+#include "collector.h"
+#include "aggregator.h"
+#include "formatter.h"
+#include "cpu_inventory.h"
+#include "idle_backend.h"
+#include "power.h"
+#include "pmu.h"
+#include "sysstat.h"
+#include "sysfs_util.h"
+#include "idle_display.h"
+#include "sampling_deadline.h"
 
 /* Minimal seed for a single-CPU catalog so tracked_idx=0 → cpu_id=0 */
 static void seed_one_cpu(void)

@@ -6,8 +6,8 @@
  * into display percentages where the deepest visible usable state absorbs
  * the remainder so that sum(LPI-*) matches the authoritative Idle%.
  *
- * See DESIGN.md "Why LPI-* residual adjustment" for the ARM-specific
- * motivation (cpuidle stateN/time counters only advance on state exit).
+ * See docs/REFERENCE.md for the ARM-specific motivation (cpuidle stateN/time
+ * counters only advance on state exit).
  */
 
 #ifndef ARMSTAT_IDLE_DISPLAY_H

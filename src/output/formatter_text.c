@@ -383,8 +383,9 @@ static void serialize_text_cpu_row(const struct interval_record *rec,
  * SECTION 5: TEXT SERIALIZER API
  * ============================================================================ */
 
-void serialize_text(const struct interval_record *rec, int iteration)
+void serialize_text(const struct interval_record *rec)
 {
+	unsigned long long iteration = rec->interval;
 	int print_header;
 	int emit_summary;
 	int emit_package;

@@ -4,11 +4,11 @@
  *
  * Internal contract between:
  *   - columns.c (owns all_fields[] and needs the getter addresses)
- *   - formatter_record.c (defines the getters, reading interval_record)
+ *   - formatter_values.c (defines the getters, reading interval_record)
  *
  * These getters are never called directly; they are only referenced through
  * the field_desc.getter union in all_fields[]. They are therefore not part
- * of the public columns.h surface. Only columns.c and formatter_record.c
+ * of the public columns.h surface. Only columns.c and formatter_values.c
  * include this file.
  */
 

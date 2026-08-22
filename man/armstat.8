@@ -115,7 +115,8 @@ Write output to file
 Export text, JSON, or CSV output to file. This is an explicit alias of
 \fB-o\fR / \fB--output\fR and is especially convenient for machine-readable
 formats. Current JSON/CSV exports carry \fBschema_version=7\fR. The detailed
-export contract is documented in \fBEXPORTS.md\fR and \fBEXPORTS.zh-CN.md\fR
+export contract is documented in \fBREFERENCE.md\fR and
+\fBREFERENCE.zh-CN.md\fR
 .TP
 .B \-q, \-\-quiet
 Suppress the interval banner and text headers
@@ -555,18 +556,10 @@ Probe the current platform:
 .B armstat --probe
 
 .PP
-Helper plotting scripts are documented separately in
-\fBPLOTTING.md\fR and \fBPLOTTING.zh-CN.md\fR.
-When installed with \fBmake install\fR, helper scripts and plotting docs are
-also installed under \fBshare/doc/armstat/\fR.
-
-.PP
-Machine-readable export fields and structure are documented separately in
-\fBEXPORTS.md\fR and \fBEXPORTS.zh-CN.md\fR.
-
-.PP
-Testing guidance is documented separately in
-\fBTESTING.md\fR and \fBTESTING.zh-CN.md\fR.
+Architecture, machine-readable exports, plotting, and release validation are
+documented together in \fBREFERENCE.md\fR and \fBREFERENCE.zh-CN.md\fR.
+When installed with \fBmake install\fR, the reference and helper scripts are
+installed under \fBshare/doc/armstat/\fR.
 
 .SH SEE ALSO
 .BR turbostat (8),

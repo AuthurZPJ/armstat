@@ -25,17 +25,12 @@ MSR/RAPL/TSC 模型。
 加入了不会与 CPU / summary 混淆的 package 行；schema 7 又加入真实采样
 时长、RFC 3339 时区格式以及一致的布尔值与 scope 身份语义。内置画图脚本，可以从
 `armstat -f json -O data.json` 直接生成时序图表，无需手动数据处理。
-详见 [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md) 和
-[PLOTTING.zh-CN.md](PLOTTING.zh-CN.md)。
+详见[综合参考](docs/REFERENCE.zh-CN.md#输出契约)。
 
 ## 文档导航
 
-- **[DESIGN.zh-CN.md](DESIGN.zh-CN.md)** - 架构与实现细节
-- **[TESTING.zh-CN.md](TESTING.zh-CN.md)** - 测试流程与验证方法
-- **[EXPORTS.zh-CN.md](EXPORTS.zh-CN.md)** - JSON/CSV 导出格式规范
-- **[PLOTTING.zh-CN.md](PLOTTING.zh-CN.md)** - 画图脚本使用说明
-- **[CLAUDE.md](CLAUDE.md)** - AI 助手指引（英文）
-- **[QWEN.md](QWEN.md)** - 项目上下文与技术概览（英文）
+- **[REFERENCE.zh-CN.md](docs/REFERENCE.zh-CN.md)** - 架构、导出契约、画图与发布验证
+- **`armstat(8)`** - 安装后的命令行手册（`man armstat`）
 
 ## 快速开始
 
@@ -53,7 +48,7 @@ sudo make install
 
 判断可选字段缺失是否为缺陷前，应先检查 `--probe`。PMU/IPC 通常需要 root 或
 宽松的 `perf_event_paranoid`。生产部署前，执行
-[TESTING.zh-CN.md](TESTING.zh-CN.md#3-目标-arm-服务器实机验证) 中带能力强制项的
+[REFERENCE.zh-CN.md](docs/REFERENCE.zh-CN.md#arm64-目标机验收) 中带能力强制项的
 目标机验收。
 
 ## 当前输出模型
@@ -236,31 +231,18 @@ ARMv8 raw 别名使用架构 PMUv3 事件号。其中 `mem-read` / `mem-write` �
 
 ## 架构
 
-当前实现按职责拆为以下层次：
+源码树按四条职责边界组织：
 
 ```text
-armstat.c              主循环与模块生命周期
-armstat_cli.c          命令行解析与列选择
-collector.c            采样编排
-sample_cache.c         内存池与快路径采样
-sysfs_util.c           共享 sysfs/procfs/fd 读取原语
-idle_backend.c         busy-source 策略辅助（/proc/stat 与 /proc/schedstat）
-aggregator.c           区间统计与 delta 计算
-columns.c              列可见性标志与字段描述符表
-idle_display.c         LPI 残差显示规则（纯函数）
-formatter_record.c     interval_record 构建（值 getter 与物化）
-formatter_text.c       文本输出
-formatter_machine.c    JSON/CSV 输出
-cpu_inventory.c        present/online/tracked CPU 单一事实源
-topology.c             package/core/NUMA 元数据
-power_sensor.c         平台功耗/温度发现
-power_interval.c       区间平均功耗与能量
-membw.c                内存带宽计数
-pmu.c                  基于 perf 的 PMU 采样
-cpufreq.c              CPU 频率与 governor
-cpuidle.c              cpuidle 状态驻留（LPI-*）
-sysstat.c              /proc/stat 与 /proc/schedstat 读取
+src/app/       命令行解析与进程生命周期
+src/core/      采集编排、区间聚合与 CPU inventory
+src/platform/  Linux / ARM 遥测后端
+src/output/    字段注册、中间记录以及 text/JSON/CSV serializer
 ```
+
+详细职责与数据流统一维护在
+[REFERENCE.zh-CN.md](docs/REFERENCE.zh-CN.md#运行架构)，README 不再保留第二份
+容易过期的逐文件架构清单。
 
 ## 优化策略
 
@@ -368,13 +350,15 @@ PMU 以 tracked CPU 为单位建立 perf group。group read 会拿到
 delta。每个 CPU 独立保留 group 有效性，只有所有 tracked CPU 都提供完整
 interval 时，summary PMU 才可用。
 
-### 6. 两阶段 formatter
+### 6. 三部分输出流水线
 
 输出分成三步：
 
 1. `columns.c` 持有列可见性（`show_*` 标志）与字段描述符表
-2. `formatter_record.c` 构造稳定的 `interval_record`（值 getter）
-3. `formatter_text.c` / `formatter_machine.c` 负责序列化
+2. `formatter_record.c` 构造稳定的 `interval_record`，`formatter_values.c`
+   提供类型化字段 getter
+3. `formatter_text.c`、`formatter_json.c`、`formatter_csv.c` 负责序列化，
+   `formatter_machine.c` 保存机器输出共用辅助逻辑
 
 这样 text / JSON / CSV 共用同一套字段模型，不会在 serializer 里重复计算。
 
@@ -465,8 +449,8 @@ CSV 导出现在会在每行前面附带 `schema_version`、`interval`、真实�
 并输出 `SUM`、`PKG` 或 `CPU` 行。像 `-s pkg_avg_freq` 这样的 package 精确
 字段也会生成可用的 package-only 导出，不会只留下空文件。
 
-更完整的 JSON/CSV 字段与结构说明已经单独整理到 [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md)
-（中文）和 [EXPORTS.md](EXPORTS.md)（英文）。
+更完整的 JSON/CSV 字段与结构说明见[中文综合参考](docs/REFERENCE.zh-CN.md#输出契约)
+和[英文综合参考](docs/REFERENCE.md#output-contract)。
 
 ### 摘要模式
 
@@ -588,18 +572,15 @@ package 功耗与内存带宽 sysfs 路径、候选数量与歧义说明，以�
 
 ### 画图
 
-附带的画图脚本说明已经单独整理到 [PLOTTING.zh-CN.md](PLOTTING.zh-CN.md)
-（中文）和 [PLOTTING.md](PLOTTING.md)（英文）。
+附带的画图脚本说明见[综合参考](docs/REFERENCE.zh-CN.md#导出画图)。
 
 ### 导出契约
 
-机器可读导出的字段和结构说明已经单独整理到 [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md)
-（中文）和 [EXPORTS.md](EXPORTS.md)（英文）。
+机器可读导出的字段和结构说明见[综合参考](docs/REFERENCE.zh-CN.md#输出契约)。
 
 ### 测试
 
-测试说明已经单独整理到 [TESTING.zh-CN.md](TESTING.zh-CN.md)（中文）和 [TESTING.md](TESTING.md)
-（英文）。
+测试说明见[综合参考](docs/REFERENCE.zh-CN.md#构建与验证)。
 
 ## 字段与作用域
 

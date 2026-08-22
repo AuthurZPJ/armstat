@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
+#include <limits.h>
 #include <sys/resource.h>
 
 #include "armstat_cli.h"
@@ -428,7 +429,7 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 	struct interval_record *rec;
 	unsigned long long interval_ns;
 	unsigned long long next_deadline_ns;
-	int iteration = 1;
+	unsigned long long iteration = 1;
 	int sleep_result;
 	int status = 0;
 
@@ -499,13 +500,13 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 
 		switch (opts->format) {
 		case FORMAT_JSON:
-			serialize_json(rec, iteration);
+			serialize_json(rec);
 			break;
 		case FORMAT_CSV:
 			serialize_csv(rec);
 			break;
 		default:
-			serialize_text(rec, iteration);
+			serialize_text(rec);
 			break;
 		}
 		free_interval_record(rec);
@@ -516,8 +517,14 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 		}
 
 		/* Check exit condition */
-		if (opts->iterations > 0 && iteration >= opts->iterations)
+		if (opts->iterations > 0 &&
+		    iteration >= (unsigned int)opts->iterations)
 			break;
+		if (iteration == ULLONG_MAX) {
+			fprintf(stderr, "Error: interval sequence exhausted\n");
+			status = -1;
+			break;
+		}
 
 		/* Hold an absolute cadence instead of accumulating output overhead. */
 		if (advance_sampling_deadline(&next_deadline_ns, interval_ns) < 0) {

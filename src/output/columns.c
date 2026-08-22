@@ -5,7 +5,7 @@
  * Owns the show_* group-visibility flags, the idle-state and summary-temp
  * series visibility + override bitmasks, the idle-state label storage, and
  * the all_fields[] descriptor table. The value getters referenced by the
- * table are defined in formatter_record.c and declared in the private
+ * table are defined in formatter_values.c and declared in the private
  * formatter_fields.h sub-header.
  *
  * See columns.h for the interface contract.

@@ -98,7 +98,7 @@ struct summary_data {
  * core, numa_node) are looked up at output time via the topology caches.
  */
 struct interval_record {
-	int interval;
+	unsigned long long interval;
 	time_t timestamp;
 	unsigned long long timestamp_ns;
 	unsigned long long duration_us; /* Measured monotonic interval duration */
@@ -138,7 +138,7 @@ struct interval_record {
 struct interval_record *build_interval_record(
 	const struct sys_snapshot *raw,
 	const struct interval_stats *stats,
-	int iteration);
+	unsigned long long iteration);
 
 /*
  * Free interval_record
@@ -155,12 +155,10 @@ int get_cpu_row_id(const struct interval_record *rec, int row_idx);
 /*
  * Text serializer
  */
-void serialize_text(const struct interval_record *rec, int iteration);
+void serialize_text(const struct interval_record *rec);
 
-/*
- * JSON serializer (stateless)
- */
-void serialize_json(const struct interval_record *rec, int iteration);
+/* JSON stream serializer. Call close_machine_json() when the stream ends. */
+void serialize_json(const struct interval_record *rec);
 
 /*
  * CSV serializer

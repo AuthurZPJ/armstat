@@ -57,7 +57,7 @@ struct interval_stats {
 	/* IPC (Instructions Per Cycle) */
 	double ipc;
 
-	/* Memory bandwidth (MB/s) */
+	/* Memory bandwidth (MiB/s) */
 	double mem_bw;
 
 	/* System stats deltas */

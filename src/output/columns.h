@@ -11,8 +11,8 @@
  *
  * Written by armstat_cli.c (via the enable_* setters and override API) and
  * read by sample_cache.c (demand-driven sampling), the formatter_section
- * policy, and the serializers. The record builder (formatter_record.c) owns
- * the value getters; columns.c references them by address through the table.
+ * policy, and the serializers. formatter_values.c owns the value getters;
+ * columns.c references them by address through the table.
  *
  * RESPONSIBLE FOR:
  *   - show_* group-visibility flags and their enable_* setters
@@ -24,7 +24,7 @@
  * NOT RESPONSIBLE FOR:
  *   - reading sysfs/proc
  *   - building interval_record (lives in formatter_record.c)
- *   - the value getters themselves (defined in formatter_record.c, declared
+ *   - the value getters themselves (defined in formatter_values.c, declared
  *     in the private formatter_fields.h sub-header)
  */
 

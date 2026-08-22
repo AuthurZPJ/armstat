@@ -17,18 +17,18 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../armstat_cli.h"
-#include "../cpuidle.h"
-#include "../formatter.h"
-#include "../formatter_section.h"
-#include "../idle_backend.h"
-#include "../cpu_inventory.h"
-#include "../cpufreq.h"
-#include "../formatter_fields.h"
-#include "../pmu.h"
-#include "../sample_cache.h"
-#include "../sysstat.h"
-#include "../topology.h"
+#include "armstat_cli.h"
+#include "cpuidle.h"
+#include "formatter.h"
+#include "formatter_section.h"
+#include "idle_backend.h"
+#include "cpu_inventory.h"
+#include "cpufreq.h"
+#include "formatter_fields.h"
+#include "pmu.h"
+#include "sample_cache.h"
+#include "sysstat.h"
+#include "topology.h"
 
 static int scope_has_enabled_field(enum field_scope scope, const char *field_id)
 {
@@ -278,7 +278,7 @@ static void emit_json_record(void *arg)
 {
 	const struct serializer_args *ctx = arg;
 
-	serialize_json(ctx->rec, ctx->rec->interval);
+	serialize_json(ctx->rec);
 	close_machine_json();
 }
 
@@ -286,7 +286,7 @@ static void emit_text_record(void *arg)
 {
 	const struct serializer_args *ctx = arg;
 
-	serialize_text(ctx->rec, ctx->rec->interval);
+	serialize_text(ctx->rec);
 }
 
 static void emit_close_machine_json(void *arg)
@@ -640,9 +640,11 @@ static void test_mixed_scope_csv_serializer_uses_scoped_headers(void)
 
 	parse_test_args(5, argv);
 	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	rec.interval = 2147483648ULL;
 	args.rec = &rec;
 
 	output = capture_stdout(emit_csv_mixed_scope, &args);
+	assert(strstr(output, "7,2147483648,1000000,") != NULL);
 	assert(strstr(output, "summary.avg_freq") != NULL);
 	assert(strstr(output, "summary.power") != NULL);
 	assert(strstr(output, "cpu.freq") != NULL);
@@ -664,6 +666,7 @@ static void test_summary_json_serializer_emits_schema_and_summary_only(void)
 	parse_test_args(5, argv);
 	reset_machine_state();
 	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	rec.interval = 2147483648ULL;
 	rec.package_count = 1;
 	rec.packages[0].package_id = 0;
 	rec.packages[0].cpu_count = 1;
@@ -671,6 +674,7 @@ static void test_summary_json_serializer_emits_schema_and_summary_only(void)
 
 	output = capture_stdout(emit_json_record, &args);
 	assert(strstr(output, "\"schema_version\": 7") != NULL);
+	assert(strstr(output, "\"interval\": 2147483648") != NULL);
 	assert(strstr(output, "\"duration_us\": 1000000") != NULL);
 	assert(strstr(output, "\"timestamp_ns\": 1774665600123456789") != NULL);
 	assert(strstr(output, ".123456789+00:00") != NULL);

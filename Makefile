@@ -2,13 +2,20 @@
 
 CC		= $(CROSS_COMPILE)gcc
 SRC_DIR		:= $(CURDIR)
+CODE_DIR	:= $(SRC_DIR)/src
+APP_DIR		:= $(CODE_DIR)/app
+CORE_DIR	:= $(CODE_DIR)/core
+PLATFORM_DIR	:= $(CODE_DIR)/platform
+OUTPUT_DIR	:= $(CODE_DIR)/output
+DOC_DIR		:= $(SRC_DIR)/docs
+MANPAGE		:= $(SRC_DIR)/man/armstat.8
 BUILD_OUTPUT	:= $(CURDIR)
 PREFIX		?= /usr
 DESTDIR		?=
 VERSION_FILE	:= $(SRC_DIR)/VERSION
 VERSION		:= $(strip $(shell sed -n '1p' "$(VERSION_FILE)" 2>/dev/null))
-DAY		:= $(shell date +%Y.%m.%d)
-SNAPSHOT	= armstat-$(DAY)
+PROJECT_CPPFLAGS := -I$(APP_DIR) -I$(CORE_DIR) -I$(PLATFORM_DIR) \
+		    -I$(OUTPUT_DIR)
 COMMON_CFLAGS	:= -Wall -Wextra -Wformat=2 -Wundef -Wshadow \
 		   -Wstrict-prototypes -Wmissing-prototypes \
 		   -I../../../include -D_FILE_OFFSET_BITS=64 -MMD -MP
@@ -47,20 +54,27 @@ BUILD_CONFIG_KEY := $(shell printf '%s\n' "$(BUILD_CONFIG_INPUT)" | \
 	cksum | awk '{print $$1 "-" $$2}')
 BUILD_CONFIG_STAMP := $(BUILD_CONFIG).$(BUILD_CONFIG_KEY)
 
-SRCS = armstat.c armstat_cli.c cpufreq.c cpuidle.c power.c pmu.c topology.c sysstat.c \
-       collector.c cpu_inventory.c sample_cache.c columns.c sysfs_util.c idle_display.c \
-       idle_backend.c aggregator.c formatter_record.c \
-       formatter_text.c formatter_machine.c formatter_section.c sampling_deadline.c \
-       power_sensor.c power_interval.c membw.c
+SRCS = app/armstat.c app/armstat_cli.c \
+	core/aggregator.c core/collector.c core/cpu_inventory.c \
+	core/sample_cache.c core/sampling_deadline.c \
+	platform/cpufreq.c platform/cpuidle.c platform/idle_backend.c \
+	platform/idle_display.c platform/membw.c platform/pmu.c \
+	platform/power.c platform/power_interval.c platform/power_sensor.c \
+	platform/sysfs_util.c platform/sysstat.c platform/topology.c \
+	output/columns.c output/formatter_csv.c output/formatter_json.c \
+	output/formatter_machine.c output/formatter_record.c \
+	output/formatter_section.c output/formatter_text.c \
+	output/formatter_values.c
 OBJ_NAMES = $(SRCS:.c=.o)
 OBJ_DIR = $(BUILD_OUTPUT)/.armstat-obj/$(BUILD_CONFIG_KEY)
 OBJS = $(addprefix $(OBJ_DIR)/,$(OBJ_NAMES))
-TEST_OBJ_NAMES = $(filter-out armstat.o,$(OBJ_NAMES))
+TEST_OBJ_NAMES = $(filter-out app/armstat.o,$(OBJ_NAMES))
 TEST_OBJS = $(addprefix $(OBJ_DIR)/,$(TEST_OBJ_NAMES))
 TARGET = $(BUILD_OUTPUT)/armstat
 CONFIG_TARGET = $(BUILD_OUTPUT)/.armstat-bin/$(BUILD_CONFIG_KEY)/armstat
 DEP_FILES = $(OBJS:.o=.d)
-LEGACY_OBJS = $(addprefix $(BUILD_OUTPUT)/,$(OBJ_NAMES))
+LEGACY_OBJ_NAMES = $(notdir $(OBJ_NAMES))
+LEGACY_OBJS = $(addprefix $(BUILD_OUTPUT)/,$(LEGACY_OBJ_NAMES))
 LEGACY_DEP_FILES = $(LEGACY_OBJS:.o=.d)
 
 TEST_NAMES = test_core_logic test_column_selection test_runtime_smoke \
@@ -98,9 +112,9 @@ $(TARGET): $(CONFIG_TARGET) FORCE
 		mv "$@.$(BUILD_CONFIG_KEY).tmp" "$@"; \
 	fi
 
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(BUILD_CONFIG_STAMP)
+$(OBJ_DIR)/%.o: $(CODE_DIR)/%.c $(BUILD_CONFIG_STAMP)
 	@mkdir -p $(dir $@)
-	$(CC) $(VERSION_CPPFLAGS) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(VERSION_CPPFLAGS) $(PROJECT_CPPFLAGS) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 -include $(DEP_FILES) $(TEST_DEP_FILES)
 
@@ -116,7 +130,6 @@ clean:
 	@rm -rf $(TARGET).dSYM $(addsuffix .dSYM,$(TEST_BINS))
 	@rm -rf $(BUILD_OUTPUT)/.armstat-obj $(BUILD_OUTPUT)/.armstat-bin
 	@rm -rf $(ANALYZE_OUTPUT)
-	@rm -f $(SRC_DIR)/$(SNAPSHOT).tar.gz
 	@rm -rf $(SRC_DIR)/scripts/__pycache__ $(SRC_DIR)/tests/__pycache__
 
 .PHONY: debug
@@ -139,12 +152,13 @@ install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/armstat
 	install -d $(DESTDIR)$(PREFIX)/share/man/man8
-	install -m 644 armstat.8 $(DESTDIR)$(PREFIX)/share/man/man8
+	install -m 644 $(MANPAGE) $(DESTDIR)$(PREFIX)/share/man/man8/armstat.8
 	install -d $(DESTDIR)$(PREFIX)/share/doc/armstat
-	install -m 644 COPYING VERSION README.md README.zh-CN.md DESIGN.md DESIGN.zh-CN.md \
-		EXPORTS.md EXPORTS.zh-CN.md \
-		PLOTTING.md PLOTTING.zh-CN.md TESTING.md TESTING.zh-CN.md \
+	install -m 644 COPYING VERSION README.md README.zh-CN.md \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat
+	install -d $(DESTDIR)$(PREFIX)/share/doc/armstat/docs
+	install -m 644 $(DOC_DIR)/REFERENCE.md $(DOC_DIR)/REFERENCE.zh-CN.md \
+		$(DESTDIR)$(PREFIX)/share/doc/armstat/docs
 	install -d $(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
 	install -m 755 scripts/plot_sum.py scripts/plot_cpu.py scripts/plot_utils.py scripts/armstat_loader.py \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
@@ -176,7 +190,8 @@ target-test: $(TARGET)
 # newer executable from another CFLAGS/LDFLAGS configuration could be reused.
 $(BUILD_OUTPUT)/tests/%: $(SRC_DIR)/tests/%.c $(TEST_OBJS) FORCE
 	@mkdir -p $(dir $@)
-	$(CC) $(VERSION_CPPFLAGS) $(CPPFLAGS) $(CFLAGS) $< $(TEST_OBJS) -o $@ $(LDFLAGS) $(LDLIBS)
+	$(CC) $(VERSION_CPPFLAGS) $(PROJECT_CPPFLAGS) $(CPPFLAGS) $(CFLAGS) \
+		$< $(TEST_OBJS) -o $@ $(LDFLAGS) $(LDLIBS)
 
 .PHONY: $(TEST_WRAPPERS)
 $(TEST_WRAPPERS): tests/%: $(BUILD_OUTPUT)/tests/%

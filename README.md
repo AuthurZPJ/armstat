@@ -19,8 +19,8 @@ mix of `sysfs`, `/proc/stat`, `hwmon`, `thermal_zone`, and `perf_event_open()`.
 **Key differentiator**: armstat produces machine-readable JSON and CSV exports
 with per-sample timestamps and a stable `schema_version`. Helper plotting
 scripts are included, so you can go from `armstat -f json -O data.json` to
-time-series charts without manual data wrangling. See [EXPORTS.md](EXPORTS.md) and
-[PLOTTING.md](PLOTTING.md).
+time-series charts without manual data wrangling. See the
+[integration reference](docs/REFERENCE.md#output-contract).
 
 Current exports use `schema_version = 7`. Version 5 introduced explicit
 unavailable telemetry, and version 6 added unambiguous package CSV rows.
@@ -30,12 +30,9 @@ redundant package identity fields.
 
 ## Documentation
 
-- **[DESIGN.md](DESIGN.md)** - Architecture and implementation details
-- **[TESTING.md](TESTING.md)** - Testing workflow and validation procedures
-- **[EXPORTS.md](EXPORTS.md)** - JSON/CSV export format specification
-- **[PLOTTING.md](PLOTTING.md)** - Helper plotting scripts usage
-- **[CLAUDE.md](CLAUDE.md)** - AI assistant guidelines
-- **[QWEN.md](QWEN.md)** - Project context and technical overview
+- **[REFERENCE.md](docs/REFERENCE.md)** - Architecture, export contract,
+  plotting, and release validation
+- **`armstat(8)`** - Installed command-line manual (`man armstat`)
 
 ## Quick Start
 
@@ -55,7 +52,7 @@ sudo make install
 Review `--probe` before treating missing optional fields as a defect. PMU/IPC
 normally requires root or a permissive `perf_event_paranoid` setting. Before a
 production rollout, run the capability-enforced target procedure in
-[TESTING.md](TESTING.md#3-target-arm-server-validation).
+[REFERENCE.md](docs/REFERENCE.md#arm64-target-acceptance).
 
 ## Current Output Model
 
@@ -270,31 +267,18 @@ guessing at a field layout.
 
 ## Architecture
 
-The implementation is split into clear layers:
+The source tree follows four responsibility boundaries:
 
 ```text
-armstat.c              main loop and module lifecycle
-armstat_cli.c          command-line parsing and column selection
-collector.c            orchestrates one interval of collection
-sample_cache.c         memory pools + fast-path sampling
-sysfs_util.c           shared sysfs/procfs/fd read primitives
-idle_backend.c         busy-source policy helpers (/proc/stat vs /proc/schedstat)
-aggregator.c           delta/interval calculations
-columns.c              column visibility flags + field descriptor table
-idle_display.c         LPI residual display rule (pure function)
-formatter_record.c     interval_record builder (value getters + materialization)
-formatter_text.c       text output
-formatter_machine.c    JSON/CSV output
-cpu_inventory.c        single source of truth for present/online/tracked CPUs
-topology.c             package/core/NUMA metadata
-power_sensor.c         platform sensor discovery
-power_interval.c       interval average power and energy
-membw.c                memory bandwidth counter tracking
-pmu.c                  perf-based PMU collection
-cpufreq.c              CPU frequency and governor
-cpuidle.c              cpuidle state residency (LPI-*)
-sysstat.c              /proc/stat and /proc/schedstat readers
+src/app/       CLI parsing and process lifecycle
+src/core/      collection orchestration, aggregation, and CPU inventory
+src/platform/  Linux and ARM telemetry backends
+src/output/    field registry, records, and text/JSON/CSV serializers
 ```
+
+The detailed ownership and data flow are maintained in
+[REFERENCE.md](docs/REFERENCE.md#runtime-architecture), avoiding a second
+per-file architecture list in the README.
 
 ## Optimization Strategy
 
@@ -414,13 +398,15 @@ interval deltas are derived. Per-CPU validity is kept with each group read, and
 the summary PMU object is available only when every tracked CPU contributed a
 complete interval.
 
-### 6. Two-stage formatting
+### 6. Three-part output pipeline
 
 Formatting is split into:
 
 1. `columns.c`: column visibility (`show_*` flags) + field descriptor table
-2. `formatter_record.c`: build a stable `interval_record` (value getters)
-3. `formatter_text.c` / `formatter_machine.c`: serialize that record
+2. `formatter_record.c`: build a stable `interval_record`;
+   `formatter_values.c` provides its typed field accessors
+3. `formatter_text.c`, `formatter_json.c`, and `formatter_csv.c`: serialize
+   that record; `formatter_machine.c` holds their shared machine-output helpers
 
 This keeps formatting logic consistent across text, JSON, and CSV without
 recomputing metrics in serializers.
@@ -521,8 +507,9 @@ scopes are selected, schema 7 CSV additionally uses `CPU,Package` identity
 columns and emits `SUM`, `PKG`, or `CPU` rows. Exact package fields such as
 `-s pkg_avg_freq` produce a usable package-only export instead of an empty file.
 
-Detailed JSON/CSV field and structure documentation lives in [EXPORTS.md](EXPORTS.md)
-(English) and [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md) (Chinese).
+Detailed JSON/CSV field and structure documentation lives in the
+[English](docs/REFERENCE.md#output-contract) and
+[Chinese](docs/REFERENCE.zh-CN.md#输出契约) reference.
 
 ### Summary mode
 
@@ -654,18 +641,18 @@ probe contracts explicitly.
 
 ### Plotting
 
-Helper plotting scripts are documented separately in [PLOTTING.md](PLOTTING.md)
-(English) and [PLOTTING.zh-CN.md](PLOTTING.zh-CN.md) (Chinese).
+Helper plotting scripts are covered in the
+[reference](docs/REFERENCE.md#plotting-exports).
 
 ### Export Contract
 
-The machine-readable export contract is documented separately in
-[EXPORTS.md](EXPORTS.md) (English) and [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md) (Chinese).
+The machine-readable export contract is covered in the
+[reference](docs/REFERENCE.md#output-contract).
 
 ### Testing
 
-Testing guidance is documented separately in [TESTING.md](TESTING.md) (English) and
-[TESTING.zh-CN.md](TESTING.zh-CN.md) (Chinese).
+Testing guidance is covered in the
+[reference](docs/REFERENCE.md#build-and-validation).
 
 ## Columns and Scope
 

@@ -17,10 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../armstat_cli.h"
-#include "../cpu_inventory.h"
-#include "../formatter.h"
-#include "../formatter_section.h"
+#include "armstat_cli.h"
+#include "cpu_inventory.h"
+#include "formatter.h"
+#include "formatter_section.h"
 
 static int failures;
 

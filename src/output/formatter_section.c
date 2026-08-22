@@ -6,10 +6,10 @@
  * by the text, JSON, and CSV serializers, plus the summary-mode state those
  * decisions depend on.
  *
- * Consumers (formatter_text.c / formatter_machine.c) only ask "should I emit
- * section X?"; they no longer carry their own copies of the policy or the
- * summary-mode state. The CLI (armstat_cli.c) calls set_section_*() here, so
- * the state has exactly one home.
+ * Consumers (formatter_text.c / formatter_json.c / formatter_csv.c) only ask
+ * "should I emit section X?"; they no longer carry their own copies of the
+ * policy or the summary-mode state. The CLI (armstat_cli.c) calls
+ * set_section_*() here, so the state has exactly one home.
  */
 
 #include "formatter_section.h"

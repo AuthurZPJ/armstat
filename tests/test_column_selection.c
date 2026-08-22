@@ -10,9 +10,9 @@
 #include <assert.h>
 #include <string.h>
 
-#include "../armstat_cli.h"
-#include "../formatter.h"
-#include "../formatter_section.h"
+#include "armstat_cli.h"
+#include "formatter.h"
+#include "formatter_section.h"
 
 static int scope_has_field(enum field_scope scope, const char *json_label)
 {

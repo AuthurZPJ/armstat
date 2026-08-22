@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../cpu_inventory.h"
+#include "cpu_inventory.h"
 
 /* Seed a sparse, non-contiguous tracked set: real ids 0, 4, 8, 12. */
 static void seed_sparse_four(void)

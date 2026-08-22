@@ -21,9 +21,9 @@ Cross-compilation: set `CROSS_COMPILE` (e.g. `CROSS_COMPILE=aarch64-linux-gnu-`)
 Out-of-tree build: `make O=/path/to/output`.
 
 ### Documentation
-See README.md for project overview. Additional docs: DESIGN.md, TESTING.md,
-EXPORTS.md, PLOTTING.md (each with .zh-CN.md variant), armstat.8 (man page),
-CLAUDE.md, QWEN.md.
+See README.md for user-facing usage. Architecture, exports, plotting, and
+release validation are consolidated in `docs/REFERENCE.md` and
+`docs/REFERENCE.zh-CN.md`. The man page is `man/armstat.8`.
 
 ## Guidelines
 
@@ -34,8 +34,9 @@ CLAUDE.md, QWEN.md.
 - Smoke tests must pass (`make test`)
 - Keep changes focused and atomic
 - When behavior changes, update all documentation in order:
-  Code → README → README.zh-CN → DESIGN → DESIGN.zh-CN → armstat.8
-  → EXPORTS → EXPORTS.zh-CN → PLOTTING → PLOTTING.zh-CN → TESTING → TESTING.zh-CN
+  Code → README → README.zh-CN → man/armstat.8 → docs/REFERENCE
+  → docs/REFERENCE.zh-CN → tests
+- Prefer extending the existing README/reference over adding Markdown files
 
 ## Important Notes
 
