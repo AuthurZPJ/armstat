@@ -22,6 +22,12 @@ scripts are included, so you can go from `armstat -f json -O data.json` to
 time-series charts without manual data wrangling. See [EXPORTS.md](EXPORTS.md) and
 [PLOTTING.md](PLOTTING.md).
 
+Current exports use `schema_version = 7`. Version 5 introduced explicit
+unavailable telemetry, and version 6 added unambiguous package CSV rows.
+Version 7 adds the measured `duration_us`, emits RFC 3339 timestamps, makes
+Boost a JSON boolean, applies missing-value semantics to strings, and removes
+redundant package identity fields.
+
 ## Documentation
 
 - **[DESIGN.md](DESIGN.md)** - Architecture and implementation details
@@ -31,15 +37,36 @@ time-series charts without manual data wrangling. See [EXPORTS.md](EXPORTS.md) a
 - **[CLAUDE.md](CLAUDE.md)** - AI assistant guidelines
 - **[QWEN.md](QWEN.md)** - Project context and technical overview
 
+## Quick Start
+
+The collector targets ARM64 Linux and expects mounted `/proc` and `/sys`.
+Building requires a C compiler and `make`; plotting is optional and requires
+Python 3 plus matplotlib.
+
+```bash
+make
+./armstat --probe
+./armstat -i 1 -n 5
+./armstat -S -a -i 1 -n 5
+./armstat -S -a -f json -O armstat.json -i 1 -n 5
+sudo make install
+```
+
+Review `--probe` before treating missing optional fields as a defect. PMU/IPC
+normally requires root or a permissive `perf_event_paranoid` setting. Before a
+production rollout, run the capability-enforced target procedure in
+[TESTING.md](TESTING.md#3-target-arm-server-validation).
+
 ## Current Output Model
 
-`armstat` currently uses a `SUM + CPU rows` model:
+`armstat` uses a `SUM + package + CPU rows` model:
 
 - Default text mode prints one row per tracked CPU (no summary or package rows)
 - `-a` enables all supported base column groups and adds the package aggregation rows plus the `SUM` summary row on top of the per-CPU rows
 - `-S` prints a single `SUM` row per interval
 - JSON writes an array of interval objects
-- CSV writes either CPU rows or summary rows
+- CSV writes summary-only, package-only, CPU-only, or explicitly scoped mixed
+  rows, depending on the selected fields
 
 This is intentionally `turbostat`-like, but it is not a byte-for-byte clone of
 the x86 tool. In particular, ARM platforms often do not expose a uniform
@@ -53,10 +80,17 @@ The easiest way to understand one visible `armstat` line is:
 2. wait one full interval
 3. collect a new raw snapshot
 4. derive interval deltas and percentages
-5. format those derived values as either `SUM`, CPU rows, or both
+5. format those derived values as `SUM`, per-package rows, per-CPU rows, or a
+   selected combination
 
 That means the first visible line is always "one complete interval later", not
 "instantaneous state at program start".
+
+Subsequent samples follow monotonic-clock deadlines anchored to the baseline.
+Normal collection/formatting overhead is deducted from the next wait instead
+of accumulating as cadence drift; if work overruns an entire interval, armstat
+skips the missed deadline rather than issuing burst catch-up samples. Metric
+formulas always use the measured interval delta.
 
 If armstat has to rebuild runtime state (for example after CPU topology change),
 the rebuild sample becomes a new baseline and is not printed as a normal
@@ -82,6 +116,9 @@ Three ideas help interpret the output correctly:
   Busy/Idle inputs, and tracked-CPU averages are based on that filtered set
 - invalid CPU-list tokens, reversed ranges, and filters that match no online
   CPU fail at startup
+- this build represents Linux CPU IDs `0..1023`; if sysfs reports more online
+  CPUs or higher IDs, armstat preserves the actual online count for diagnostics,
+  warns that sampling was truncated, and samples only representable IDs
 
 ### Idle and busy
 
@@ -98,11 +135,15 @@ Three ideas help interpret the output correctly:
 - `--busy-source task-clock` is accepted as a legacy compatibility alias and
   currently resolves to the same implementation as `schedstat`
 - `IOWait%` is also derived from `/proc/stat` and represents the interval share
-  spent in iowait accounting
+  spent in iowait accounting; Linux reports iowait within the idle counter, so
+  it is included in `Idle%` and is not counted as busy
 - Per-state idle residency and wakeup columns use cpuidle `stateN/name`
   labels such as `LPI-0`, `LPI-1`, ..., and `LPI-0_wake` (wakeups/s)
 - cpuidle is used for split `LPI-*` residency only
 - Per-state idle columns are hidden when cpuidle data is unavailable
+- a transient cpuidle counter failure or reset makes the visible LPI set
+  unavailable until a fresh baseline has been established
+- a missing or disabled state reports its wakeup rate as unavailable, not zero
 - The formatter exposes up to eight `LPI-*` columns (`LPI-0` ... `LPI-7`);
   platforms with deeper cpuidle state inventories are folded into the deepest
   visible usable residual bucket
@@ -140,14 +181,16 @@ So when reading `SUM`:
   keep their natural summary scope
 - the automatic mixed `SUM` section is still suppressed when `--cpu` is used,
   so filtered CPU rows are not silently shown beside a summary section
-- per-package aggregation rows are also suppressed when `--cpu` is used, since
-  they would aggregate across CPUs outside the filter
+- aggregate sections are suppressed when they would be implicitly mixed beside
+  filtered CPU rows; an explicit aggregate-only request such as
+  `-s pkg_avg_freq --cpu 0-3` remains visible and uses the filtered tracked set
 
 ### Power and temperature
 
 The current implementation is optimized for platforms with:
 
-- package power from `hwmon` `name=power_meter`, using `power1_average`
+- package power from one uniquely identifiable `hwmon` `name=power_meter`,
+  using `power1_average`
 - summary temperatures from `thermal_zoneN/temp`, where `N` maps to NUMA/Vdie `N`
   under the current `thermal-zone-index` summary-temp policy
 
@@ -157,6 +200,8 @@ That means:
 - `Temp` in CPU rows is derived from the CPU's NUMA node temperature and is reported in C
 - `Temp0` ... `Temp3` are summary fields shown for discovered NUMA/Vdie zones
   and are reported in C
+- sparse NUMA node IDs are preserved (for example node 2 maps to `Temp2`), and
+  signed milli-Celsius readings are accepted
 - per-core power and per-core temperature are currently not exposed
 
 The summary-temperature policy is explicit rather than implicit:
@@ -164,9 +209,13 @@ The summary-temperature policy is explicit rather than implicit:
 - default policy: `thermal-zone-index`
 - behavior: `thermal_zoneN/temp -> TempN -> NUMA/Vdie N`
 - override: `ARMSTAT_TEMP_POLICY=none` disables summary `TempN` discovery
+- accepted policy values are `thermal-zone-index`, `none`, and `disabled`;
+  unknown values are startup errors rather than silent temperature loss
 
 `--probe` reports the effective `summary_temp_policy` so platform assumptions
-are visible at runtime.
+are visible at runtime. It also reports the number of package-power and
+memory-bandwidth source candidates; more than one candidate is treated as
+ambiguous and disabled instead of selecting an arbitrary directory entry.
 
 ### PMU
 
@@ -178,11 +227,20 @@ PMU support uses `perf_event_open()`:
 - multiplexed counters are scaled before interval deltas are derived
 - `-I` enables `cycles,instructions` and adds IPC columns
 - `-p ...` enables PMU counters without implicitly enabling IPC
-- unknown PMU event names and event lists longer than `MAX_PMU_EVENTS` fail
-  immediately; perf permission/open failures still degrade to visible
-  unavailable values for requested columns
-- PMU file descriptor use scales with the filtered tracked CPU count, so
-  `--cpu` is the primary way to reduce PMU fd pressure on large systems
+- IPC is available only when the active event list contains both named events
+  and the interval has a nonzero cycle count
+- unknown or duplicate PMU event names and event lists longer than
+  `MAX_PMU_EVENTS` fail immediately; duplicate names are forbidden because
+  machine-readable PMU objects use event names as keys, while perf
+  permission/open failures still degrade to visible unavailable values for
+  requested columns
+- the first group read, a failed/short group read, zero running time, or a
+  counter reset is an unavailable interval; recovery re-baselines before
+  publishing another delta, so a gap is never compressed into one interval
+- PMU file descriptor use scales with both event count and filtered tracked CPU
+  count. Before opening groups, armstat best-effort raises its soft
+  `RLIMIT_NOFILE` within the existing hard limit; if the budget is still short,
+  it warns and reducing either CPUs or events lowers the pressure
 
 PMU monitoring usually requires root or a permissive
 `/proc/sys/kernel/perf_event_paranoid` setting.
@@ -191,6 +249,12 @@ If PMU or IPC columns are explicitly requested (for example via `-p`, `-I`,
 `-s pmu`, or `-s ipc`) but no `-p` event list is
 provided, armstat defaults to `cycles,instructions`.
 
+The ARMv8 raw aliases use architectural PMUv3 event numbers. In particular,
+`mem-read` and `mem-write` count retired loads and stores; they are event counts,
+not transferred bytes or memory bandwidth. Whether optional cache-level events
+are implemented is CPU-specific, so an architecturally named event can still be
+unavailable on a particular machine.
+
 ### nohz_full and Busy/Idle
 
 `nohz_full` CPUs can make short-interval `/proc/stat` busy/idle percentages
@@ -198,6 +262,11 @@ look erratic. For that reason, the default `auto` busy-source policy prefers
 `/proc/schedstat` runtime accounting on CPUs listed in
 `/sys/devices/system/cpu/nohz_full`, while continuing to use `/proc/stat` on
 ordinary CPUs.
+
+The schedstat reader follows the documented nine-field CPU record and uses
+field 7 (task runtime in nanoseconds). Known schedstat versions 10 through 17
+are accepted; an unknown version falls back to `/proc/stat` rather than
+guessing at a field layout.
 
 ## Architecture
 
@@ -238,14 +307,18 @@ systems" rather than "read everything on every interval".
   CPU inventory, topology, sensor discovery, cpuidle state names, PMU event
   metadata
 - **Slow-changing layer**:
-  CPU min/max frequency, governor, boost, sensor capability flags, cpuidle
-  `disable` state
+  CPU min/max frequency, governor, boost, and cpuidle `disable` state
 - **Per-interval fast path**:
   current frequency, `/proc/stat` deltas, package power, NUMA temperatures,
   PMU counters, cpuidle `stateN/time`
 
 This keeps the expensive "what exists on this platform?" work out of the hot
 path.
+
+Hotplug detection reads the compact Linux `online` CPU mask on each interval.
+When its represented count, full count, and actual membership match the cached
+catalog, armstat skips directory enumeration; a full inventory scan and the
+two-observation debounce run only after a real change or an unreadable mask.
 
 ### 1.5. Busy/Idle execution path
 
@@ -337,7 +410,9 @@ Not every source is refreshed on every interval:
 
 PMU events are opened as perf groups per tracked CPU. Group reads include
 `time_enabled` / `time_running`, and multiplexed intervals are scaled before
-interval deltas are derived.
+interval deltas are derived. Per-CPU validity is kept with each group read, and
+the summary PMU object is available only when every tracked CPU contributed a
+complete interval.
 
 ### 6. Two-stage formatting
 
@@ -354,13 +429,30 @@ recomputing metrics in serializers.
 
 ```bash
 make
+make test
+make debug-test
+make analyze        # GCC static analyzer on Linux
+make target-test    # ARM64 Linux host runtime acceptance
+make O=/path/to/output
 ```
 
 armstat can be built standalone from this repository, or placed inside the
 Linux source tree at `tools/power/armstat` and built there with the same
 `make` invocation. Cross-compilation is supported via `CROSS_COMPILE`
 (for example `CROSS_COMPILE=aarch64-linux-gnu-`), and out-of-tree builds
-via `make O=/path/to/output`.
+via `make O=/path/to/output`. Out-of-tree builds keep the binary, objects,
+dependency files, and test binaries under `O`. Build configuration changes
+(such as switching between release and sanitizer flags, compiler versions, or
+compiler target architectures) invalidate incompatible objects automatically.
+Objects and linked binaries are isolated by a build configuration fingerprint,
+so parallel target execution and rapid release/debug/release switches do not
+reuse stale objects; the selected binary is published to `armstat` atomically.
+Linux release builds also enable stack-protector, PIE, RELRO, and immediate
+symbol binding by default. The user-facing version comes from the repository's
+single `VERSION` file and is included in the build fingerprint and installed
+documentation. `make install` also ships the complete GPL-2.0 license text.
+`make analyze` keeps its analyzer-only binary under `.armstat-analysis/`; it
+does not clean or replace the release `armstat` selected by the normal build.
 
 ## Usage
 
@@ -377,11 +469,22 @@ armstat --busy-source schedstat
 armstat --busy-source task-clock
 ```
 
+`-n 0` (the default) runs until interrupted. `-D` still waits for and measures
+one complete interval; it is not an instantaneous point-in-time snapshot.
+Text `-D` output keeps its banner and column header so the one-shot result is
+self-describing. Add `-q` explicitly when headerless text is required.
+
+The minimum supported interval is one microsecond (`0.000001` seconds); smaller
+values are rejected because collector timestamps and exported intervals use
+microsecond resolution. The text startup banner preserves that subsecond
+precision instead of rounding a valid short interval to zero.
+
 ### Other options
 
 - `-N, --header-iterations N` — reprint text header every N intervals
 - `-J, --joules` — show interval energy in Joules
 - `-q, --quiet` — suppress interval banner and text headers
+- `-h, --help` — show the complete command-line summary and exit
 - `-v, --version` — show version and exit
 
 ### Output format
@@ -398,9 +501,25 @@ armstat -f csv -O armstat.csv
 especially convenient for machine-readable output such as JSON and CSV, but it
 works with text output as well.
 
-CSV exports include `schema_version`, `interval`, `timestamp`, and
-`timestamp_iso` columns at the front of each row so downstream tools can align
-samples in time and identify the current export contract.
+An existing output file is not truncated until collector initialization and
+the baseline sample have succeeded. Runtime output remains streaming, so a
+successful long capture is visible to downstream readers as it is produced.
+Every successful path, including `--help`, `--version`, `--list`, and
+`--probe`, flushes and checks stdout before returning zero; a full filesystem,
+broken export target, closed downstream pipe, or other detected write failure
+produces a nonzero exit. `SIGPIPE` is converted to a checked `EPIPE`, allowing
+PMU and cached sysfs resources to be cleaned up before exit.
+
+CSV exports include `schema_version`, one-based `interval`, measured
+`duration_us`, second-resolution `timestamp`, nanosecond-resolution
+`timestamp_ns`, and RFC 3339 `timestamp_iso` columns at the front of each row.
+JSON carries the same metadata. Consumers should use `duration_us`, rather than
+the requested interval, when they need the actual measured window length.
+
+Summary CSV uses a `Scope` identity column containing `SUM`. When multiple
+scopes are selected, schema 7 CSV additionally uses `CPU,Package` identity
+columns and emits `SUM`, `PKG`, or `CPU` rows. Exact package fields such as
+`-s pkg_avg_freq` produce a usable package-only export instead of an empty file.
 
 Detailed JSON/CSV field and structure documentation lives in [EXPORTS.md](EXPORTS.md)
 (English) and [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md) (Chinese).
@@ -450,7 +569,10 @@ armstat -H temp
 ```
 
 Both `-s` and `-H` reject unknown column groups or field names as startup
-errors.
+errors. After capability discovery, armstat also rejects a selection that
+cannot produce any row in the chosen mode (for example `-S -s cpu` or a sole
+dynamic field unavailable on that platform), instead of silently streaming an
+empty dataset. Use `--probe` and `--list` to resolve such a selection.
 
 Supported column groups:
 
@@ -471,6 +593,14 @@ Supported column groups:
 
 `-s` / `-H` also accept exact field names, for example `Idle%`, `Busy%`,
 `IOWait%`, `SoftIRQs`, `LPI-0`, or `Power`.
+`--list` reports each exact field's scope, machine type, unit, text label, and
+JSON key, including `MiB/s` for memory bandwidth and `count/interval` for the
+three procstat counters.
+
+Repeated `-s` options form a union. Explicit metric requests `-p`, `-I`, and
+`-J` also remain in that union regardless of whether they appear before or
+after `-s`; ordinary option ordering cannot silently disable requested PMU,
+IPC, or energy output.
 
 ### PMU
 
@@ -489,16 +619,12 @@ Built-in PMU names:
 - `branches`
 - `branch-misses`
 - `mem-access`
-- `mem-read`
-- `mem-write`
-- `l1d-cache-refill`
-- `l1d-cache`
-- `l1i-cache-refill`
-- `l1i-cache`
-- `l2d-cache-refill`
-- `l2d-cache`
-- `l3d-cache-refill`
-- `l3d-cache`
+- `mem-read` (architectural load-retired event)
+- `mem-write` (architectural store-retired event)
+- `l1d-cache-refill`, `l1d-cache`
+- `l1i-cache-refill`, `l1i-cache`
+- `l2d-cache-refill`, `l2d-cache`
+- `l3d-cache-refill`, `l3d-cache`
 
 Raw ARM PMU event configs can also be requested as hexadecimal values such as
 `0x11`. Unknown named events and lists longer than `MAX_PMU_EVENTS` fail before
@@ -513,11 +639,18 @@ armstat -l
 armstat --probe
 ```
 
-`-l` prints the built-in column groups and PMU event names known to the tool.
+`-l` prints the built-in column groups, every exact selectable field with its
+scope/text label/JSON key, and the PMU event names known to the tool. Stable
+field IDs are the least ambiguous tokens to use in scripts.
 `--probe` prints a one-shot capability summary for the current platform,
 including CPU topology, effective busy-source policy, cpuidle/LPI availability,
-available temperature sources, memory-bandwidth support, and a basic PMU
-availability probe.
+available temperature sources and node mask, selected package-power and
+memory-bandwidth sysfs paths, candidate counts and ambiguity notes, and a basic
+PMU availability probe. The PMU check
+opens `cycles` on the first tracked CPU only; it is a cheap capability check,
+not proof that every event can open on every CPU. The key-value output reports
+`probe_schema_version: 1` so deployment parsers can reject incompatible future
+probe contracts explicitly.
 
 ### Plotting
 
@@ -624,13 +757,15 @@ display-oriented adjustments.
   - source:
     `scaling_governor`
   - note:
-    refreshed in the slow-changing layer
+    refreshed in the slow-changing layer; unavailable values are `-` in text,
+    JSON `null`, and an empty CSV cell
 
 - **Boost**
   - source:
     per-CPU `cpufreq/boost`, with fallback to global `cpu/cpufreq/boost`
   - values:
-    `1`, `0`, or `-` when unavailable
+    text/CSV use `1` and `0`; JSON uses `true` and `false`; unavailable values
+    are `-` in text, JSON `null`, and an empty CSV cell
 
 - **AvgFreq**
   - per-CPU formula:
@@ -639,7 +774,8 @@ display-oriented adjustments.
     average of per-CPU interval MHz across valid tracked CPUs
   - note:
     this is an interval-average approximation derived from two samples, not a
-    hardware APERF/MPERF style average
+    hardware APERF/MPERF style average; a failed read is unavailable and the
+    next successful read starts a new averaging baseline
 
 - **UncoreFreq** / `uncore_freq`
   - scope:
@@ -676,7 +812,7 @@ display-oriented adjustments.
   - interpretation:
     `Idle%` is the total idle share of the whole sampling window. armstat uses
     it as the reference value that the displayed `LPI-*` breakdown should
-    explain.
+    explain. The procstat idle value includes Linux's iowait field.
 
 - **IOWait%** (off by default; enable with `-s IOWait%` or `-s idle`)
   - source:
@@ -696,11 +832,10 @@ display-oriented adjustments.
   - formula:
     `100 - Idle%`
   - note:
-    `IOWait%` is reported separately but is not subtracted from `Busy%` in the
-    current model
+    `IOWait%` is a subset of `Idle%`, so it is already excluded from `Busy%`
   - interpretation:
-    `Idle% + Busy% = 100`, while `IOWait%` is an additional advisory breakdown
-    from `/proc/stat`, not a third partition bucket
+    `Idle% + Busy% = 100`, while `IOWait%` is an advisory breakdown inside the
+    idle share, not a third partition bucket
 
 ### LPI / cpuidle fields
 
@@ -742,6 +877,9 @@ display-oriented adjustments.
   - result:
     displayed `LPI-*` is a presentation-friendly decomposition of `Idle%`, not
     always a pure unmodified dump of raw `cpuidle/stateN/time` percentages
+  - failure handling:
+    incomplete/reset state counters make all visible LPI values for that CPU
+    unavailable until the next complete interval
 
 ### Power and energy
 
@@ -751,8 +889,9 @@ display-oriented adjustments.
   - unit:
     mW
   - note:
-    the package power reader is platform-specific and currently maps one
-    package sensor to the `SUM` row
+    the package power reader is platform-specific and maps one uniquely
+    discovered package sensor to the `SUM` row; zero or multiple candidates
+    leave the field unavailable
 
 - **Interval average power**
   - formula:
@@ -773,6 +912,8 @@ display-oriented adjustments.
     `thermal_zoneN -> TempN -> NUMA/Vdie N`
   - unit:
     Celsius
+  - note:
+    node IDs may be sparse and readings may be below zero Celsius
 
 - **Temp in CPU rows**
   - formula:
@@ -806,14 +947,16 @@ All three are interval counts, not normalized per-second rates.
 
 - **MemBW**
   - source:
-    platform-dependent raw memory-bandwidth byte counter
+    one uniquely discovered platform-dependent raw memory-bandwidth byte
+    counter
   - formula:
     `(counter_now - counter_prev) / interval_seconds`
   - unit:
-    MB/s
+    MiB/s (bytes divided by 1024 squared per second)
   - note:
-    if the platform does not expose a usable raw counter, `MemBW` may remain
-    unavailable or zero
+    if the platform exposes zero or multiple candidate counters, or the unique
+    counter is unreadable, `MemBW` is unavailable; a valid interval with no
+    transferred bytes is reported as zero
 
 ### PMU and IPC
 
@@ -824,17 +967,22 @@ All three are interval counts, not normalized per-second rates.
     per-CPU perf groups with `time_enabled` / `time_running` scaling
   - displayed value:
     interval delta of the scaled cumulative count
+  - validity:
+    initial, failed, reset, or unscheduled group reads are unavailable and
+    establish a new baseline before the next delta
 
 - **Summary PMU**
   - formula:
     sum of per-CPU scaled PMU counts across tracked CPUs, then interval delta
+  - validity:
+    unavailable unless every tracked CPU has a complete group read
 
 - **IPC**
   - formula:
     `instructions / cycles`
   - scope:
     available as both summary and per-CPU derived data when those PMU events are
-    active
+    active and the interval cycle count is nonzero
 
 ## Fallback and Degraded Behavior
 
@@ -849,6 +997,17 @@ All three are interval counts, not normalized per-second rates.
 - If package power or NUMA temperature sensors are unavailable:
   - the corresponding fields show as unavailable or remain hidden
   - unrelated fields continue to work
+- If package power or memory bandwidth has multiple candidate sysfs sources:
+  - the metric remains unavailable rather than selecting a nondeterministic
+    first match or silently undercounting
+  - `--probe` reports the candidate count and an ambiguity note
+- If a normally available frequency, Busy/Idle, LPI, power/energy, temperature,
+  memory-bandwidth, system-counter, or PMU read fails transiently:
+  - text renders `-`, JSON renders `null`, and CSV emits an empty value
+  - cumulative sources establish a new baseline on recovery before emitting a
+    new interval value, preventing false zeroes and recovery spikes
+  - a procstat jiffy delta that cannot be represented safely in microseconds is
+    unavailable rather than wrapping into a plausible Busy/Idle percentage
 - If CPU topology changes at runtime:
   - inventory, sample cache, cpuidle runtime state, PMU, and topology are rebuilt
   - the next sample becomes a new baseline, so counters are not mixed across
@@ -861,7 +1020,8 @@ All three are interval counts, not normalized per-second rates.
 
 The current sensor policy assumes:
 
-- package power comes from `power_meter/power1_average`
+- package power comes from exactly one `power_meter/power1_average` candidate
+- memory bandwidth likewise requires exactly one `mem_bytes_read` candidate
 - summary temperatures follow the explicit `thermal-zone-index` policy
   `thermal_zoneN/temp -> TempN -> NUMA/Vdie N`
 
@@ -876,10 +1036,12 @@ If your platform exposes a different sensor topology, either set
 
 ## Known Limitations
 
-- The output model is still `SUM + CPU rows`; there are not yet dedicated
-  core aggregate rows like mature `turbostat` (per-package aggregation is implemented).
+- There are not yet dedicated core aggregate rows like mature `turbostat`;
+  summary, per-package, and per-CPU rows are implemented.
 - Per-core power is not implemented.
 - CPU-row temperature is a NUMA/die temperature mapping, not a per-core sensor.
+- CPU IDs above 1023 cannot be represented by the current fixed-size sampling
+  arrays; armstat warns and continues with representable online CPUs.
 - PMU scaling depends on kernel perf group semantics and still needs validation
   on real target hardware.
 - PMU access may fail without sufficient privileges.
@@ -906,4 +1068,4 @@ Useful things to verify:
 
 ## License
 
-GPL-2.0
+GPL-2.0. See [COPYING](COPYING) for the complete license text.

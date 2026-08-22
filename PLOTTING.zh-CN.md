@@ -66,21 +66,38 @@ armstat -f csv -O cpus.csv
 
 - `schema_version`
 - `interval`
+- `duration_us`
 - `timestamp`
+- `timestamp_ns`
 - `timestamp_iso`
 
 所以画图时可以直接使用真实时间轴。
 
-这两个时间字段表示的是同一个采样时刻，只是格式不同：
+这些时间字段表示同一个采样时刻，只是格式不同：
 
-- `timestamp`：Unix 时间戳（数字，适合程序处理）
-- `timestamp_iso`：ISO 8601 时间字符串（更适合人工阅读）
+- `timestamp`：Unix 整秒，为兼容旧消费者保留
+- `timestamp_ns`：Unix 纳秒，画图与亚秒输入优先使用
+- `timestamp_iso`：带小数秒的 RFC 3339 时间字符串
 
-画图脚本主要使用 `timestamp`。保留 `timestamp_iso` 的目的，是让
-CSV/JSON 导出在人工检查、日志比对和外部系统对接时更直观。
+`duration_us` 是实测采样窗口。loader 会把它保留为下游分析元数据，但不会
+默认把它当作可画指标。
 
-当前机器可读导出的版本号是 `schema_version = 4`。
+画图脚本优先使用 `timestamp_ns`，读取 schema 4/5 时回退到 `timestamp`。
+保留 `timestamp_iso` 的目的，是让 CSV/JSON 导出在人工检查、日志比对和
+外部系统对接时更直观。
+
+当前机器可读导出的版本号是 `schema_version = 7`。附带 loader 同时接受
+version 4 至 7，因此已有 trace 仍可继续使用。读取 mixed CSV 的 SUM / CPU
+图时，loader 会跳过 `PKG` 行与 `package.*` 列。
 JSON/CSV 的精确结构请参考 `EXPORTS.zh-CN.md`。
+
+schema 5 引入的不可用值（JSON `null`、CSV 空单元格）会被加载成 `NaN`，图中因此
+显示断点而不是虚假的零值；平滑与分组聚合在仍有有效数据点时会忽略缺失点。
+package 功耗或内存带宽因来源发现有歧义而禁用时也遵循该规则。
+
+如果 armstat 在 stderr 报告 CPU inventory 截断，CPU 图只包含实际导出的可
+表示 ID（`0..1023`）。loader 不会为更高 ID 合成曲线；在把该图视为全机覆盖
+前，应减少源机器 CPU 集或使用更大的 `MAX_CPUS` 重新构建。
 
 ## Summary 画图
 
@@ -114,6 +131,8 @@ python3 tools/power/armstat/scripts/plot_sum.py summary.json --list-fields
 
 - `--preset freq` 会画 `avg_freq`，如果导出里带有 `uncore_freq`，也会一起
  画出来
+- `--y freq` 在 summary 导出中解析为 `avg_freq`，在 CPU 导出中解析为
+  `freq`
 - `--preset temp` 会把所有可用的 `temp*` 一起画出来
 - `--preset power-temp` 会在左轴画 `power`，右轴画所有可用的
   `temp*`
@@ -182,7 +201,7 @@ python3 tools/power/armstat/scripts/plot_cpu.py cpus.json --list-cpus
 
 例如：
 
-- `freq` -> `freq`
+- `freq` -> CPU 数据的 `freq`（summary 数据中为 `avg_freq`）
 - `temp` -> `temp`
 - `busy` -> `busy_percent`
 - `idle` -> `idle_percent`
@@ -190,6 +209,8 @@ python3 tools/power/armstat/scripts/plot_cpu.py cpus.json --list-cpus
 - `lpi1` -> `lpi1`
 - `cycles` -> `pmu.cycles`
 - `instructions` -> `pmu.instructions`
+
+armstat 会在采样前拒绝重复 PMU 事件名，因此 PMU 事件路径没有歧义。
 
 ### CPU 选择
 

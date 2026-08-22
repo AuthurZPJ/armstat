@@ -19,6 +19,8 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 
 #include "topology.h"
 #include "cpu_inventory.h"
@@ -58,7 +60,8 @@ static int read_cpu_numa_node(int cpu_id)
 		return -1;
 
 	while ((entry = readdir(dir)) != NULL) {
-		int node_id;
+		char *end;
+		long node_id;
 		char *suffix;
 
 		if (strncmp(entry->d_name, "node", 4) != 0)
@@ -68,10 +71,14 @@ static int read_cpu_numa_node(int cpu_id)
 		if (*suffix == '\0' || !isdigit((unsigned char)*suffix))
 			continue;
 
-		if (sscanf(suffix, "%d", &node_id) == 1) {
-			found_node = node_id;
-			break;
-		}
+		errno = 0;
+		node_id = strtol(suffix, &end, 10);
+		if (errno == ERANGE || end == suffix || *end != '\0' ||
+		    node_id < 0 || node_id > INT_MAX)
+			continue;
+
+		found_node = (int)node_id;
+		break;
 	}
 
 	closedir(dir);
@@ -184,6 +191,31 @@ static int compute_cores_per_socket(int present)
 	return max_core_count;
 }
 
+static int compute_cpus_per_core(int present)
+{
+	int max_threads = 1;
+
+	for (int i = 0; i < present; i++) {
+		struct cpu_desc *cpu = get_present_cpu(i);
+		int threads = 0;
+
+		if (!cpu || !cpu->present)
+			continue;
+		for (int j = 0; j < present; j++) {
+			struct cpu_desc *peer = get_present_cpu(j);
+
+			if (peer && peer->present &&
+			    peer->package_id == cpu->package_id &&
+			    peer->core_id == cpu->core_id)
+				threads++;
+		}
+		if (threads > max_threads)
+			max_threads = threads;
+	}
+
+	return max_threads;
+}
+
 static void update_cpu_summary_attrs(int present, int cores, int threads)
 {
 	for (int i = 0; i < present && i < MAX_CPUS; i++) {
@@ -238,7 +270,6 @@ static void compute_cpu_id_in_core_positions(int present)
 int init_topology(void)
 {
 	int present;
-	int online;
 
 	/*
 	 * Initialize the unified CPU inventory first - it owns the present /
@@ -253,15 +284,9 @@ int init_topology(void)
 		populate_cpu_topology_attrs(get_present_cpu(i));
 
 	/* Calculate topology summary statistics from the catalog view. */
-	online = cpu_catalog_online_count();
 	sockets = compute_socket_count(present);
 	cores_per_socket = compute_cores_per_socket(present);
-
-	/* Calculate CPUs per core (SMT) */
-	if (sockets > 0 && cores_per_socket > 0)
-		cpus_per_core = online / (sockets * cores_per_socket);
-	if (cpus_per_core < 1)
-		cpus_per_core = 1;
+	cpus_per_core = compute_cpus_per_core(present);
 
 	/* Update cpu_desc with calculated values */
 	update_cpu_summary_attrs(present, cores_per_socket, cpus_per_core);

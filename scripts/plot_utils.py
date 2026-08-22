@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 """Shared utilities for armstat plotting scripts.
 
 This module is imported by plot_sum.py and plot_cpu.py. It contains helper
@@ -12,7 +13,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
-SUPPORTED_SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSION = 7
+SUPPORTED_SCHEMA_VERSIONS = {4, 5, 6, 7}
 
 
 def load_plotting_modules():
@@ -72,10 +74,10 @@ def validate_schema_version(value: object, source: Path) -> None:
         raise SystemExit(f"{source} has a non-numeric schema_version field.")
 
     version = int(to_float(value))
-    if version != SUPPORTED_SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise SystemExit(
             f"{source} uses schema_version={version}, "
-            f"but this script expects {SUPPORTED_SCHEMA_VERSION}."
+            f"but this script supports {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
         )
 
 

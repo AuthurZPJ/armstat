@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: GPL-2.0
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arm64-linux:
+    name: ARM64 Linux build and tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Release build with warnings as errors
+        run: >-
+          make
+          CFLAGS="-O2 -Wall -Wextra -Werror -Wformat=2 -Wundef -Wshadow
+          -Wstrict-prototypes -Wmissing-prototypes -I../../../include
+          -D_FILE_OFFSET_BITS=64 -MMD -MP -D_FORTIFY_SOURCE=2
+          -fstack-protector-strong -fPIE"
+          test
+
+      - name: GCC static analyzer
+        run: |
+          release_checksum=$(cksum armstat)
+          make analyze
+          test "$release_checksum" = "$(cksum armstat)"
+          test -x .armstat-analysis/armstat
+
+      - name: AddressSanitizer and UBSan
+        run: make debug-test
+
+      - name: Restore and retest release flags
+        run: |
+          make clean
+          make test
+
+      - name: ARM64 Linux runtime acceptance
+        run: >-
+          ARMSTAT_TARGET_INTERVAL=0.01
+          ARMSTAT_TARGET_SAMPLES=3
+          ARMSTAT_SOAK_ITERATIONS=1000
+          ARMSTAT_SOAK_INTERVAL=0.001
+          make target-test

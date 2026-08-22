@@ -17,6 +17,7 @@
 #include <sys/syscall.h>
 #include <errno.h>
 #include <limits.h>
+#include <sys/resource.h>
 
 #include "pmu.h"
 #include "cpu_inventory.h"
@@ -70,10 +71,18 @@ struct perf_event_attr {
 	uint64_t config1;
 };
 
-/* ARMv8 PMU event codes */
-#define ARMV8_PMU_MEM_ACCESS		0x06
-#define ARMV8_PMU_MEM_ACCESS_READ	0x04
-#define ARMV8_PMU_MEM_ACCESS_WRITE	0x05
+/* Armv8 architectural PMUv3 event codes (Linux arm_pmuv3 definitions). */
+#define ARMV8_PMU_L1I_CACHE_REFILL	0x01
+#define ARMV8_PMU_L1D_CACHE_REFILL	0x03
+#define ARMV8_PMU_L1D_CACHE		0x04
+#define ARMV8_PMU_LD_RETIRED		0x06
+#define ARMV8_PMU_ST_RETIRED		0x07
+#define ARMV8_PMU_MEM_ACCESS		0x13
+#define ARMV8_PMU_L1I_CACHE		0x14
+#define ARMV8_PMU_L2D_CACHE		0x16
+#define ARMV8_PMU_L2D_CACHE_REFILL	0x17
+#define ARMV8_PMU_L3D_CACHE_REFILL	0x2A
+#define ARMV8_PMU_L3D_CACHE		0x2B
 
 /* perf_event_open syscall number */
 #ifndef __NR_perf_event_open
@@ -117,8 +126,18 @@ static char *trim_event_name(char *event)
 static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
 			    int cpu, int group_fd, unsigned long flags)
 {
+#if defined(__linux__)
 	return syscall(__NR_perf_event_open, hw_event, pid, cpu,
 		       group_fd, flags);
+#else
+	(void)hw_event;
+	(void)pid;
+	(void)cpu;
+	(void)group_fd;
+	(void)flags;
+	errno = ENOSYS;
+	return -1;
+#endif
 }
 
 static int perf_event_open_compat(struct perf_event_attr *attr, int cpu_id,
@@ -182,16 +201,16 @@ static const struct pmu_event_catalog {
 	{ "branch-misses",      PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES       },
 	/* ARMv8 raw events */
 	{ "mem-access",         PERF_TYPE_RAW, ARMV8_PMU_MEM_ACCESS        },
-	{ "mem-read",           PERF_TYPE_RAW, ARMV8_PMU_MEM_ACCESS_READ   },
-	{ "mem-write",          PERF_TYPE_RAW, ARMV8_PMU_MEM_ACCESS_WRITE  },
-	{ "l1d-cache-refill",   PERF_TYPE_RAW, 0x03 },
-	{ "l1d-cache",          PERF_TYPE_RAW, 0x04 },
-	{ "l1i-cache-refill",   PERF_TYPE_RAW, 0x01 },
-	{ "l1i-cache",          PERF_TYPE_RAW, 0x02 },
-	{ "l2d-cache-refill",   PERF_TYPE_RAW, 0x09 },
-	{ "l2d-cache",          PERF_TYPE_RAW, 0x0A },
-	{ "l3d-cache-refill",   PERF_TYPE_RAW, 0x13 },
-	{ "l3d-cache",          PERF_TYPE_RAW, 0x14 },
+	{ "mem-read",           PERF_TYPE_RAW, ARMV8_PMU_LD_RETIRED        },
+	{ "mem-write",          PERF_TYPE_RAW, ARMV8_PMU_ST_RETIRED        },
+	{ "l1d-cache-refill",   PERF_TYPE_RAW, ARMV8_PMU_L1D_CACHE_REFILL },
+	{ "l1d-cache",          PERF_TYPE_RAW, ARMV8_PMU_L1D_CACHE        },
+	{ "l1i-cache-refill",   PERF_TYPE_RAW, ARMV8_PMU_L1I_CACHE_REFILL },
+	{ "l1i-cache",          PERF_TYPE_RAW, ARMV8_PMU_L1I_CACHE        },
+	{ "l2d-cache-refill",   PERF_TYPE_RAW, ARMV8_PMU_L2D_CACHE_REFILL },
+	{ "l2d-cache",          PERF_TYPE_RAW, ARMV8_PMU_L2D_CACHE        },
+	{ "l3d-cache-refill",   PERF_TYPE_RAW, ARMV8_PMU_L3D_CACHE_REFILL },
+	{ "l3d-cache",          PERF_TYPE_RAW, ARMV8_PMU_L3D_CACHE        },
 };
 #define PMU_CATALOG_SIZE ((int)(sizeof(pmu_catalog) / sizeof(pmu_catalog[0])))
 
@@ -210,10 +229,11 @@ static int lookup_arm_event(const char *name, int *type,
 	return -1;
 }
 
-static int resolve_pmu_event(const char *event, int *type,
-			     unsigned long long *config)
+int resolve_pmu_event(const char *event, int *type,
+			      unsigned long long *config)
 {
-	char tail;
+	char *end = NULL;
+	unsigned long long raw;
 
 	if (!event || !config)
 		return -1;
@@ -221,13 +241,19 @@ static int resolve_pmu_event(const char *event, int *type,
 	if (lookup_arm_event(event, type, config) == 0)
 		return 0;
 
-	if (sscanf(event, "0x%llx%c", config, &tail) == 1) {
-		if (type)
-			*type = PERF_TYPE_RAW;
-		return 0;
-	}
+	if (event[0] != '0' || (event[1] != 'x' && event[1] != 'X') ||
+	    event[2] == '\0')
+		return -1;
 
-	return -1;
+	errno = 0;
+	raw = strtoull(event + 2, &end, 16);
+	if (errno == ERANGE || end == event + 2 || *end != '\0')
+		return -1;
+
+	*config = raw;
+	if (type)
+		*type = PERF_TYPE_RAW;
+	return 0;
 }
 
 static int pmu_event_list_has_empty_token(const char *events)
@@ -269,6 +295,7 @@ static int parse_pmu_event_list_internal(const char *events, int populate)
 {
 	char *event_list;
 	char *event;
+	char *seen_events[MAX_PMU_EVENTS];
 	char *saveptr = NULL;
 	int idx = 0;
 
@@ -303,6 +330,14 @@ static int parse_pmu_event_list_internal(const char *events, int populate)
 			fprintf(stderr, "Error: unknown PMU event '%s'\n", event);
 			goto fail;
 		}
+		for (int i = 0; i < idx; i++) {
+			if (strcmp(seen_events[i], event) == 0) {
+				fprintf(stderr, "Error: duplicate PMU event '%s'\n",
+					event);
+				goto fail;
+			}
+		}
+		seen_events[idx] = event;
 
 		if (populate) {
 			pmu_events[idx].name = strdup(event);
@@ -423,6 +458,27 @@ static int open_pmu_fd_for_cpu(const struct pmu_event *event, int cpu_id,
 	return perf_event_open_compat(&pe, cpu_id, group_fd);
 }
 
+int probe_pmu_event(const char *event_name)
+{
+	struct pmu_event event;
+	int cpu_id;
+	int fd;
+
+	memset(&event, 0, sizeof(event));
+	if (resolve_pmu_event(event_name, &event.type, &event.config) < 0)
+		return -1;
+
+	cpu_id = get_cpu_id_by_tracked_idx(0);
+	if (cpu_id < 0)
+		return -1;
+
+	fd = open_pmu_fd_for_cpu(&event, cpu_id, -1);
+	if (fd < 0)
+		return -1;
+	close(fd);
+	return 0;
+}
+
 static uint64_t scale_pmu_value(uint64_t raw, uint64_t time_enabled,
 				uint64_t time_running)
 {
@@ -443,10 +499,56 @@ static uint64_t scale_pmu_value(uint64_t raw, uint64_t time_enabled,
 	return (uint64_t)(scaled + 0.5L);
 }
 
+static void set_pmu_read_baseline(int cpu,
+				  const struct perf_group_read_data *group_data)
+{
+	pmu_prev_time_enabled[cpu] = group_data->time_enabled;
+	pmu_prev_time_running[cpu] = group_data->time_running;
+	for (int event = 0; event < pmu_event_count; event++)
+		pmu_prev_raw[cpu][event] = group_data->values[event];
+	pmu_has_baseline[cpu] = 1;
+}
+
+static void prepare_pmu_fd_budget(int tracked)
+{
+	const rlim_t reserve = 64;
+	struct rlimit limit;
+	struct rlimit updated;
+	rlim_t required;
+	rlim_t desired;
+
+	if (tracked <= 0 || pmu_event_count <= 0)
+		return;
+	required = (rlim_t)tracked * (rlim_t)pmu_event_count;
+	desired = required + reserve;
+
+	if (getrlimit(RLIMIT_NOFILE, &limit) < 0 ||
+	    limit.rlim_cur == RLIM_INFINITY || limit.rlim_cur >= desired)
+		return;
+
+	updated = limit;
+	updated.rlim_cur = desired;
+	if (limit.rlim_max != RLIM_INFINITY &&
+	    updated.rlim_cur > limit.rlim_max)
+		updated.rlim_cur = limit.rlim_max;
+	if (updated.rlim_cur > limit.rlim_cur &&
+	    setrlimit(RLIMIT_NOFILE, &updated) == 0)
+		limit.rlim_cur = updated.rlim_cur;
+
+	if (limit.rlim_cur < desired) {
+		fprintf(stderr,
+			"Warning: PMU needs up to %llu event fds plus runtime reserve, "
+			"but RLIMIT_NOFILE is %llu; reduce --cpu/events or raise ulimit -n\n",
+			(unsigned long long)required,
+			(unsigned long long)limit.rlim_cur);
+	}
+}
+
 static int open_pmu_counters_for_tracked_cpus(void)
 {
 	int tracked = get_tracked_cpu_count();
 
+	prepare_pmu_fd_budget(tracked);
 	memset(pmu_fds, 0xff, sizeof(pmu_fds));
 	pmu_cpu_count = 0;
 
@@ -478,8 +580,20 @@ static int open_pmu_counters_for_tracked_cpus(void)
 		}
 
 		if (leader_fd >= 0) {
-			ioctl(leader_fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
-			ioctl(leader_fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
+			if (ioctl(leader_fd, PERF_EVENT_IOC_RESET,
+				  PERF_IOC_FLAG_GROUP) < 0 ||
+			    ioctl(leader_fd, PERF_EVENT_IOC_ENABLE,
+				  PERF_IOC_FLAG_GROUP) < 0) {
+				int saved_errno = errno;
+
+				fprintf(stderr,
+					"Failed to start PMU group on CPU %d: %s\n",
+					cpu_id, strerror(saved_errno));
+				pmu_cpu_count++;
+				clear_pmu_fds();
+				errno = saved_errno;
+				return -1;
+			}
 		}
 
 		pmu_cpu_count++;
@@ -524,18 +638,26 @@ int rebuild_pmu_events(void)
 	return open_pmu_counters_for_tracked_cpus();
 }
 
-int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS], int max_cpus)
+int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS],
+			  unsigned char *valid, int max_cpus)
 {
-	if (!values)
+	int valid_cpus = 0;
+
+	if (!values || !valid || max_cpus < 0 ||
+	    max_cpus > MAX_PRESENT_CPUS)
 		return -1;
 
 	for (int cpu = 0; cpu < max_cpus; cpu++) {
-		for (int event = 0; event < pmu_event_count; event++)
-			values[cpu][event] = 0;
+		valid[cpu] = 0;
+		for (int event = 0; event < pmu_event_count; event++) {
+			values[cpu][event] = cpu < pmu_cpu_count ?
+				pmu_scaled_totals[cpu][event] : 0;
+		}
 	}
 
 	for (int cpu = 0; cpu < pmu_cpu_count && cpu < max_cpus; cpu++) {
 		struct perf_group_read_data group_data;
+		int counter_reset = 0;
 		ssize_t ret;
 
 		if (pmu_fds[cpu][0] < 0)
@@ -544,20 +666,43 @@ int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS], int max_cpus)
 		memset(&group_data, 0, sizeof(group_data));
 		/* Read at least the header (nr + time_enabled + time_running) to
 		 * learn how many event values the kernel actually returns. */
-		ret = read(pmu_fds[cpu][0], &group_data, sizeof(group_data));
-		if (ret < (ssize_t)(sizeof(uint64_t) * 3))
+		do {
+			ret = read(pmu_fds[cpu][0], &group_data,
+				   sizeof(group_data));
+		} while (ret < 0 && errno == EINTR);
+		if (ret < (ssize_t)(sizeof(uint64_t) * 3)) {
+			pmu_has_baseline[cpu] = 0;
 			continue;
-		/* Cap nr at pmu_event_count to stay within the struct bounds. */
-		if ((int)group_data.nr > pmu_event_count)
-			group_data.nr = pmu_event_count;
+		}
+		if (group_data.nr != (uint64_t)pmu_event_count ||
+		    ret < (ssize_t)((3 + group_data.nr) * sizeof(uint64_t))) {
+			pmu_has_baseline[cpu] = 0;
+			continue;
+		}
 
 		if (!pmu_has_baseline[cpu]) {
+			set_pmu_read_baseline(cpu, &group_data);
+			continue;
+		}
+
+		if (group_data.time_enabled < pmu_prev_time_enabled[cpu] ||
+		    group_data.time_running < pmu_prev_time_running[cpu]) {
+			set_pmu_read_baseline(cpu, &group_data);
+			continue;
+		}
+		for (int event = 0; event < pmu_event_count; event++) {
+			if (group_data.values[event] < pmu_prev_raw[cpu][event]) {
+				set_pmu_read_baseline(cpu, &group_data);
+				counter_reset = 1;
+				break;
+			}
+		}
+		if (counter_reset)
+			continue;
+		if (group_data.time_running == pmu_prev_time_running[cpu]) {
 			pmu_prev_time_enabled[cpu] = group_data.time_enabled;
-			pmu_prev_time_running[cpu] = group_data.time_running;
-			for (int event = 0; event < pmu_event_count &&
-					     event < (int)group_data.nr; event++)
+			for (int event = 0; event < pmu_event_count; event++)
 				pmu_prev_raw[cpu][event] = group_data.values[event];
-			pmu_has_baseline[cpu] = 1;
 			continue;
 		}
 
@@ -578,17 +723,24 @@ int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS], int max_cpus)
 				delta_running = group_data.time_running -
 						pmu_prev_time_running[cpu];
 
-			pmu_scaled_totals[cpu][event] +=
-				scale_pmu_value(delta_raw, delta_enabled, delta_running);
+			uint64_t scaled = scale_pmu_value(delta_raw, delta_enabled,
+						  delta_running);
+
+			if (ULLONG_MAX - pmu_scaled_totals[cpu][event] < scaled)
+				pmu_scaled_totals[cpu][event] = ULLONG_MAX;
+			else
+				pmu_scaled_totals[cpu][event] += scaled;
 			values[cpu][event] = pmu_scaled_totals[cpu][event];
 			pmu_prev_raw[cpu][event] = current_raw;
 		}
 
 		pmu_prev_time_enabled[cpu] = group_data.time_enabled;
 		pmu_prev_time_running[cpu] = group_data.time_running;
+		valid[cpu] = 1;
+		valid_cpus++;
 	}
 
-	return 0;
+	return valid_cpus > 0 ? 0 : -1;
 }
 
 void close_pmu_events(void)

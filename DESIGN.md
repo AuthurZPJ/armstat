@@ -64,9 +64,21 @@ armstat.c responsibilities:
 Important behavior:
 
 - the first visible sample is emitted after one full interval
+- later samples use baseline-anchored monotonic deadlines, so normal collector
+  and formatter overhead does not accumulate into cadence drift; overruns skip
+  missed deadlines instead of entering a catch-up burst
+- clock-independent deadline arithmetic is unit tested for phase retention,
+  missed-period skipping, and overflow rejection
+- a failed baseline or interval collection is a process error, not a partial
+  output row
+- all successful early and sampling paths flush and validate stdout before
+  returning zero, so detected output failures propagate to automation
+- `SIGPIPE` is ignored so a closed downstream pipe reaches the same checked
+  `EPIPE` path, orderly module cleanup, and exit status 1 as other write errors
 - `-S` is summary-only
 - `-a` enables all supported column groups
-- `-D` is equivalent to one iteration
+- `-D` is equivalent to one iteration and does not implicitly enable quiet
+  mode; one-shot text remains self-describing unless `-q` is explicit
 
 ### collector.c
 
@@ -138,6 +150,10 @@ It also owns the raw authoritative Busy/Idle inputs for each interval:
 Those values are stored as cumulative raw counters in `sys_snapshot`, not
 converted to percentages in the collector layer.
 
+The procstat idle counter stored in the snapshot includes iowait, matching the
+Linux accounting model. `IOWait%` is therefore an explanatory subset of
+`Idle%`, not time that should be subtracted from `Busy%`.
+
 ### idle_backend.c
 
 Responsibilities:
@@ -181,12 +197,24 @@ The formatter stack is intentionally two-stage:
 1. `columns.c` owns the column-visibility flags (`show_*`), the idle-state and
    summary-temp series visibility + override bitmasks, and the field descriptor
    table (`all_fields[]`) that ties field ids to their group, scope, series,
-   enabled flag, and value getter. CLI parsing writes visibility through the
-   `enable_*()` setters; sample_cache reads it for demand-driven sampling.
+   data type, unit, display precision, enabled flag, and value getter. CLI
+   parsing writes visibility through the `enable_*()` setters; sample_cache
+   reads it for demand-driven sampling.
 2. `formatter_record.c` builds a stable intermediate record — the value
    getters referenced by the field table live here, next to the record model.
 3. serializers consume the record without knowing sampling details or column
    visibility internals.
+
+The same descriptor table drives `--list` exact-field discovery, including
+type and unit metadata, so CLI help cannot drift from the fields accepted by
+`-s` / `-H` or from serializer formatting.
+The first `-s` creates a field whitelist and later `-s` occurrences extend it.
+Explicit PMU (`-p`), IPC (`-I`), and energy (`-J`) requests are reapplied to
+that whitelist, making independent option combinations insensitive to order.
+After collector capability discovery, the shared section policy verifies that
+the selected mode can emit a meaningful row. This validation occurs before
+opening the destination file, so an incompatible or unavailable-only
+selection cannot silently produce an empty capture or destroy an older one.
 
 ## CPU Identity Model
 
@@ -228,18 +256,22 @@ formatter layers:
 - change detection via `check_and_rebuild_inventory()`
 
 Hotplug detection is based on actual membership changes, not only CPU count.
+The common unchanged path reads and compares `/sys/devices/system/cpu/online`
+without enumerating every `cpuN` directory. A mismatch or unreadable mask falls
+back to a full catalog scan, and a new tracked set must still be observed twice
+before dependent runtime state is rebuilt.
 
 ## Hotplug Rebuild Chain
 
 When CPU membership changes:
 
 1. rebuild CPU inventory
-2. rebuild sample cache
+2. rebuild cpufreq and sample-cache state
 3. rebuild cpuidle runtime state
 4. rebuild PMU if active
 5. rebuild topology
 6. reset aggregator
-7. treat the current sample as a fresh baseline
+7. consume the current sample as a fresh baseline without emitting it
 
 This avoids mixing pre-hotplug and post-hotplug counters into one interval.
 
@@ -265,8 +297,11 @@ Contains:
 - raw system counters (`struct raw_counters`, also independently instantiated
   by the aggregator for `prev_counters`)
 - unified interval delta in microseconds
-- per-tracked-CPU schedstat validity flags, allowing per-CPU fallback to
-  `/proc/stat` when `/proc/schedstat` lacks data for that CPU
+- current-sample validity for frequency, package power, sparse NUMA
+  temperatures, memory bandwidth, system counters, PMU, procstat, and
+  schedstat inputs
+- per-tracked-CPU procstat and schedstat validity flags, allowing per-CPU
+  fallback to `/proc/stat` when `/proc/schedstat` lacks data for that CPU
 
 ### Interval stats (`interval_stats`)
 
@@ -298,6 +333,10 @@ Static identity fields (package, core, NUMA node) are still looked up lazily at
 output time from the topology caches via the tracked CPU id.
 
 This allows one field table to drive text/JSON/CSV consistently.
+
+Unavailable numeric values are represented as `NaN` inside the interval and
+record models. Serializers map that state to `-` in text, `null` in JSON, and
+an empty CSV cell. A real counter or sensor value of zero remains numeric zero.
 
 ## Output Model
 
@@ -335,8 +374,9 @@ Important summary semantics:
 - when `--cpu` filtering is active, the automatic mixed `SUM` section is
   suppressed so CPU rows are not shown beside a surprising implicit summary
   section
-- per-package aggregation rows are also suppressed when `--cpu` is active, since
-  they would aggregate across CPUs outside the filter
+- aggregate sections are suppressed under `--cpu` only when CPU rows would be
+  emitted beside them; an explicit aggregate-only selection remains visible
+  and is computed over the filtered tracked CPU set
 
 ## Idle Model
 
@@ -368,6 +408,11 @@ When cpuidle is available:
   displayed `LPI-*` columns sum to authoritative `Idle%`
 - if a deeper state is disabled, unavailable, or beyond the visible column
   limit, the residual is assigned to the deepest remaining visible usable state
+- if any visible usable state's current value or previous baseline is invalid,
+  all visible split-state values for that CPU are unavailable for the interval;
+  the recovered sample establishes a new baseline
+- wakeup rates for missing, disabled, or otherwise unusable states are
+  unavailable rather than synthetic zeroes
 
 This means:
 
@@ -381,32 +426,44 @@ This means:
 When cpuidle is not available:
 
 - per-state columns are hidden
-- `Idle%` / `Busy%` still work via `/proc/stat`
+- `Idle%` / `Busy%` still work through the selected procstat/schedstat policy
 
 ## Power and Thermal Model
 
 The current platform-oriented model is:
 
-- package power from `power_meter/power1_average`
+- package power from exactly one discovered `power_meter/power1_average`
 - summary temperatures from `thermal_zoneN/temp`, using the explicit
   `thermal-zone-index` policy where `N` maps directly to NUMA/Vdie `N`
 
 Consequences:
 
-- `Power` is a summary/package field and is reported in mW
+- `Power` is a `SUM`-scope field backed by a package-level source and is
+  reported in mW; it is not emitted on `PKG` or CPU rows
 - interval average power uses a trapezoid over previous and current package
   readings: `(prev + current) / 2`
 - `Energy` is interval energy derived from interval average power, not a
   cumulative lifetime counter
 - CPU-row temperature is derived from the CPU's NUMA node
-- summary temperature fields are `Temp0` through `Temp3` as available and are reported in C
+- thermal-zone indices may be sparse; the sensor mask, not the largest index
+  alone, decides which `TempN` fields are available
+- signed temperature values are preserved
+- summary temperature fields are `Temp0` through `Temp3` as available and are
+  reported in C
 - per-core power is intentionally not exposed yet
 
 This logic lives in `power_sensor.c` so that future platforms can replace the
 sensor policy without rewriting collector/formatter code. The current policy is
 reported by `--probe` as `summary_temp_policy`, and can be disabled with
 `ARMSTAT_TEMP_POLICY=none` when the platform does not follow the direct
-`thermal_zoneN -> TempN -> NUMA/Vdie N` mapping.
+`thermal_zoneN -> TempN -> NUMA/Vdie N` mapping. Accepted values are
+`thermal-zone-index`, `none`, and `disabled`; an unknown value fails
+initialization instead of silently selecting a different sensor policy.
+The probe also reports the discovered temperature node mask, package-power and
+memory-bandwidth candidate counts, ambiguity notes, and the exact selected
+sysfs paths. Deployment review can therefore verify that discovery selected
+the intended unique hardware sources. Its key-value contract is independently
+versioned as `probe_schema_version = 1`.
 
 ## PMU Model
 
@@ -420,10 +477,21 @@ versions:
 - multiplexed intervals are scaled before they are accumulated
 - aggregator derives per-CPU and summary deltas from those scaled cumulative
   values
-- event names are validated before sampling starts; unknown named events and
-  lists longer than `MAX_PMU_EVENTS` are hard CLI errors
+- event names are validated before sampling starts; unknown or duplicate named
+  events and lists longer than `MAX_PMU_EVENTS` are hard CLI errors, keeping
+  JSON object keys and CSV column names unambiguous
 - known events that cannot be opened because of perf permissions or runtime
   platform limits degrade to unavailable values in requested columns
+- ARMv8 raw aliases use the architectural PMUv3 codes: `mem-read` and
+  `mem-write` are load-retired and store-retired event counts, not byte counters;
+  optional cache events can remain unsupported on a particular CPU
+- a short read, failed read, counter reset, or interval with no running time
+  invalidates that CPU for the interval and establishes a fresh baseline;
+  summary PMU values are valid only when every tracked CPU is valid
+- IPC is derived only when both named `cycles` and `instructions` events are
+  active and the relevant cycle delta is nonzero
+- `--probe` opens only `cycles` on the first tracked CPU, avoiding full PMU
+  runtime allocation while providing a deliberately limited capability check
 
 This means PMU values are interval deltas of a scaled cumulative counter model,
 not direct one-shot raw reads.
@@ -448,7 +516,21 @@ Current behavior:
 - JSON writes an array of interval objects
 - default mode emits `cpus: [...]`
 - summary mode emits `summary: {...}`
-- CSV writes one header row followed by CPU rows or summary rows
+- JSON emits `packages: [...]` when package output is selected
+- CSV writes summary-only, package-only, CPU-only, or scoped mixed rows
+- mixed CSV uses `Scope,CPU,Package` plus scope-prefixed field names;
+  `SUM`, `PKG`, and `CPU` rows keep the three aggregation levels unambiguous
+- summary-only schema 7 CSV uses a `Scope` identity column containing `SUM`
+- schema 7 metadata includes the measured `duration_us`; `timestamp_ns` is the
+  preferred time axis, `timestamp` remains whole Unix seconds for
+  compatibility, and `timestamp_iso` is RFC 3339 with nine fractional digits
+- machine-readable exports use schema version 7; unavailable numeric and
+  string data is `null` in JSON and an empty cell in CSV, while `Boost` is a
+  JSON boolean (the unavailable-value rule was introduced in version 5)
+- a package object/row serializes its physical package identity once; the
+  selectable `pkg_id` field controls that identity rather than duplicating it
+- count-per-interval fields use integer display precision; rates and ratios
+  retain the precision declared by their field descriptors
 
 The serializers should not encode sampling assumptions; those belong in the
 builder and field getters.
@@ -481,6 +563,8 @@ This is the implementation-facing summary of "where each number comes from".
     - `schedstat`: `100 - Busy%`, where `Busy%` comes from `/proc/schedstat`
       per-CPU runtime
     - `task-clock`: legacy alias for the `schedstat` formula
+  - procstat detail: Linux's iowait counter is added to idle before the delta
+    is converted to a percentage
 - `IOWait%` (off by default; enable with `-s iowait` or `-s IOWait%`)
   - source: `/proc/stat iowait`
   - implementation path:
@@ -513,12 +597,13 @@ This is the implementation-facing summary of "where each number comes from".
     displayed `LPI-*` is optimized for explaining authoritative `Idle%`, not
     for preserving raw cpuidle percentages unchanged
 - `Power`
-  - source: `power_meter/power1_average`
+  - source: one unique `power_meter/power1_average` candidate
 - `Energy`
   - formula: `interval_avg_power_mw * interval_seconds / 1000`
 - `MemBW`
-  - source: platform-specific raw byte counter
+  - source: one unique platform-specific `mem_bytes_read` raw byte counter
   - formula: `(counter_now - counter_prev) / interval_seconds`
+  - unit: MiB/s (`bytes_per_second / 1024^2`)
 - `CtxSw`
   - source: `/proc/stat ctxt`
   - formula: `ctxt_now - ctxt_prev`
@@ -541,6 +626,14 @@ The implementation is intentionally explicit about partial capability:
   output model but render as unavailable instead of pretending to be zero
 - if power or temperature sensors are missing, only the dependent fields are
   unavailable; the rest of the interval model remains valid
+- if package power or memory bandwidth has multiple candidate sysfs sources,
+  the metric is unavailable instead of using directory iteration order or
+  risking a silent undercount
+- a transient frequency, cpuidle, power, temperature, memory-bandwidth,
+  procstat, or PMU read failure makes only dependent metrics unavailable; a
+  recovered cumulative source is re-baselined before deltas resume
+- an unrepresentable procstat jiffy-to-microsecond conversion is rejected, so
+  integer wraparound cannot produce a plausible Busy/Idle percentage
 - after hotplug rebuild, the next collection is treated as a new baseline so
   deltas do not cross the rebuild boundary
 
@@ -572,6 +665,17 @@ This is the motivation for the default `auto` busy-source policy:
 
 - ordinary CPUs use `/proc/stat` (familiar, well-tested)
 - `nohz_full` CPUs prefer `/proc/schedstat` (tick-independent)
+
+The reader accepts documented schedstat versions 10 through 17, requires all
+nine CPU fields, and takes task runtime from field 7. An unknown version makes
+schedstat unavailable globally; an invalid CPU record makes it unavailable for
+that CPU, so the per-CPU policy can fall back to procstat.
+
+Both procstat and schedstat bulk readers retain a validity bit for each CPU ID.
+The sample cache accepts a value only when the corresponding line was actually
+parsed, so a sparse or malformed file cannot turn an absent CPU line into a
+synthetic zero. `/proc/stat` jiffies are converted with `_SC_CLK_TCK` (Linux
+USER_HZ), with 100 used only if that userspace query unexpectedly fails.
 
 The `schedstat` path computes `Busy%` from runtime delta and derives
 `Idle% = 100 - Busy%`. Because schedstat runtime can occasionally exceed wall
@@ -625,11 +729,21 @@ guarantees**:
 **Power**:
 - Looks for an `hwmon` device with `name = power_meter`
 - Reads `power1_average` for package-level power
-- If no `power_meter` device exists, power silently degrades to 0
+- Enables the metric only when exactly one matching source exists; zero or
+  multiple candidates, or a read failure, make power and energy unavailable
+  rather than zero
+
+**Memory bandwidth**:
+- Looks for `mem_bytes_read` below `/sys/class/memory/mem*`
+- Enables the metric only when exactly one candidate exists; multiple
+  candidates are not guessed to be independent or safe to sum
 
 **Temperature**:
 - Default `thermal-zone-index` policy maps `thermal_zoneN/temp` directly to
   NUMA/vdie `N` (i.e., thermal zone index = NUMA node index)
+- Discovery keeps a sparse sensor mask, so a missing lower-numbered zone does
+  not shift or invent another NUMA mapping
+- Signed millidegree readings are accepted
 - CPU-row temperature is derived from the CPU's NUMA node temperature
 - This mapping is a platform convention, not a kernel guarantee: thermal zone
   numbering depends on probe order and is not inherently linked to NUMA topology
@@ -649,13 +763,15 @@ can swap the discovery logic without touching the collector/formatter pipeline.
 
 All sysfs/procfs single-value reads and cached-fd reads go through
 `sysfs_util.c` (`sysfs_read_int_checked`, `sysfs_read_ull_checked`,
-`sysfs_read_str`, `sysfs_path_exists`, `fd_read_ull_checked`). This
+`sysfs_read_str`, `sysfs_path_exists`, `fd_read_int_checked`,
+`fd_read_ull_checked`). This
 consolidates the previously duplicated `fopen`/`fscanf`/`fclose` and
 `lseek`/`read`/`strtoull` patterns that were copy-pasted across `topology.c`,
 `power_sensor.c`, `cpufreq.c`, and `cpuidle.c` with subtly different error
-conventions. All numeric readers use the checked convention (return 0 on
-success, -1 on failure, value via out-param) so callers can choose their own
-error sentinel.
+conventions. All numeric readers reject overflow, unsigned negative values,
+and trailing non-whitespace data. They use the checked convention (return 0
+on success, -1 on failure, value via out-param) so callers can track validity
+without overloading a legitimate numeric value.
 
 ### File descriptor budget
 
@@ -666,14 +782,15 @@ armstat keeps file descriptors open across intervals for performance:
 | cpuidle  | 1 per CPU × per state | ≤ 32 (hard cap) |
 | sysstat  | 2 (`/proc/stat`, `/proc/schedstat`) | 2 |
 | cpufreq  | 1 per CPU (`scaling_cur_freq`) | ≤ 16 (hard cap, fallback to slow path) |
-| PMU      | 1 group fd per tracked CPU | no explicit cap |
+| PMU      | 1 fd per event per tracked CPU (grouped per CPU) | no explicit cap |
 
-On a machine with 256 tracked CPUs and 3 PMU events, the total can exceed 500
-file descriptors. Combined with cpufreq fds, this pushes against the typical
-default `ulimit -n` of 1024. If PMU initialization fails with `EMFILE`, either
-raise `ulimit -n` or reduce the tracked CPU count with `--cpu`. Because
-`--cpu` is now applied before sampling, it reduces both PMU group fds and the
-other per-tracked-CPU readers.
+On a machine with 256 tracked CPUs and 3 PMU events, PMU alone needs 768 file
+descriptors. Before opening groups, armstat best-effort raises its soft
+`RLIMIT_NOFILE` to the event-fd requirement plus a runtime reserve, never above
+the existing hard limit. If the available limit remains too small it warns;
+raise `ulimit -n`, reduce events, or reduce tracked CPUs with `--cpu`. Because
+`--cpu` is applied before sampling, it reduces both PMU group fds and the other
+per-tracked-CPU readers.
 
 The cpuidle fd cache is intentionally capped at 32 to prevent split-LPI
 reporting from consuming the entire process fd budget. PMU fds are not capped
@@ -682,13 +799,14 @@ implicitly accepts the fd cost.
 
 ### MAX_CPUS = 1024
 
-`MAX_CPUS` is a compile-time constant in `collector.h`. It sets the maximum
-number of simultaneously tracked CPUs. 1024 was chosen to exceed the largest
-single-system ARM server available at the time (~512 cores), with headroom for
-SMT and growth. If a system exceeds this limit, armstat caps at 1024, prints a
-warning, and continues with the first 1024 CPUs. Raising this value increases
-static array sizes throughout the codebase; check all `MAX_CPUS`-sized stack
-and heap allocations before changing it.
+`MAX_CPUS` is a compile-time constant in `collector.h`. It sets both the maximum
+number of simultaneously tracked CPUs and the representable Linux CPU-ID range
+(`0..1023`). Discovery retains the actual present/online counts separately from
+the fixed catalog, so a machine with more CPUs or higher IDs gets an accurate
+truncation warning rather than silently appearing smaller. Sampling then
+continues with the representable online IDs. Raising this value increases static
+array sizes throughout the codebase; check all `MAX_CPUS`-sized stack and heap
+allocations before changing it.
 
 ## Documentation Rule
 

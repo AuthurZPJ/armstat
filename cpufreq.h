@@ -7,8 +7,11 @@
 struct cpu_freq_info {
 	int cpu_id;
 	unsigned int cur_freq;		/* kHz */
+	int cur_freq_valid;
 	unsigned int min_freq;		/* kHz */
+	int min_freq_valid;
 	unsigned int max_freq;		/* kHz */
+	int max_freq_valid;
 	int boost;			/* 0/1, or -1 if unavailable */
 	char governor[32];
 };
@@ -16,8 +19,10 @@ struct cpu_freq_info {
 /* Read current CPU frequency in kHz (tracked_idx) */
 int read_cpu_freq(int tracked_idx, unsigned int *freq);
 
-/* Read min/max frequency (tracked_idx) */
-int read_cpu_min_max_freq(int tracked_idx, unsigned int *min, unsigned int *max);
+/* Read min/max frequency with independent validity for min and max. */
+int read_cpu_min_max_freq_checked(int tracked_idx,
+				  unsigned int *min, int *min_valid,
+				  unsigned int *max, int *max_valid);
 
 /* Read CPU governor (tracked_idx) */
 int read_cpu_governor(int tracked_idx, char *governor, size_t len);
@@ -36,6 +41,9 @@ const char *get_uncore_freq_device_name(void);
 
 /* Initialize cpufreq subsystem */
 int init_cpufreq(void);
+
+/* Number of tracked CPUs represented by the current cached-fd set. */
+int get_cpufreq_tracked_count(void);
 
 /* Close cached file descriptors */
 void close_cpufreq(void);

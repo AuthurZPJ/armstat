@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0
 """Test CSV streaming performance and memory usage."""
 
 import sys
+import os
 import tempfile
 import tracemalloc
 from pathlib import Path
@@ -15,24 +17,31 @@ import plot_sum
 import plot_cpu
 
 
+def secure_temp_path(suffix: str) -> Path:
+    """Create a private temporary file path without a name-generation race."""
+    fd, name = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    return Path(name)
+
+
 def generate_summary_csv(num_samples: int) -> Path:
     """Generate a test summary CSV file."""
-    path = Path(tempfile.mktemp(suffix=".csv"))
+    path = secure_temp_path(".csv")
     with path.open("w") as f:
         f.write("schema_version,interval,timestamp,timestamp_iso,SUM,avg_freq,uncore_freq,busy_percent,idle_percent,temp0,temp1\n")
         for i in range(1, num_samples + 1):
-            f.write(f"4,{i},1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1600.00,50.00,50.00,45.00,46.00\n")
+            f.write(f"5,{i},1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1600.00,50.00,50.00,45.00,46.00\n")
     return path
 
 
 def generate_cpu_csv(num_samples: int, num_cpus: int) -> Path:
     """Generate a test CPU CSV file."""
-    path = Path(tempfile.mktemp(suffix=".csv"))
+    path = secure_temp_path(".csv")
     with path.open("w") as f:
         f.write("schema_version,interval,timestamp,timestamp_iso,CPU,freq,busy_percent,idle_percent,temp\n")
         for i in range(1, num_samples + 1):
             for cpu in range(num_cpus):
-                f.write(f"4,{i},1774665600,2026-03-28T10:40:00+0800,{cpu},2200.00,50.00,50.00,45.00\n")
+                f.write(f"5,{i},1774665600,2026-03-28T10:40:00+0800,{cpu},2200.00,50.00,50.00,45.00\n")
     return path
 
 
@@ -54,11 +63,13 @@ def test_summary_csv_streaming():
     
     try:
         # Test 1: Full load (no streaming)
-        series1, mem1 = measure_memory(plot_sum.load_csv_summary, csv_path)
+        series1, mem1 = measure_memory(plot_sum.load_summary_series, csv_path)
         print(f"Full load: {len(series1.rows)} rows, {mem1 / 1024:.1f} KB peak memory")
         
         # Test 2: Streaming load with sample_range
-        series2, mem2 = measure_memory(plot_sum.load_csv_summary, csv_path, "100:200")
+        series2, mem2 = measure_memory(
+            plot_sum.load_summary_series, csv_path, "100:200"
+        )
         print(f"Stream load (100:200): {len(series2.rows)} rows, {mem2 / 1024:.1f} KB peak memory")
         
         # Verify correctness
@@ -87,11 +98,13 @@ def test_cpu_csv_streaming():
     
     try:
         # Test 1: Full load (no streaming)
-        series1, mem1 = measure_memory(plot_cpu.load_csv_cpu_series, csv_path)
+        series1, mem1 = measure_memory(plot_cpu.load_cpu_series, csv_path)
         print(f"Full load: {len(series1.samples)} samples, {mem1 / 1024:.1f} KB peak memory")
         
         # Test 2: Streaming load with sample_range
-        series2, mem2 = measure_memory(plot_cpu.load_csv_cpu_series, csv_path, "100:200")
+        series2, mem2 = measure_memory(
+            plot_cpu.load_cpu_series, csv_path, "100:200"
+        )
         print(f"Stream load (100:200): {len(series2.samples)} samples, {mem2 / 1024:.1f} KB peak memory")
         
         # Verify correctness
@@ -116,7 +129,7 @@ def test_json_unchanged():
     print("\n=== JSON Loading Test ===")
     
     # Generate a small JSON file
-    json_path = Path(tempfile.mktemp(suffix=".json"))
+    json_path = secure_temp_path(".json")
     import json
     data = [
         {

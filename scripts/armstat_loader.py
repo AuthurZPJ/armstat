@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 """Shared loader for armstat machine-readable exports.
 
 Consolidates the JSON/CSV loaders, field-alias maps, canonicalizers, field
@@ -11,7 +12,7 @@ Public interface:
     - load_cpu_series(path, sample_range) -> CpuSeriesData
     - resolve_field_name(requested, available_fields) -> str
     - slice_summary_series / slice_cpu_series
-    - count_csv_data_lines / count_csv_cpu_samples
+    - count_csv_data_lines / count_csv_summary_samples / count_csv_cpu_samples
     - collect_numeric_fields (overloaded for both data shapes)
 """
 
@@ -125,6 +126,12 @@ FIELD_ALIASES: Dict[str, str] = {
 # in the alias map; the one that matches available_fields wins.
 FIELD_ALIASES["freq"] = "freq"  # CPU-scope override — but summary has avg_freq too
 
+# Some human aliases are intentionally scope-dependent. Resolve these against
+# the fields actually present instead of forcing one global alias target.
+CONTEXTUAL_FIELD_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "freq": ("freq", "avg_freq"),
+}
+
 # Generate LPI aliases
 for _idx in range(8):
     FIELD_ALIASES[f"lpi{_idx}"] = f"lpi{_idx}"
@@ -158,7 +165,10 @@ class CpuSeriesData:
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def sample_x_value(timestamp: object, sample_index: int) -> object:
+def sample_x_value(timestamp: object, sample_index: int,
+                   timestamp_ns: object = None) -> object:
+    if timestamp_ns not in (None, "") and is_number(timestamp_ns):
+        return datetime.fromtimestamp(to_float(timestamp_ns) / 1_000_000_000.0)
     if isinstance(timestamp, (int, float)):
         return datetime.fromtimestamp(timestamp)
     if isinstance(timestamp, str) and timestamp and is_number(timestamp):
@@ -208,6 +218,10 @@ def resolve_field_name(requested: str, available_fields: Iterable[str]) -> str:
     if normalized in normalized_map:
         return normalized_map[normalized]
 
+    for alias_target in CONTEXTUAL_FIELD_ALIASES.get(normalized, ()):
+        if alias_target in available:
+            return alias_target
+
     alias_target = FIELD_ALIASES.get(normalized)
     if alias_target and alias_target in available:
         return alias_target
@@ -241,6 +255,20 @@ def count_csv_data_lines(path: Path) -> int:
     return count
 
 
+def count_csv_summary_samples(path: Path) -> int:
+    count = 0
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        is_mixed_scope = reader.fieldnames and "Scope" in reader.fieldnames
+        for item in reader:
+            if is_mixed_scope:
+                if item.get("Scope") == "SUM":
+                    count += 1
+            elif item.get("SUM") == "SUM":
+                count += 1
+    return count
+
+
 def count_csv_cpu_samples(path: Path) -> int:
     count = 0
     current_key = None
@@ -252,7 +280,10 @@ def count_csv_cpu_samples(path: Path) -> int:
                 continue
             if not item.get("CPU"):
                 continue
-            key = (item.get("interval"), item.get("timestamp"), item.get("timestamp_iso"))
+            key = (
+                item.get("interval"), item.get("timestamp"),
+                item.get("timestamp_ns"), item.get("timestamp_iso"),
+            )
             if key != current_key:
                 count += 1
                 current_key = key
@@ -285,7 +316,9 @@ def load_json_summary(path: Path) -> SeriesData:
         row["__timestamp"] = item.get("timestamp")
         rows.append(row)
 
-        x_values.append(sample_x_value(item.get("timestamp"), sample_index))
+        x_values.append(sample_x_value(
+            item.get("timestamp"), sample_index, item.get("timestamp_ns")
+        ))
 
     if not rows:
         raise SystemExit(
@@ -307,8 +340,8 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
     end_sample = None
 
     if sample_range:
-        total_lines = count_csv_data_lines(path)
-        parsed = parse_sample_range(sample_range, total_lines)
+        total_samples = count_csv_summary_samples(path)
+        parsed = parse_sample_range(sample_range, total_samples)
         if parsed:
             start_sample, end_sample = parsed
 
@@ -328,34 +361,40 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
                 "Use summary CSV export, for example: armstat -S -f csv -O summary.csv"
             )
 
-        for sample_index, item in enumerate(reader, start=1):
-            if sample_index < start_sample:
-                continue
-            if end_sample is not None and sample_index > end_sample:
-                break
-
+        sample_index = 0
+        for item in reader:
             if is_mixed_scope:
                 if item.get("Scope") != "SUM":
                     continue
             elif item.get("SUM") != "SUM":
                 continue
+            sample_index += 1
+            if sample_index < start_sample:
+                continue
+            if end_sample is not None and sample_index > end_sample:
+                break
             validate_schema_version(item.get("schema_version"), path)
 
             row = {}
             for key, value in item.items():
                 if key in {
-                    "SUM", "Scope", "CPU",
-                    "schema_version", "interval", "timestamp", "timestamp_iso",
+                    "SUM", "Scope", "CPU", "Package",
+                    "schema_version", "interval", "duration_us", "timestamp",
+                    "timestamp_ns", "timestamp_iso",
                 }:
                     continue
-                if is_mixed_scope and normalize_field_name(key).startswith("cpu."):
-                    continue
+                if is_mixed_scope:
+                    normalized = normalize_field_name(key)
+                    if normalized.startswith(("cpu.", "package.")):
+                        continue
                 row[canonicalize_csv_key(key)] = value
             row["__interval_index"] = sample_index
             row["__timestamp"] = item.get("timestamp")
             rows.append(row)
 
-            x_values.append(sample_x_value(item.get("timestamp"), sample_index))
+            x_values.append(sample_x_value(
+                item.get("timestamp"), sample_index, item.get("timestamp_ns")
+            ))
 
     if not rows:
         raise SystemExit(f"{path} does not contain summary rows.")
@@ -440,7 +479,9 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
             continue
 
         samples.append(sample)
-        x_values.append(sample_x_value(item.get("timestamp"), len(samples)))
+        x_values.append(sample_x_value(
+            item.get("timestamp"), len(samples), item.get("timestamp_ns")
+        ))
 
     if not samples:
         raise SystemExit(
@@ -485,7 +526,7 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
                 "Use CPU CSV export, for example: armstat -f csv -O cpus.csv"
             )
 
-        current_key: Optional[Tuple[object, object, object]] = None
+        current_key: Optional[Tuple[object, object, object, object]] = None
         current_sample: Dict[int, Dict[str, object]] = {}
         sample_index = 0
 
@@ -496,7 +537,9 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
             sample_index += 1
             if sample_index >= start_sample and (end_sample is None or sample_index <= end_sample):
                 samples.append(current_sample)
-                x_values.append(sample_x_value(current_key[1], sample_index))
+                x_values.append(sample_x_value(
+                    current_key[1], sample_index, current_key[2]
+                ))
             current_sample = {}
 
         for item in reader:
@@ -508,7 +551,10 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
                 continue
             validate_schema_version(item.get("schema_version"), path)
 
-            key = (item.get("interval"), item.get("timestamp"), item.get("timestamp_iso"))
+            key = (
+                item.get("interval"), item.get("timestamp"),
+                item.get("timestamp_ns"), item.get("timestamp_iso"),
+            )
             if current_key is None:
                 current_key = key
             elif key != current_key:
@@ -523,11 +569,14 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
             for key, value in item.items():
                 if key in {
                     "Scope", "schema_version", "interval",
-                    "timestamp", "timestamp_iso", "CPU",
+                    "duration_us", "timestamp", "timestamp_ns",
+                    "timestamp_iso", "CPU", "Package",
                 }:
                     continue
-                if is_mixed_scope and normalize_field_name(key).startswith("summary."):
-                    continue
+                if is_mixed_scope:
+                    normalized = normalize_field_name(key)
+                    if normalized.startswith(("summary.", "package.")):
+                        continue
                 row[canonicalize_csv_key(key)] = value
             current_sample[cpu_id] = row
             cpu_ids.add(cpu_id)

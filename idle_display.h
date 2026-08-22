@@ -20,8 +20,8 @@
  * Compute display-adjusted per-idle-state residency for one CPU.
  *
  *   out[s]         - output: display percentage for state s
- *                    (NAN for hidden/unusable states in CPU mode,
- *                     0.0 in summary mode)
+ *                    (NAN for incomplete current data; hidden/unusable states
+ *                     are NAN in CPU mode and 0.0 in summary mode)
  *   idle_matrix    - per-CPU idle state array from the snapshot
  *                    (raw->idle); idle_matrix[cpu_idx] may be NULL
  *   cpu_idx        - tracked-CPU index into idle_matrix

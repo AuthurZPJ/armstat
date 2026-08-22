@@ -1,64 +1,147 @@
 # SPDX-License-Identifier: GPL-2.0
+
 CC		= $(CROSS_COMPILE)gcc
+SRC_DIR		:= $(CURDIR)
 BUILD_OUTPUT	:= $(CURDIR)
 PREFIX		?= /usr
 DESTDIR		?=
+VERSION_FILE	:= $(SRC_DIR)/VERSION
+VERSION		:= $(strip $(shell sed -n '1p' "$(VERSION_FILE)" 2>/dev/null))
 DAY		:= $(shell date +%Y.%m.%d)
 SNAPSHOT	= armstat-$(DAY)
-COMMON_CFLAGS	:= -Wall -Wextra -I../../../include \
-		   -D_FILE_OFFSET_BITS=64 -MMD -MP
+COMMON_CFLAGS	:= -Wall -Wextra -Wformat=2 -Wundef -Wshadow \
+		   -Wstrict-prototypes -Wmissing-prototypes \
+		   -I../../../include -D_FILE_OFFSET_BITS=64 -MMD -MP
 DEFAULT_CFLAGS	:= -O2 $(COMMON_CFLAGS) -D_FORTIFY_SOURCE=2
+DEFAULT_LDFLAGS	:=
 DEBUG_CFLAGS	:= $(COMMON_CFLAGS) -g -O0 \
 		   -fsanitize=address,undefined -fno-omit-frame-pointer
+DEBUG_LDFLAGS	:= -fsanitize=address,undefined
+ANALYZE_CFLAGS	:= -O0 $(COMMON_CFLAGS) -Werror -fanalyzer \
+		   -Wno-analyzer-file-leak -Wno-analyzer-malloc-leak
+ANALYZE_OUTPUT	= $(BUILD_OUTPUT)/.armstat-analysis
 
-ifeq ("$(origin O)", "command line")
-	BUILD_OUTPUT := $(O)
+CC_MACHINE := $(shell $(CC) -dumpmachine 2>/dev/null || uname -srm)
+CC_VERSION := $(shell $(CC) --version 2>/dev/null | sed -n '1p')
+
+ifeq ($(VERSION),)
+$(error VERSION must contain a non-empty version string)
 endif
+
+ifneq (,$(findstring linux,$(CC_MACHINE)))
+DEFAULT_CFLAGS	+= -fstack-protector-strong -fPIE
+DEFAULT_LDFLAGS	+= -pie -Wl,-z,relro,-z,now
+endif
+
+CFLAGS ?= $(DEFAULT_CFLAGS)
+LDFLAGS ?= $(DEFAULT_LDFLAGS)
+VERSION_CPPFLAGS := -DARMSTAT_VERSION=\"$(VERSION)\"
+
+ifeq (command line,$(origin O))
+BUILD_OUTPUT	:= $(abspath $(O))
+endif
+
+BUILD_CONFIG	:= $(BUILD_OUTPUT)/.armstat-build-config
+BUILD_CONFIG_INPUT := CC=$(CC)|CC_MACHINE=$(CC_MACHINE)|CC_VERSION=$(CC_VERSION)|VERSION=$(VERSION)|CPPFLAGS=$(CPPFLAGS)|CFLAGS=$(CFLAGS)|LDFLAGS=$(LDFLAGS)|LDLIBS=$(LDLIBS)
+BUILD_CONFIG_KEY := $(shell printf '%s\n' "$(BUILD_CONFIG_INPUT)" | \
+	cksum | awk '{print $$1 "-" $$2}')
+BUILD_CONFIG_STAMP := $(BUILD_CONFIG).$(BUILD_CONFIG_KEY)
 
 SRCS = armstat.c armstat_cli.c cpufreq.c cpuidle.c power.c pmu.c topology.c sysstat.c \
        collector.c cpu_inventory.c sample_cache.c columns.c sysfs_util.c idle_display.c \
        idle_backend.c aggregator.c formatter_record.c \
-       formatter_text.c formatter_machine.c formatter_section.c power_sensor.c power_interval.c membw.c
-OBJS = $(SRCS:.c=.o)
-TEST_OBJS = $(filter-out armstat.o,$(OBJS))
+       formatter_text.c formatter_machine.c formatter_section.c sampling_deadline.c \
+       power_sensor.c power_interval.c membw.c
+OBJ_NAMES = $(SRCS:.c=.o)
+OBJ_DIR = $(BUILD_OUTPUT)/.armstat-obj/$(BUILD_CONFIG_KEY)
+OBJS = $(addprefix $(OBJ_DIR)/,$(OBJ_NAMES))
+TEST_OBJ_NAMES = $(filter-out armstat.o,$(OBJ_NAMES))
+TEST_OBJS = $(addprefix $(OBJ_DIR)/,$(TEST_OBJ_NAMES))
+TARGET = $(BUILD_OUTPUT)/armstat
+CONFIG_TARGET = $(BUILD_OUTPUT)/.armstat-bin/$(BUILD_CONFIG_KEY)/armstat
+DEP_FILES = $(OBJS:.o=.d)
+LEGACY_OBJS = $(addprefix $(BUILD_OUTPUT)/,$(OBJ_NAMES))
+LEGACY_DEP_FILES = $(LEGACY_OBJS:.o=.d)
 
--include $(BUILD_OUTPUT)/*.d
+TEST_NAMES = test_core_logic test_column_selection test_runtime_smoke \
+	     test_cpu_inventory test_section_policy
+TEST_BINS = $(addprefix $(BUILD_OUTPUT)/tests/,$(TEST_NAMES))
+TEST_WRAPPERS = $(addprefix tests/,$(TEST_NAMES))
+TEST_DEP_FILES = $(TEST_BINS:%=%.d)
 
-armstat : $(OBJS)
-	$(CC) $(CFLAGS) $(OBJS) -o $(BUILD_OUTPUT)/armstat $(LDFLAGS)
+.DEFAULT_GOAL := all
 
-CFLAGS ?= $(DEFAULT_CFLAGS)
+.PHONY: all armstat FORCE
+all: $(TARGET)
 
-%: %.c
-	@mkdir -p $(BUILD_OUTPUT)
-	$(CC) $(CFLAGS) $< -o $(BUILD_OUTPUT)/$@ $(LDFLAGS)
+FORCE:
 
-.PHONY : clean
-clean :
-	@rm -f $(BUILD_OUTPUT)/armstat
-	@rm -f $(OBJS)
-	@rm -f *.o
-	@rm -f $(BUILD_OUTPUT)/*.d
-	@rm -f $(SNAPSHOT).tar.gz
-	@rm -rf scripts/__pycache__
-	@rm -f tests/test_core_logic
-	@rm -f tests/test_column_selection
-	@rm -f tests/test_runtime_smoke
-	@rm -f tests/test_cpu_inventory
-	@rm -f tests/test_section_policy
+$(BUILD_CONFIG_STAMP):
+	@mkdir -p $(dir $@)
+	@printf '%s\n' "CC=$(CC)" "CC_MACHINE=$(CC_MACHINE)" \
+		"CC_VERSION=$(CC_VERSION)" "VERSION=$(VERSION)" \
+		"CPPFLAGS=$(CPPFLAGS)" "CFLAGS=$(CFLAGS)" \
+		"LDFLAGS=$(LDFLAGS)" "LDLIBS=$(LDLIBS)" > "$@.tmp"
+	@mv "$@.tmp" "$(BUILD_CONFIG)"
+	@touch "$@"
 
-.PHONY : debug
-debug :
+# Compatibility wrapper for callers that explicitly use `make armstat`.
+armstat: $(TARGET)
+
+$(CONFIG_TARGET): $(BUILD_CONFIG_STAMP) $(OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(OBJS) -o $@ $(LDFLAGS) $(LDLIBS)
+
+$(TARGET): $(CONFIG_TARGET) FORCE
+	@if ! cmp -s "$(CONFIG_TARGET)" "$@"; then \
+		cp "$(CONFIG_TARGET)" "$@.$(BUILD_CONFIG_KEY).tmp"; \
+		mv "$@.$(BUILD_CONFIG_KEY).tmp" "$@"; \
+	fi
+
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(BUILD_CONFIG_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(VERSION_CPPFLAGS) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+-include $(DEP_FILES) $(TEST_DEP_FILES)
+
+.PHONY: clean
+clean:
+	@rm -f $(TARGET) $(OBJS) $(DEP_FILES) $(TEST_BINS) $(TEST_DEP_FILES) \
+		$(LEGACY_OBJS) $(LEGACY_DEP_FILES) \
+		$(BUILD_CONFIG) $(BUILD_CONFIG).tmp $(BUILD_CONFIG).* \
+		$(TARGET).*.tmp \
+		$(BUILD_OUTPUT)/*.gcda $(BUILD_OUTPUT)/*.gcno $(BUILD_OUTPUT)/*.gcov \
+		$(BUILD_OUTPUT)/tests/*.gcda $(BUILD_OUTPUT)/tests/*.gcno \
+		$(BUILD_OUTPUT)/tests/*.gcov
+	@rm -rf $(TARGET).dSYM $(addsuffix .dSYM,$(TEST_BINS))
+	@rm -rf $(BUILD_OUTPUT)/.armstat-obj $(BUILD_OUTPUT)/.armstat-bin
+	@rm -rf $(ANALYZE_OUTPUT)
+	@rm -f $(SRC_DIR)/$(SNAPSHOT).tar.gz
+	@rm -rf $(SRC_DIR)/scripts/__pycache__ $(SRC_DIR)/tests/__pycache__
+
+.PHONY: debug
+debug:
 	$(MAKE) clean
-	$(MAKE) CFLAGS="$(DEBUG_CFLAGS)" armstat
+	$(MAKE) CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)" armstat
 
-install : armstat
+.PHONY: debug-test
+debug-test:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="$(DEBUG_CFLAGS)" LDFLAGS="$(DEBUG_LDFLAGS)" test
+
+.PHONY: analyze
+analyze:
+	$(MAKE) O="$(ANALYZE_OUTPUT)" CFLAGS="$(ANALYZE_CFLAGS)" \
+		LDFLAGS= armstat
+
+.PHONY: install
+install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
-	install $(BUILD_OUTPUT)/armstat $(DESTDIR)$(PREFIX)/bin/armstat
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/armstat
 	install -d $(DESTDIR)$(PREFIX)/share/man/man8
 	install -m 644 armstat.8 $(DESTDIR)$(PREFIX)/share/man/man8
 	install -d $(DESTDIR)$(PREFIX)/share/doc/armstat
-	install -m 644 README.md README.zh-CN.md DESIGN.md DESIGN.zh-CN.md \
+	install -m 644 COPYING VERSION README.md README.zh-CN.md DESIGN.md DESIGN.zh-CN.md \
 		EXPORTS.md EXPORTS.zh-CN.md \
 		PLOTTING.md PLOTTING.zh-CN.md TESTING.md TESTING.zh-CN.md \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat
@@ -66,33 +149,34 @@ install : armstat
 	install -m 755 scripts/plot_sum.py scripts/plot_cpu.py scripts/plot_utils.py scripts/armstat_loader.py \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
 
-.PHONY : uninstall
-uninstall :
+.PHONY: uninstall
+uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/armstat
 	rm -f $(DESTDIR)$(PREFIX)/share/man/man8/armstat.8
 	rm -rf $(DESTDIR)$(PREFIX)/share/doc/armstat
 
-.PHONY : test
-test : armstat tests/test_core_logic tests/test_column_selection tests/test_runtime_smoke tests/test_cpu_inventory tests/test_section_policy
-	./tests/test_core_logic
-	./tests/test_column_selection
-	./tests/test_runtime_smoke
-	./tests/test_cpu_inventory
-	./tests/test_section_policy
-	sh ./tests/test_cli_smoke.sh
-	python3 tests/test_plot_loaders.py
+.PHONY: test
+test: $(TARGET) $(TEST_BINS)
+	$(BUILD_OUTPUT)/tests/test_core_logic
+	$(BUILD_OUTPUT)/tests/test_column_selection
+	$(BUILD_OUTPUT)/tests/test_runtime_smoke
+	$(BUILD_OUTPUT)/tests/test_cpu_inventory
+	$(BUILD_OUTPUT)/tests/test_section_policy
+	ARMSTAT_BIN=$(TARGET) sh $(SRC_DIR)/tests/test_cli_smoke.sh
+	python3 $(SRC_DIR)/tests/test_plot_loaders.py
+	python3 $(SRC_DIR)/tests/test_csv_streaming.py
+	sh $(SRC_DIR)/tests/test_build.sh
 
-tests/test_core_logic : tests/test_core_logic.c $(TEST_OBJS)
-	$(CC) $(CFLAGS) tests/test_core_logic.c $(TEST_OBJS) -o $@ $(LDFLAGS)
+.PHONY: target-test
+target-test: $(TARGET)
+	ARMSTAT_BIN=$(TARGET) sh $(SRC_DIR)/tests/test_target_arm64.sh
 
-tests/test_column_selection : tests/test_column_selection.c $(TEST_OBJS)
-	$(CC) $(CFLAGS) tests/test_column_selection.c $(TEST_OBJS) -o $@ $(LDFLAGS)
+# Test executables have stable public paths, so force their final link step.
+# Their object prerequisites are configuration-keyed, but without this guard a
+# newer executable from another CFLAGS/LDFLAGS configuration could be reused.
+$(BUILD_OUTPUT)/tests/%: $(SRC_DIR)/tests/%.c $(TEST_OBJS) FORCE
+	@mkdir -p $(dir $@)
+	$(CC) $(VERSION_CPPFLAGS) $(CPPFLAGS) $(CFLAGS) $< $(TEST_OBJS) -o $@ $(LDFLAGS) $(LDLIBS)
 
-tests/test_runtime_smoke : tests/test_runtime_smoke.c $(TEST_OBJS)
-	$(CC) $(CFLAGS) tests/test_runtime_smoke.c $(TEST_OBJS) -o $@ $(LDFLAGS)
-
-tests/test_cpu_inventory : tests/test_cpu_inventory.c $(TEST_OBJS)
-	$(CC) $(CFLAGS) tests/test_cpu_inventory.c $(TEST_OBJS) -o $@ $(LDFLAGS)
-
-tests/test_section_policy : tests/test_section_policy.c $(TEST_OBJS)
-	$(CC) $(CFLAGS) tests/test_section_policy.c $(TEST_OBJS) -o $@ $(LDFLAGS)
+.PHONY: $(TEST_WRAPPERS)
+$(TEST_WRAPPERS): tests/%: $(BUILD_OUTPUT)/tests/%

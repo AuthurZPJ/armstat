@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #include "collector.h"
 #include "cpufreq.h"
@@ -65,13 +66,26 @@ static void sync_cpuidle_runtime_state(int hotplug_rebuild)
 	update_idle_state_visibility();
 }
 
-static int rebuild_hotplug_dependent_state(void)
+int rebuild_hotplug_dependent_state(void)
 {
 	int tracked = get_tracked_cpu_count();
 
 	set_effective_cpu_count(tracked);
+
+	/*
+	 * cpufreq caches descriptors in tracked-index order. Rebuild it before the
+	 * sample cache so newly added CPUs and reordered sparse CPU IDs cannot use
+	 * stale descriptors from the previous tracked set.
+	 */
+	close_cpufreq();
+	if (init_cpufreq() < 0) {
+		fprintf(stderr, "Error: failed to rebuild cpufreq state after CPU topology change\n");
+		return -1;
+	}
+
 	if (realloc_sample_cache(tracked) < 0) {
 		fprintf(stderr, "Error: failed to rebuild sample cache after CPU topology change\n");
+		close_cpufreq();
 		return -1;
 	}
 
@@ -86,7 +100,8 @@ static int rebuild_hotplug_dependent_state(void)
 	 * counters in one interval.
 	 */
 	close_topology();
-	init_topology();
+	if (init_topology() < 0)
+		fprintf(stderr, "Warning: failed to refresh topology after CPU topology change\n");
 	reset_aggregator();
 	return 0;
 }
@@ -95,6 +110,8 @@ static int rebuild_hotplug_dependent_state(void)
 
 int init_collector(void)
 {
+	prev_collector_time_us = 0;
+
 	/* Initialize CPU inventory first — cpufreq and other subsystems
 	 * depend on CPU-ID array sizing from the inventory. */
 	if (init_cpu_inventory() < 0)
@@ -128,15 +145,36 @@ int init_collector(void)
 	return 0;
 }
 
-void collect_snapshot(struct sys_snapshot *snapshot)
+int collect_snapshot(struct sys_snapshot *snapshot)
 {
 	struct timespec ts;
+	struct timespec realtime_ts;
+	time_t sample_timestamp;
+	unsigned long long sample_timestamp_ns;
 	unsigned long long now_us, delta_us;
 
+	if (!snapshot)
+		return -1;
+
 	/* Get current time and calculate delta */
-	clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
+		fprintf(stderr, "Error: clock_gettime(CLOCK_MONOTONIC) failed: %s\n",
+			strerror(errno));
+		memset(snapshot, 0, sizeof(*snapshot));
+		return -1;
+	}
 	now_us = (unsigned long long)ts.tv_sec * 1000000ULL +
 		 (unsigned long long)ts.tv_nsec / 1000ULL;
+	if (clock_gettime(CLOCK_REALTIME, &realtime_ts) == 0) {
+		sample_timestamp = realtime_ts.tv_sec;
+		sample_timestamp_ns =
+			(unsigned long long)realtime_ts.tv_sec * 1000000000ULL +
+			(unsigned long long)realtime_ts.tv_nsec;
+	} else {
+		sample_timestamp = time(NULL);
+		sample_timestamp_ns =
+			(unsigned long long)sample_timestamp * 1000000000ULL;
+	}
 
 	if (prev_collector_time_us > 0 && now_us > prev_collector_time_us) {
 		delta_us = now_us - prev_collector_time_us;
@@ -159,7 +197,7 @@ void collect_snapshot(struct sys_snapshot *snapshot)
 				(!cpu_inventory_filter_is_active() &&
 				 snapshot->effective_cpu_count < snapshot->cpu_count) ? 1 : 0;
 			prev_collector_time_us = 0;
-			return;
+			return -1;
 		}
 		/*
 		 * A rebuilt runtime state has no meaningful "previous sample".
@@ -181,6 +219,11 @@ void collect_snapshot(struct sys_snapshot *snapshot)
 
 	/* Store unified time delta */
 	snapshot->interval_delta_us = delta_us;
+	snapshot->sample_monotonic_ns =
+		(unsigned long long)ts.tv_sec * 1000000000ULL +
+		(unsigned long long)ts.tv_nsec;
+	snapshot->sample_timestamp = sample_timestamp;
+	snapshot->sample_timestamp_ns = sample_timestamp_ns;
 
 	/*
 	 * Sampling pools may have been torn down by a failed hotplug rebuild.
@@ -188,11 +231,12 @@ void collect_snapshot(struct sys_snapshot *snapshot)
 	 */
 	if (!is_sample_cache_initialized()) {
 		snapshot->interval_delta_us = 0;
-		return;
+		return -1;
 	}
 
 	/* Delegate to sample_cache for fast-path data collection */
 	collect_per_interval_data(snapshot, delta_us);
+	return 0;
 }
 
 void cleanup_collector(void)
@@ -206,6 +250,7 @@ void cleanup_collector(void)
 	close_power();
 	close_cpufreq();
 	cleanup_cpu_inventory();
+	prev_collector_time_us = 0;
 }
 
 /* ============================================================================

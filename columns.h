@@ -6,7 +6,8 @@
  *   - column visibility: the show_* flags + idle-state/temp-series override
  *     bitmasks that decide which fields appear in output
  *   - field registry: the all_fields[] descriptor table tying field ids to
- *     their group, scope, series, enabled flag, and value getter
+ *     their group, scope, series, type, unit, precision, enabled flag, and
+ *     value getter
  *
  * Written by armstat_cli.c (via the enable_* setters and override API) and
  * read by sample_cache.c (demand-driven sampling), the formatter_section
@@ -84,6 +85,7 @@ enum field_type {
 	FIELD_TYPE_LLONG,
 	FIELD_TYPE_DOUBLE,
 	FIELD_TYPE_STRING,
+	FIELD_TYPE_BOOL,
 };
 
 /*
@@ -108,11 +110,13 @@ typedef const char *(*getter_string)(const struct interval_record *rec, int row_
  * This enables centralized field management instead of scattered printf logic
  */
 struct field_desc {
-	const char *id;           /* JSON key: "avg_mhz", "cpu0_cycles" */
+	const char *id;           /* Stable CLI field ID: "avg_mhz", "freq_mhz" */
 	const char *label;        /* Column header: "AvgFreq", "cpu0_cycles" */
 	const char *json_label;   /* JSON label (can differ from id) */
+	const char *unit;         /* Human-readable unit, empty if dimensionless */
 	enum field_scope scope;   /* Data scope */
 	enum field_type type;     /* Data type */
+	int decimals;             /* Decimal places for floating-point output */
 	unsigned int group_mask;  /* -s/-H logical column groups */
 	enum field_series series; /* Indexed field family, if any */
 	int series_index;         /* Index within the field family */
@@ -154,6 +158,7 @@ static inline int is_freq_enabled(void)    { return show_freq; }
 static inline int is_power_enabled(void)   { return show_power; }
 static inline int is_temp_enabled(void)    { return show_temp; }
 static inline int is_energy_enabled(void)  { return show_energy; }
+static inline int is_membw_enabled(void)   { return show_membw; }
 static inline int is_pmu_enabled(void)     { return show_pmu; }
 static inline int is_ipc_enabled(void)     { return show_ipc; }
 
@@ -176,6 +181,7 @@ struct field_desc *get_all_fields(void);
 int get_field_count(void);
 int any_fields_enabled(enum field_scope scope);
 void get_enabled_fields(enum field_scope scope, struct field_desc **fields, int *count);
+int field_is_scope_identity(const struct field_desc *field);
 void clear_field_overrides(void);
 void set_field_override_by_index(int field_index, int enable, int whitelist);
 
@@ -214,10 +220,10 @@ void clear_columns(void);
 
 /*
  * Format a field value into buf as a string. The nan_str parameter controls
- * how NaN doubles are rendered (e.g. "" for CSV, "-" for text). Non-NaN
- * doubles use "%.2f". Shared by the CSV and text serializers; the JSON
- * serializer keeps its own print_json_field_value because it needs
- * stream-based string escaping.
+ * how unavailable values are rendered (e.g. "" for CSV, "-" for text).
+ * Available doubles use the precision declared by the descriptor. Shared by
+ * the CSV and text serializers; the JSON serializer keeps its own
+ * print_json_field_value because it needs stream-based string escaping.
  */
 void format_field_value(const struct field_desc *field,
 			const struct interval_record *rec,

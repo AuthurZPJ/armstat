@@ -57,6 +57,9 @@ static int get_default_field_width(const struct field_desc *field)
 	case FIELD_TYPE_STRING:
 		width = 10;
 		break;
+	case FIELD_TYPE_BOOL:
+		width = 5;
+		break;
 	}
 
 	if (field->id && strcmp(field->id, "governor") == 0 && width < 11)
@@ -122,16 +125,10 @@ static void build_text_layout(struct text_layout *layout,
 	memset(layout, 0, sizeof(*layout));
 	get_enabled_fields(scope, layout->fields, &layout->count);
 
-	/*
-	 * The package row key already renders the package id as "Pkg<N>", so a
-	 * separate pkg_id column would be redundant in text output. The field
-	 * stays in the table so JSON can still expose the distinct
-	 * "package_id" key.
-	 */
+	/* The package row key already renders the scope identity as "Pkg<N>". */
 	if (scope == FIELD_SCOPE_PACKAGE) {
 		for (int i = 0; i < layout->count; i++) {
-			if (layout->fields[i]->id &&
-			    strcmp(layout->fields[i]->id, "pkg_id") == 0) {
+			if (field_is_scope_identity(layout->fields[i])) {
 				for (int j = i; j < layout->count - 1; j++)
 					layout->fields[j] = layout->fields[j + 1];
 				layout->count--;
@@ -185,7 +182,8 @@ static void build_text_layout(struct text_layout *layout,
 
 		if (scope == FIELD_SCOPE_SYSTEM) {
 			unsigned long long value = rec ? rec->summary.pmu[i] : 0;
-			int available = rec && pmu_is_active();
+			int available = rec && pmu_is_active() &&
+				rec->summary.pmu_valid;
 			layout->pmu_widths[i] = measure_text_pmu_width(name, value, available);
 		} else {
 			int width = name ? (int)strlen(name) : 0;
@@ -199,6 +197,8 @@ static void build_text_layout(struct text_layout *layout,
 				int cpu_idx = rec->cpu_rows[row_idx].cpu_idx;
 				int candidate;
 
+				if (available)
+					available = rec->cpu_rows[cpu_idx].pmu_valid;
 				if (available)
 					value = rec->cpu_rows[cpu_idx].pmu[i];
 				candidate = measure_text_pmu_width(name, value, available);
@@ -244,7 +244,7 @@ static void print_text_summary_pmu(const struct interval_record *rec,
 {
 	for (int i = 0; i < rec->pmu_event_count; i++) {
 		print_text_separator();
-		if (!pmu_is_active())
+		if (!pmu_is_active() || !rec->summary.pmu_valid)
 			printf("%*s", layout->pmu_widths[i], "-");
 		else
 			printf("%*llu", layout->pmu_widths[i], rec->summary.pmu[i]);
@@ -257,7 +257,7 @@ static void print_text_cpu_pmu(const struct interval_record *rec,
 {
 	for (int i = 0; i < rec->pmu_event_count; i++) {
 		print_text_separator();
-		if (!pmu_is_active())
+		if (!pmu_is_active() || !rec->cpu_rows[cpu_idx].pmu_valid)
 			printf("%*s", layout->pmu_widths[i], "-");
 		else
 			printf("%*llu", layout->pmu_widths[i],
@@ -271,8 +271,6 @@ static void print_text_cpu_pmu(const struct interval_record *rec,
 
 static void serialize_text_package_header(const struct text_layout *layout)
 {
-	if (layout->count == 0)
-		return;
 	printf("%-*s", TEXT_ROW_KEY_WIDTH, "Pkg");
 	for (int i = 0; i < layout->count; i++) {
 		printf("%*s", TEXT_COLUMN_GAP, "");

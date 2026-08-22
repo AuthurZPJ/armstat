@@ -110,6 +110,74 @@ static void test_sysfs_path(void)
 	printf("  sysfs path builder ok\n");
 }
 
+static void test_cpu_list_mask_parser(void)
+{
+	unsigned char mask[MAX_CPUS];
+	char long_list[8192];
+	size_t used = 0;
+	int count;
+	int total_count;
+
+	assert(parse_cpu_list_mask_with_total("0, 2-4,4,1020-2048\n", mask,
+					      MAX_CPUS, &count,
+					      &total_count) == 0);
+	assert(count == 8);
+	assert(total_count == 1033);
+	assert(mask[0] && mask[2] && mask[3] && mask[4]);
+	assert(mask[1020] && mask[1021] && mask[1022] && mask[1023]);
+	assert(!mask[1] && !mask[5]);
+
+	assert(parse_cpu_list_mask("4-2", mask, MAX_CPUS, &count) < 0);
+	assert(parse_cpu_list_mask("1x", mask, MAX_CPUS, &count) < 0);
+	assert(parse_cpu_list_mask("1,,2", mask, MAX_CPUS, &count) < 0);
+	assert(parse_cpu_list_mask_with_total("0-10,5-15,7,20-22", mask,
+					      MAX_CPUS, &count,
+					      &total_count) == 0);
+	assert(count == 19);
+	assert(total_count == 19);
+
+	/* A sparse 1024-CPU list exceeds the old 256-byte online-mask buffer. */
+	for (int cpu = 0; cpu < MAX_CPUS; cpu += 2) {
+		int written = snprintf(long_list + used, sizeof(long_list) - used,
+				       "%s%d", used ? "," : "", cpu);
+
+		assert(written > 0 && (size_t)written < sizeof(long_list) - used);
+		used += (size_t)written;
+	}
+	assert(used > 256);
+	assert(parse_cpu_list_mask(long_list, mask, MAX_CPUS, &count) == 0);
+	assert(count == MAX_CPUS / 2);
+	for (int cpu = 0; cpu < MAX_CPUS; cpu++)
+		assert(mask[cpu] == (unsigned char)((cpu % 2) == 0));
+
+	printf("  CPU list parser ok\n");
+}
+
+static void test_online_mask_catalog_match(void)
+{
+	unsigned char mask[MAX_CPUS] = {0};
+
+	seed_sparse_four();
+	mask[0] = 1;
+	mask[4] = 1;
+	mask[8] = 1;
+	mask[12] = 1;
+	assert(cpu_catalog_matches_online_mask(mask, MAX_CPUS, 4, 4));
+
+	/* Same count but different membership must still force a full scan. */
+	mask[12] = 0;
+	mask[13] = 1;
+	assert(!cpu_catalog_matches_online_mask(mask, MAX_CPUS, 4, 4));
+	mask[13] = 0;
+	mask[12] = 1;
+
+	/* CPUs beyond the representable mask are detected through total_count. */
+	assert(!cpu_catalog_matches_online_mask(mask, MAX_CPUS, 4, 5));
+	assert(!cpu_catalog_matches_online_mask(mask, MAX_CPUS, 3, 4));
+
+	printf("  online mask fast-path match ok\n");
+}
+
 int main(void)
 {
 	printf("test_cpu_inventory:\n");
@@ -117,6 +185,8 @@ int main(void)
 	test_tracked_cpu_view();
 	test_filtered_view();
 	test_sysfs_path();
+	test_cpu_list_mask_parser();
+	test_online_mask_catalog_match();
 
 	printf("test_cpu_inventory: all tests passed\n");
 	return 0;

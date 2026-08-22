@@ -154,8 +154,8 @@ double get_cpu_freq_mhz(const struct interval_record *rec, int row_idx)
 {
 	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!row)
-		return 0;
+	if (!row || !row->freq.cur_freq_valid)
+		return NAN;
 	return row->freq.cur_freq / 1000.0;
 }
 
@@ -163,8 +163,8 @@ double get_cpu_min_freq_mhz(const struct interval_record *rec, int row_idx)
 {
 	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!row)
-		return 0;
+	if (!row || !row->freq.min_freq_valid)
+		return NAN;
 	return row->freq.min_freq / 1000.0;
 }
 
@@ -172,8 +172,8 @@ double get_cpu_max_freq_mhz(const struct interval_record *rec, int row_idx)
 {
 	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!row)
-		return 0;
+	if (!row || !row->freq.max_freq_valid)
+		return NAN;
 	return row->freq.max_freq / 1000.0;
 }
 
@@ -181,24 +181,18 @@ const char *get_cpu_governor(const struct interval_record *rec, int row_idx)
 {
 	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
-	if (!row)
-		return "";
+	if (!row || !row->freq.governor[0])
+		return NULL;
 	return row->freq.governor;
 }
 
-const char *get_cpu_boost(const struct interval_record *rec, int row_idx)
+int get_cpu_boost(const struct interval_record *rec, int row_idx)
 {
-	static const char *const unavailable = "-";
-	static const char *const disabled = "0";
-	static const char *const enabled = "1";
 	const struct cpu_row *row = get_cpu_row(rec, row_idx);
 
 	if (!row)
-		return unavailable;
-	if (row->freq.boost < 0)
-		return unavailable;
-
-	return row->freq.boost ? enabled : disabled;
+		return -1;
+	return row->freq.boost < 0 ? -1 : !!row->freq.boost;
 }
 
 /* --- Idle/busy getters --- */
@@ -272,7 +266,7 @@ double get_cpu_idle_state_wakeup##state_idx(const struct interval_record *rec,	\
 	const struct cpu_row *row = get_cpu_row(rec, row_idx);		\
 									\
 	if (!row)							\
-		return 0;						\
+		return NAN;						\
 	return row->idle_state_wakeups[state_idx];			\
 }
 
@@ -303,8 +297,9 @@ double get_cpu_temp_c(const struct interval_record *rec, int row_idx)
 /* NUMA temperature getters for SUM level */
 static double get_temp_vdie_by_numa(const struct interval_record *rec, int numa)
 {
-	if (!rec || numa < 0 || numa >= rec->numa_temp_count)
-		return 0;
+	if (!rec || numa < 0 || numa >= rec->numa_temp_count ||
+	    !(rec->numa_temp_valid_mask & (1U << numa)))
+		return NAN;
 	return rec->numa_temps[numa] / 1000.0;
 }
 
@@ -374,13 +369,13 @@ int get_pkg_cpu_count(const struct interval_record *rec, int row_idx)
 double get_summary_avg_mhz(const struct interval_record *rec, int row_idx)
 {
 	(void)row_idx;
-	return rec ? rec->summary.avg_mhz : 0;
+	return rec ? rec->summary.avg_mhz : NAN;
 }
 
 double get_summary_uncore_freq_mhz(const struct interval_record *rec, int row_idx)
 {
 	(void)row_idx;
-	return rec ? rec->summary.uncore_freq_mhz : 0;
+	return rec ? rec->summary.uncore_freq_mhz : NAN;
 }
 
 double get_summary_busy_percent(const struct interval_record *rec, int row_idx)
@@ -420,10 +415,10 @@ DEFINE_SUMMARY_IDLE_STATE_GETTER(5)
 DEFINE_SUMMARY_IDLE_STATE_GETTER(6)
 DEFINE_SUMMARY_IDLE_STATE_GETTER(7)
 
-long long get_summary_power_mw(const struct interval_record *rec, int row_idx)
+double get_summary_power_mw(const struct interval_record *rec, int row_idx)
 {
 	(void)row_idx;
-	return rec ? rec->summary.power_mw : 0;
+	return rec ? rec->summary.power_mw : NAN;
 }
 
 double get_summary_energy_joules(const struct interval_record *rec, int row_idx)
@@ -432,28 +427,28 @@ double get_summary_energy_joules(const struct interval_record *rec, int row_idx)
 	return rec ? rec->summary.energy_joules : 0;
 }
 
-long long get_summary_mem_bw(const struct interval_record *rec, int row_idx)
+double get_summary_mem_bw(const struct interval_record *rec, int row_idx)
 {
 	(void)row_idx;
-	return rec ? (long long)rec->summary.mem_bw : 0;
+	return rec ? rec->summary.mem_bw : NAN;
 }
 
-long long get_summary_ctx_switches(const struct interval_record *rec, int row_idx)
+double get_summary_ctx_switches(const struct interval_record *rec, int row_idx)
 {
 	(void)row_idx;
-	return rec ? (long long)rec->summary.ctx_switches : 0;
+	return rec ? rec->summary.ctx_switches : NAN;
 }
 
-long long get_summary_interrupts(const struct interval_record *rec, int row_idx)
+double get_summary_interrupts(const struct interval_record *rec, int row_idx)
 {
 	(void)row_idx;
-	return rec ? (long long)rec->summary.interrupts : 0;
+	return rec ? rec->summary.interrupts : NAN;
 }
 
-long long get_summary_soft_interrupts(const struct interval_record *rec, int row_idx)
+double get_summary_soft_interrupts(const struct interval_record *rec, int row_idx)
 {
 	(void)row_idx;
-	return rec ? (long long)rec->summary.soft_interrupts : 0;
+	return rec ? rec->summary.soft_interrupts : NAN;
 }
 
 double get_summary_ipc(const struct interval_record *rec, int row_idx)
@@ -526,8 +521,22 @@ static void fill_record_metadata(struct interval_record *rec,
 				 int iteration,
 				 int tracked_count)
 {
+	struct timespec ts;
+
 	rec->interval = iteration;
-	rec->timestamp = time(NULL);
+	rec->duration_us = sys_snapshot_get_interval_delta_us(raw);
+	if (raw && raw->sample_timestamp_ns) {
+		rec->timestamp = raw->sample_timestamp;
+		rec->timestamp_ns = raw->sample_timestamp_ns;
+	} else if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+		rec->timestamp = ts.tv_sec;
+		rec->timestamp_ns = (unsigned long long)ts.tv_sec * 1000000000ULL +
+				    (unsigned long long)ts.tv_nsec;
+	} else {
+		rec->timestamp = time(NULL);
+		rec->timestamp_ns =
+			(unsigned long long)rec->timestamp * 1000000000ULL;
+	}
 	rec->cpu_count = sys_snapshot_get_effective_cpu_count(raw);
 	rec->cpu_count_filtered = tracked_count;
 	rec->cpu_truncated = sys_snapshot_get_cpu_truncated(raw);
@@ -540,7 +549,8 @@ static void fill_record_summary(struct interval_record *rec,
 				const struct interval_stats *stats)
 {
 	rec->summary.avg_mhz = stats->avg_mhz;
-	rec->summary.uncore_freq_mhz = raw ? (raw->uncore_freq_hz / 1000000.0) : 0.0;
+	rec->summary.uncore_freq_mhz = raw && raw->uncore_freq_valid ?
+		raw->uncore_freq_hz / 1000000.0 : NAN;
 	rec->summary.busy_percent = stats->busy_percent;
 	rec->summary.idle_percent = stats->avg_idle_percent;
 	rec->summary.iowait_percent = stats->avg_iowait_percent;
@@ -552,6 +562,7 @@ static void fill_record_summary(struct interval_record *rec,
 	rec->summary.soft_interrupts = stats->soft_interrupts;
 	rec->summary.ipc = stats->ipc;
 	rec->summary.pmu_count = get_pmu_event_count();
+	rec->summary.pmu_valid = stats->pmu_valid;
 
 	for (int i = 0; i < rec->summary.pmu_count; i++)
 		rec->summary.pmu[i] = stats->pmu_delta[i];
@@ -565,7 +576,7 @@ static void materialize_cpu_idle_wakeups(struct cpu_row *row,
 		const struct idle_state *state =
 			get_usable_raw_idle_state(raw, cpu_idx, s);
 
-		row->idle_state_wakeups[s] = state ? state->wakeups_per_sec : 0.0;
+		row->idle_state_wakeups[s] = state ? state->wakeups_per_sec : NAN;
 	}
 }
 
@@ -575,15 +586,16 @@ static double compute_cpu_temp_c(const struct sys_snapshot *raw, int cpu_idx)
 	int numa;
 
 	if (!raw || cpu_idx < 0)
-		return 0;
+		return NAN;
 
 	cpu_id = get_tracked_cpu_id(cpu_idx);
 	if (cpu_id < 0)
-		return 0;
+		return NAN;
 
 	numa = get_numa_node(cpu_id);
-	if (numa < 0 || numa >= raw->numa_temp_count)
-		return 0;
+	if (numa < 0 || numa >= raw->numa_temp_count ||
+	    !(raw->numa_temp_valid_mask & (1U << numa)))
+		return NAN;
 
 	return raw->numa_temps[numa] / 1000.0;
 }
@@ -626,6 +638,7 @@ static void materialize_cpu_rows(struct interval_record *rec,
 		materialize_cpu_idle_wakeups(row, raw, i);
 
 		if (stats) {
+			row->pmu_valid = stats->per_cpu_pmu_valid[i];
 			for (int ev = 0; ev < pmu_count && ev < MAX_PMU_EVENTS; ev++)
 				row->pmu[ev] = stats->per_cpu_pmu[i][ev];
 		}
@@ -647,6 +660,7 @@ static void materialize_numa_temps(struct interval_record *rec,
 				   const struct sys_snapshot *raw)
 {
 	rec->numa_temp_count = raw ? raw->numa_temp_count : 0;
+	rec->numa_temp_valid_mask = raw ? raw->numa_temp_valid_mask : 0;
 	if (rec->numa_temp_count > 16)
 		rec->numa_temp_count = 16;
 
@@ -691,7 +705,12 @@ struct interval_record *build_interval_record(
 	int iteration)
 {
 	struct interval_record *rec;
-	int tracked_count = sys_snapshot_get_effective_cpu_count(raw);
+	int tracked_count;
+
+	if (!raw || !stats)
+		return NULL;
+
+	tracked_count = sys_snapshot_get_effective_cpu_count(raw);
 
 	rec = allocate_interval_record(tracked_count);
 	if (!rec)

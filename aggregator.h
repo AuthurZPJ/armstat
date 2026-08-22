@@ -18,7 +18,7 @@
 
 #include "collector.h"
 
-#define MAX_PACKAGES 16
+#define MAX_PACKAGES MAX_CPUS
 
 /*
  * Per-package aggregated statistics
@@ -51,23 +51,25 @@ struct interval_stats {
 	double per_cpu_iowait[MAX_CPUS];
 
 	/* Power/Energy */
-	long long avg_power_mw;
+	double avg_power_mw;
 	double interval_energy_joules;
 
 	/* IPC (Instructions Per Cycle) */
 	double ipc;
 
 	/* Memory bandwidth (MB/s) */
-	unsigned long mem_bw;
+	double mem_bw;
 
 	/* System stats deltas */
-	unsigned long ctx_switches;
-	unsigned long interrupts;
-	unsigned long soft_interrupts;
+	double ctx_switches;
+	double interrupts;
+	double soft_interrupts;
 
 	/* PMU deltas */
 	unsigned long long pmu_delta[MAX_PMU_EVENTS];
 	unsigned long long per_cpu_pmu[MAX_CPUS][MAX_PMU_EVENTS];
+	unsigned char per_cpu_pmu_valid[MAX_CPUS];
+	int pmu_valid;
 	double per_cpu_ipc[MAX_CPUS];
 
 	/* Per-package aggregation */

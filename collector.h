@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 #include <sys/types.h>
+#include <time.h>
 #include "cpufreq.h"
 #include "cpuidle.h"
 
@@ -53,14 +54,18 @@ struct raw_counters {
 	unsigned long long ctx_switches;
 	unsigned long long interrupts;
 	unsigned long long soft_interrupts;
+	int sysstat_valid;
 
 	/* Memory bandwidth (bytes) */
 	unsigned long long mem_bw_counter;
+	int mem_bw_valid;
 
 	/* PMU counters */
 	uint64_t pmu[MAX_PMU_EVENTS];
 	uint64_t (*pmu_per_cpu)[MAX_PMU_EVENTS];
+	unsigned char *pmu_per_cpu_valid;
 	int pmu_count;
+	int pmu_valid;
 };
 
 /*
@@ -77,13 +82,16 @@ struct sys_snapshot {
 	struct cpu_freq_info *freqs;           /* cur/min/max freq, governor */
 	struct idle_state **idle;              /* per-CPU idle states */
 
-	/* ===== PACKAGE-LEVEL POWER (always available if any power sensor exists) ===== */
+	/* ===== PACKAGE-LEVEL POWER (when a supported sensor is available) ===== */
 	long long package_power_mw;            /* Package-level power in mW */
+	int package_power_valid;                /* Current interval read succeeded */
 	unsigned long long uncore_freq_hz;     /* Uncore/devfreq current frequency in Hz */
+	int uncore_freq_valid;
 
 	/* ===== NUMA-LEVEL TEMPERATURES (for vdie0, vdie1) ===== */
 	int numa_temps[16];                   /* Temperature per NUMA node (milli-C) */
 	int numa_temp_count;                  /* Number of NUMA nodes with temp sensors */
+	unsigned int numa_temp_valid_mask;    /* Bit N: numa_temps[N] is current */
 
 	/* ===== RAW SYSTEM COUNTERS ===== */
 	struct raw_counters counters;
@@ -98,6 +106,7 @@ struct sys_snapshot {
 	 */
 	unsigned long long *authoritative_idle_jiffies;
 	unsigned long long *authoritative_iowait_jiffies;
+	unsigned char *authoritative_procstat_valid;
 	unsigned long long *authoritative_runtime_ns;
 	unsigned char *authoritative_runtime_valid;
 
@@ -108,6 +117,9 @@ struct sys_snapshot {
 	unsigned long long interval_delta_us;  /* Time elapsed since last collection (us) */
 
 	/* Metadata */
+	unsigned long long sample_monotonic_ns;
+	time_t sample_timestamp;
+	unsigned long long sample_timestamp_ns;
 	int idle_state_count;
 };
 
@@ -116,6 +128,9 @@ struct sys_snapshot {
  * Returns: 0 on success
  */
 int init_collector(void);
+
+/* Rebuild every tracked-CPU-dependent runtime subsystem after hotplug. */
+int rebuild_hotplug_dependent_state(void);
 
 /*
  * Collect raw snapshot from sysfs/proc
@@ -129,8 +144,9 @@ int init_collector(void);
  * etc.) are done in aggregator.
  *
  * @snapshot: Output structure to fill with raw data
+ * Returns: 0 on success, -1 if a trustworthy snapshot cannot be produced.
  */
-void collect_snapshot(struct sys_snapshot *snapshot);
+int collect_snapshot(struct sys_snapshot *snapshot);
 
 /*
  * Cleanup collector

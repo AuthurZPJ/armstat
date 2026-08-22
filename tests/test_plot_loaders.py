@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0
 """Minimal smoke tests for armstat plotting loaders.
 
 These tests intentionally avoid matplotlib and only validate that current
@@ -37,9 +38,11 @@ class PlotLoaderTests(unittest.TestCase):
     def test_summary_json_loader_accepts_schema_version(self):
         data = [
             {
-                "schema_version": 4,
+                "schema_version": 7,
                 "interval": 1,
+                "duration_us": 1000123,
                 "timestamp": 1774665600,
+                "timestamp_ns": 1774665600123456789,
                 "summary": {
                     "avg_freq": 2200.0,
                     "uncore_freq": 1600.0,
@@ -57,12 +60,18 @@ class PlotLoaderTests(unittest.TestCase):
         self.assertEqual(series.x_label, "time")
         self.assertIn("avg_freq", series.numeric_fields)
         self.assertIn("uncore_freq", series.numeric_fields)
+        self.assertNotIn("duration_us", series.numeric_fields)
         self.assertEqual(len(series.rows), 1)
+        self.assertEqual(series.x_values[0].microsecond, 123457)
+        self.assertEqual(
+            plot_sum.resolve_field_name("freq", series.numeric_fields),
+            "avg_freq",
+        )
 
     def test_summary_freq_preset_includes_uncore_when_available(self):
         data = [
             {
-                "schema_version": 4,
+                "schema_version": 5,
                 "interval": 1,
                 "timestamp": 1774665600,
                 "summary": {
@@ -84,7 +93,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_summary_csv_loader_ignores_schema_version_column(self):
         content = (
             "schema_version,interval,timestamp,timestamp_iso,SUM,AvgFreq,Busy%\n"
-            "4,1,1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1.00\n"
+            "5,1,1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1.00\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -96,10 +105,31 @@ class PlotLoaderTests(unittest.TestCase):
         self.assertEqual(len(series.rows), 1)
         self.assertIn("avg_freq", series.numeric_fields)
 
+    def test_summary_csv_loader_accepts_schema7_scope_and_duration(self):
+        content = (
+            "schema_version,interval,duration_us,timestamp,timestamp_ns,"
+            "timestamp_iso,Scope,AvgFreq,Busy%\n"
+            "7,1,1000123,1774665600,1774665600123456789,"
+            "2026-03-28T10:40:00.123456789+08:00,SUM,2200.00,1.00\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "summary-v7.csv"
+            path.write_text(content, encoding="utf-8")
+            series = plot_sum.load_summary_series(path)
+
+        self.assertEqual(len(series.rows), 1)
+        self.assertIn("avg_freq", series.numeric_fields)
+        self.assertNotIn("duration_us", series.numeric_fields)
+        self.assertEqual(
+            plot_sum.resolve_field_name("freq", series.numeric_fields),
+            "avg_freq",
+        )
+
     def test_summary_csv_loader_canonicalizes_high_lpi_columns(self):
         content = (
             "schema_version,interval,timestamp,timestamp_iso,SUM,LPI-4\n"
-            "4,1,1774665600,2026-03-28T10:40:00+0800,SUM,12.50\n"
+            "5,1,1774665600,2026-03-28T10:40:00+0800,SUM,12.50\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -112,9 +142,10 @@ class PlotLoaderTests(unittest.TestCase):
 
     def test_summary_csv_loader_accepts_mixed_scope_csv(self):
         content = (
-            "schema_version,interval,timestamp,timestamp_iso,Scope,CPU,summary.power,cpu.freq,summary.pmu.cycles,cpu.pmu.cycles\n"
-            "4,1,1774665600,2026-03-28T10:40:00+0800,SUM,,120000,,999,\n"
-            "4,1,1774665600,2026-03-28T10:40:00+0800,CPU,0,,2200.00,,123\n"
+            "schema_version,interval,timestamp,timestamp_ns,timestamp_iso,Scope,CPU,Package,summary.power,package.freq,cpu.freq,summary.pmu.cycles,cpu.pmu.cycles\n"
+            "6,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,SUM,,,120000,,,999,\n"
+            "6,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,PKG,,0,,2200.00,,,\n"
+            "6,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,CPU,0,,,,2200.00,,123\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -126,10 +157,29 @@ class PlotLoaderTests(unittest.TestCase):
         self.assertIn("power", series.numeric_fields)
         self.assertIn("pmu.cycles", series.numeric_fields)
 
+    def test_summary_csv_range_counts_only_summary_rows(self):
+        content = (
+            "schema_version,interval,timestamp,timestamp_ns,timestamp_iso,Scope,CPU,Package,summary.power,package.freq,cpu.freq\n"
+            "6,1,1774665600,1774665600100000000,,SUM,,,100,,\n"
+            "6,1,1774665600,1774665600100000000,,PKG,,0,,2200,\n"
+            "6,1,1774665600,1774665600100000000,,CPU,0,,,,2200\n"
+            "6,2,1774665600,1774665600200000000,,SUM,,,200,,\n"
+            "6,2,1774665600,1774665600200000000,,PKG,,0,,2300,\n"
+            "6,2,1774665600,1774665600200000000,,CPU,0,,,,2300\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "mixed.csv"
+            path.write_text(content, encoding="utf-8")
+            series = plot_sum.load_summary_series(path, "2:2")
+
+        self.assertEqual(len(series.rows), 1)
+        self.assertEqual(series.rows[0]["power"], "200")
+
     def test_cpu_json_loader_accepts_schema_version(self):
         data = [
             {
-                "schema_version": 4,
+                "schema_version": 5,
                 "interval": 1,
                 "timestamp": 1774665600,
                 "cpus": [
@@ -151,11 +201,14 @@ class PlotLoaderTests(unittest.TestCase):
         self.assertEqual(series.cpu_ids, [0])
         self.assertEqual(series.x_label, "time")
         self.assertIn("freq", series.numeric_fields)
+        self.assertEqual(
+            plot_cpu.resolve_field_name("freq", series.numeric_fields), "freq"
+        )
 
     def test_cpu_csv_loader_ignores_schema_version_column(self):
         content = (
             "schema_version,interval,timestamp,timestamp_iso,CPU,Freq,Busy%,Temp\n"
-            "4,1,1774665600,2026-03-28T10:40:00+0800,0,2200.00,1.00,45.00\n"
+            "5,1,1774665600,2026-03-28T10:40:00+0800,0,2200.00,1.00,45.00\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -170,7 +223,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_cpu_csv_loader_canonicalizes_high_lpi_columns(self):
         content = (
             "schema_version,interval,timestamp,timestamp_iso,CPU,LPI-4\n"
-            "4,1,1774665600,2026-03-28T10:40:00+0800,0,12.50\n"
+            "5,1,1774665600,2026-03-28T10:40:00+0800,0,12.50\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -183,9 +236,10 @@ class PlotLoaderTests(unittest.TestCase):
 
     def test_cpu_csv_loader_accepts_mixed_scope_csv(self):
         content = (
-            "schema_version,interval,timestamp,timestamp_iso,Scope,CPU,summary.power,cpu.freq,summary.pmu.cycles,cpu.pmu.cycles\n"
-            "4,1,1774665600,2026-03-28T10:40:00+0800,SUM,,120000,,999,\n"
-            "4,1,1774665600,2026-03-28T10:40:00+0800,CPU,0,,2200.00,,123\n"
+            "schema_version,interval,timestamp,timestamp_ns,timestamp_iso,Scope,CPU,Package,summary.power,package.freq,cpu.freq,summary.pmu.cycles,cpu.pmu.cycles\n"
+            "6,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,SUM,,,120000,,,999,\n"
+            "6,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,PKG,,0,,2200.00,,,\n"
+            "6,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,CPU,0,,,,2200.00,,123\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:

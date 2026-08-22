@@ -40,14 +40,14 @@ struct armstat_options {
 extern struct armstat_options default_options;
 
 int parse_args(int argc, char *argv[], struct armstat_options *opts);
-void apply_default_pmu_events(struct armstat_options *opts);
+int apply_default_pmu_events(struct armstat_options *opts);
 
 /* Exposed for regression tests — column selection logic */
 void set_all_columns_enabled(int enable);
-void parse_column_option(const char *arg, int enable);
+int parse_column_option(const char *arg, int enable);
 
 /*
- * Startup banner for text mode; suppressed for JSON/CSV or when -q/-D active.
+ * Startup banner for text mode; suppressed for JSON/CSV or when -q is active.
  * Implemented in armstat_cli.c.
  */
 void print_interval_header(const struct armstat_options *opts, double interval);

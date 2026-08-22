@@ -42,27 +42,33 @@ int section_emit_package(void)
 	 * column group is explicitly requested (via -a or -s package); the
 	 * default output is per-CPU rows only.
 	 *
-	 * Package rows aggregate across all CPUs in a package, which also
-	 * conflicts with explicit CPU filtering. When --cpu is active, suppress
-	 * package rows just like we suppress the automatic SUM section.
+	 * With --cpu, avoid implicitly mixing filtered CPU rows with aggregate
+	 * rows. An explicit package-only selection remains useful and is computed
+	 * over the filtered tracked CPU set.
 	 */
-	if (cpu_inventory_filter_is_active())
+	if (cpu_inventory_filter_is_active() && section_emit_cpu())
 		return 0;
 	return show_package && any_fields_enabled(FIELD_SCOPE_PACKAGE);
 }
 
 int section_emit_default_summary(void)
 {
-	return default_summary_output &&
-	       any_fields_enabled(FIELD_SCOPE_SYSTEM) &&
-	       !cpu_inventory_filter_is_active();
+	if (!default_summary_output ||
+	    !any_fields_enabled(FIELD_SCOPE_SYSTEM))
+		return 0;
+	return !cpu_inventory_filter_is_active() || !section_emit_cpu();
 }
 
 int section_emit_mixed_csv(void)
 {
-	return !summary_mode &&
-	       section_emit_cpu() &&
-	       section_emit_default_summary();
+	int section_count;
+
+	if (summary_mode)
+		return 0;
+
+	section_count = section_emit_cpu() + section_emit_package() +
+			section_emit_default_summary();
+	return section_count > 1;
 }
 
 int section_is_summary_mode(void)
@@ -73,6 +79,15 @@ int section_is_summary_mode(void)
 int section_default_summary_output(void)
 {
 	return default_summary_output;
+}
+
+int section_has_output(void)
+{
+	if (summary_mode)
+		return any_fields_enabled(FIELD_SCOPE_SYSTEM) || show_pmu;
+
+	return section_emit_cpu() || section_emit_package() ||
+	       section_emit_default_summary();
 }
 
 void set_section_summary_mode(int summary)

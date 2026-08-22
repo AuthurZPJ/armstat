@@ -27,9 +27,11 @@
 struct cpu_catalog {
 	struct cpu_desc cpus[MAX_CPUS];
 
-	int present_count;       /* Total present CPUs */
-	int online_count;        /* Total online CPUs */
+	int present_count;       /* Present CPUs representable by this build */
+	int online_count;        /* Online CPUs representable by this build */
 	int tracked_count;       /* Online CPUs limited by MAX_CPUS */
+	int detected_present_count; /* All CPUs reported by sysfs */
+	int detected_online_count;  /* All online CPUs reported by sysfs */
 };
 
 /*
@@ -60,6 +62,7 @@ static int pending_tracked_cpus[MAX_PRESENT_CPUS];
 static int cpu_filter_enabled;
 static int cpu_filter_count;
 static int cpu_filter_cpus[MAX_PRESENT_CPUS];
+static int online_mask_valid;
 
 int cpu_filter_contains(int cpu_id)
 {
@@ -120,6 +123,27 @@ static int parse_cpu_id_strict(const char *text, int *cpu_id)
 	return 0;
 }
 
+static int parse_cpu_number(const char *text, int *cpu_id)
+{
+	char *end = NULL;
+	long value;
+
+	if (!text || !*text || !cpu_id)
+		return -1;
+
+	errno = 0;
+	value = strtol(text, &end, 10);
+	if (errno || end == text || value < 0 || value > INT_MAX)
+		return -1;
+	while (*end && isspace((unsigned char)*end))
+		end++;
+	if (*end)
+		return -1;
+
+	*cpu_id = (int)value;
+	return 0;
+}
+
 static int cpu_filter_has_empty_token(const char *list)
 {
 	int need_value = 1;
@@ -136,6 +160,165 @@ static int cpu_filter_has_empty_token(const char *list)
 	}
 
 	return need_value;
+}
+
+struct cpu_range {
+	int start;
+	int end;
+};
+
+static int compare_cpu_range(const void *lhs, const void *rhs)
+{
+	const struct cpu_range *left = lhs;
+	const struct cpu_range *right = rhs;
+
+	if (left->start != right->start)
+		return left->start < right->start ? -1 : 1;
+	if (left->end != right->end)
+		return left->end < right->end ? -1 : 1;
+	return 0;
+}
+
+int parse_cpu_list_mask_with_total(const char *text, unsigned char *mask,
+				   int mask_len, int *count_out,
+				   int *total_count_out)
+{
+	char *copy;
+	char *token;
+	char *saveptr = NULL;
+	struct cpu_range *ranges = NULL;
+	size_t range_count = 0;
+	size_t range_capacity = 0;
+	int count = 0;
+	long long total_count = 0;
+
+	if (count_out)
+		*count_out = 0;
+	if (total_count_out)
+		*total_count_out = 0;
+	if (!text || !*text || !mask || mask_len <= 0 ||
+	    cpu_filter_has_empty_token(text))
+		return -1;
+
+	memset(mask, 0, (size_t)mask_len);
+	copy = strdup(text);
+	if (!copy)
+		return -1;
+
+	for (token = strtok_r(copy, ",", &saveptr);
+	     token;
+	     token = strtok_r(NULL, ",", &saveptr)) {
+		char *dash;
+		int start;
+		int end;
+
+		token = trim_token(token);
+		dash = strchr(token, '-');
+		if (dash) {
+			*dash = '\0';
+			if (strchr(dash + 1, '-') ||
+			    parse_cpu_number(trim_token(token), &start) < 0 ||
+			    parse_cpu_number(trim_token(dash + 1), &end) < 0 ||
+			    start > end)
+				goto fail;
+		} else {
+			if (parse_cpu_number(token, &start) < 0) {
+				goto fail;
+			}
+			end = start;
+		}
+
+		if (range_count == range_capacity) {
+			size_t next_capacity = range_capacity ? range_capacity * 2 : 16;
+			struct cpu_range *next_ranges;
+
+			if (next_capacity < range_capacity ||
+			    next_capacity > SIZE_MAX / sizeof(*ranges))
+				goto fail;
+			next_ranges = realloc(ranges,
+					      next_capacity * sizeof(*ranges));
+			if (!next_ranges)
+				goto fail;
+			ranges = next_ranges;
+			range_capacity = next_capacity;
+		}
+		ranges[range_count].start = start;
+		ranges[range_count].end = end;
+		range_count++;
+
+		if (start >= mask_len)
+			continue;
+		if (end >= mask_len)
+			end = mask_len - 1;
+		for (int cpu = start; cpu <= end; cpu++) {
+			if (!mask[cpu]) {
+				mask[cpu] = 1;
+				count++;
+			}
+		}
+	}
+
+	qsort(ranges, range_count, sizeof(*ranges), compare_cpu_range);
+	if (range_count > 0) {
+		int merged_start = ranges[0].start;
+		int merged_end = ranges[0].end;
+
+		for (size_t i = 1; i < range_count; i++) {
+			if (ranges[i].start <= merged_end) {
+				if (ranges[i].end > merged_end)
+					merged_end = ranges[i].end;
+				continue;
+			}
+			total_count += (long long)merged_end - merged_start + 1;
+			if (total_count > INT_MAX)
+				goto fail;
+			merged_start = ranges[i].start;
+			merged_end = ranges[i].end;
+		}
+		total_count += (long long)merged_end - merged_start + 1;
+		if (total_count > INT_MAX)
+			goto fail;
+	}
+
+	free(ranges);
+	free(copy);
+	if (count_out)
+		*count_out = count;
+	if (total_count_out)
+		*total_count_out = (int)total_count;
+	return 0;
+
+fail:
+	free(ranges);
+	free(copy);
+	memset(mask, 0, (size_t)mask_len);
+	return -1;
+}
+
+int parse_cpu_list_mask(const char *text, unsigned char *mask, int mask_len,
+			int *count_out)
+{
+	return parse_cpu_list_mask_with_total(text, mask, mask_len, count_out,
+					      NULL);
+}
+
+static int parse_cpu_dir_name(const char *name, int *cpu_id)
+{
+	char *end = NULL;
+	long value;
+
+	if (!name || strncmp(name, "cpu", 3) != 0 ||
+	    !isdigit((unsigned char)name[3]))
+		return -1;
+
+	errno = 0;
+	value = strtol(name + 3, &end, 10);
+	if (errno || end == name + 3 || *end != '\0' ||
+	    value < 0 || value > INT_MAX)
+		return -1;
+
+	*cpu_id = (int)value;
+	return 0;
 }
 
 static int parse_cpu_filter_list(const char *list)
@@ -264,7 +447,13 @@ static int catalog_membership_changed(const struct cpu_catalog *previous)
 {
 	if (cpu_catalog.present_count != previous->present_count)
 		return 1;
-	if (cpu_catalog_online_count() != previous->online_count)
+	if (cpu_catalog.online_count != previous->online_count)
+		return 1;
+	if (cpu_catalog.detected_present_count !=
+	    previous->detected_present_count)
+		return 1;
+	if (cpu_catalog.detected_online_count !=
+	    previous->detected_online_count)
 		return 1;
 	if (cpu_catalog.tracked_count != previous->tracked_count)
 		return 1;
@@ -285,12 +474,91 @@ static int catalog_membership_changed(const struct cpu_catalog *previous)
 	return 0;
 }
 
+static void recompute_catalog_counts(void)
+{
+	cpu_catalog.online_count = 0;
+	cpu_catalog.tracked_count = 0;
+	for (int i = 0; i < cpu_catalog.present_count; i++) {
+		if (cpu_catalog.cpus[i].online)
+			cpu_catalog.online_count++;
+		if (cpu_catalog.tracked_count < MAX_CPUS &&
+		    catalog_cpu_is_tracked(&cpu_catalog.cpus[i]))
+			cpu_catalog.tracked_count++;
+	}
+}
+
+static int read_online_cpu_mask(unsigned char *mask, int mask_len,
+				int *represented_count, int *total_count)
+{
+	FILE *fp;
+	char *line = NULL;
+	size_t line_size = 0;
+	ssize_t line_len;
+	int ret = -1;
+
+	if (!mask || mask_len <= 0 || !represented_count || !total_count)
+		return -1;
+
+	*represented_count = 0;
+	*total_count = 0;
+	fp = fopen("/sys/devices/system/cpu/online", "r");
+	if (!fp)
+		return -1;
+
+	line_len = getline(&line, &line_size, fp);
+	if (line_len > 0 &&
+	    parse_cpu_list_mask_with_total(line, mask, mask_len,
+					   represented_count, total_count) == 0 &&
+	    *total_count > 0)
+		ret = 0;
+
+	free(line);
+	fclose(fp);
+	return ret;
+}
+
+int cpu_catalog_matches_online_mask(const unsigned char *mask, int mask_len,
+				    int represented_count, int total_count)
+{
+	if (!mask || mask_len <= 0 || represented_count < 0 || total_count < 0)
+		return 0;
+	if (represented_count != cpu_catalog.online_count ||
+	    total_count != cpu_catalog.detected_online_count)
+		return 0;
+
+	for (int i = 0; i < cpu_catalog.present_count; i++) {
+		const struct cpu_desc *cpu = &cpu_catalog.cpus[i];
+
+		if (cpu->cpu_id < 0 || cpu->cpu_id >= mask_len)
+			return 0;
+		if (cpu->online != (mask[cpu->cpu_id] ? 1 : 0))
+			return 0;
+	}
+
+	return 1;
+}
+
+static int online_membership_is_unchanged(void)
+{
+	unsigned char online_mask[MAX_CPUS];
+	int represented_count;
+	int total_count;
+
+	if (read_online_cpu_mask(online_mask, MAX_CPUS, &represented_count,
+				 &total_count) < 0)
+		return 0;
+
+	return cpu_catalog_matches_online_mask(online_mask, MAX_CPUS,
+					       represented_count, total_count);
+}
+
 static void do_catalog_scan(void)
 {
 	DIR *dir;
 	struct dirent *entry;
 
 	memset(&cpu_catalog, 0, sizeof(cpu_catalog));
+	online_mask_valid = 0;
 
 	dir = opendir("/sys/devices/system/cpu");
 	if (!dir)
@@ -299,13 +567,10 @@ static void do_catalog_scan(void)
 	while ((entry = readdir(dir)) != NULL) {
 		int cpu_id;
 
-		if (strncmp(entry->d_name, "cpu", 3) != 0)
+		if (parse_cpu_dir_name(entry->d_name, &cpu_id) < 0)
 			continue;
-		if (entry->d_name[3] < '0' || entry->d_name[3] > '9')
-			continue;
-
-		cpu_id = atoi(entry->d_name + 3);
-		if (cpu_id < 0 || cpu_id >= MAX_CPUS)
+		cpu_catalog.detected_present_count++;
+		if (cpu_id >= MAX_CPUS || cpu_catalog.present_count >= MAX_CPUS)
 			continue;
 
 		cpu_catalog.cpus[cpu_catalog.present_count].cpu_id = cpu_id;
@@ -323,50 +588,20 @@ static void do_catalog_scan(void)
 	 */
 	for (int i = 0; i < cpu_catalog.present_count; i++)
 		cpu_catalog.cpus[i].online = 1;
+	cpu_catalog.detected_online_count = cpu_catalog.detected_present_count;
 
 	{
-		FILE *fp = fopen("/sys/devices/system/cpu/online", "r");
+		unsigned char online_mask[MAX_CPUS];
+		int mask_count;
+		int total_count;
 
-		if (fp) {
-			char line[256];
-
+		if (read_online_cpu_mask(online_mask, MAX_CPUS, &mask_count,
+					 &total_count) == 0) {
 			for (int i = 0; i < cpu_catalog.present_count; i++)
-				cpu_catalog.cpus[i].online = 0;
-
-			while (fgets(line, sizeof(line), fp)) {
-				char *token;
-				char *saveptr = NULL;
-				char *nl = strchr(line, '\n');
-
-				if (nl)
-					*nl = '\0';
-
-				token = strtok_r(line, ",", &saveptr);
-				while (token) {
-					int start, end;
-
-					if (sscanf(token, "%d-%d", &start, &end) == 2) {
-						for (int cpu = start; cpu <= end && cpu < MAX_CPUS; cpu++) {
-							for (int i = 0; i < cpu_catalog.present_count; i++) {
-								if (cpu_catalog.cpus[i].cpu_id == cpu) {
-									cpu_catalog.cpus[i].online = 1;
-									break;
-								}
-							}
-						}
-					} else if (sscanf(token, "%d", &start) == 1) {
-						for (int i = 0; i < cpu_catalog.present_count; i++) {
-							if (cpu_catalog.cpus[i].cpu_id == start) {
-								cpu_catalog.cpus[i].online = 1;
-								break;
-							}
-						}
-					}
-
-					token = strtok_r(NULL, ",", &saveptr);
-				}
-			}
-			fclose(fp);
+				cpu_catalog.cpus[i].online =
+					online_mask[cpu_catalog.cpus[i].cpu_id] ? 1 : 0;
+			cpu_catalog.detected_online_count = total_count;
+			online_mask_valid = 1;
 		}
 	}
 
@@ -375,15 +610,7 @@ static void do_catalog_scan(void)
 	 * cpu_catalog. Keep online_count in sync with the freshly scanned set so
 	 * rebuild detection only fires on real topology/online-mask changes.
 	 */
-	cpu_catalog.online_count = 0;
-	cpu_catalog.tracked_count = 0;
-	for (int i = 0; i < cpu_catalog.present_count; i++) {
-		if (cpu_catalog.cpus[i].online)
-			cpu_catalog.online_count++;
-		if (cpu_catalog.tracked_count < MAX_CPUS &&
-		    catalog_cpu_is_tracked(&cpu_catalog.cpus[i]))
-			cpu_catalog.tracked_count++;
-	}
+	recompute_catalog_counts();
 }
 
 static void inventory_build(void)
@@ -413,6 +640,8 @@ int cpu_catalog_init(void)
 		return 0;
 
 	do_catalog_scan();
+	if (cpu_catalog.present_count <= 0)
+		return -1;
 	catalog_initialized = 1;
 	return 0;
 }
@@ -425,6 +654,23 @@ int cpu_catalog_rebuild(void)
 	previous.online_count = cpu_catalog_online_count();
 	previous.tracked_count = cpu_catalog_tracked_count();
 	do_catalog_scan();
+	if (!online_mask_valid) {
+		for (int i = 0; i < cpu_catalog.present_count; i++) {
+			struct cpu_desc *current = &cpu_catalog.cpus[i];
+
+			for (int j = 0; j < previous.present_count; j++) {
+				if (previous.cpus[j].cpu_id == current->cpu_id) {
+					current->online = previous.cpus[j].online;
+					break;
+				}
+			}
+		}
+		if (cpu_catalog.detected_present_count ==
+		    previous.detected_present_count)
+			cpu_catalog.detected_online_count =
+				previous.detected_online_count;
+		recompute_catalog_counts();
+	}
 	restore_topology_attributes(&previous);
 
 	changed = catalog_membership_changed(&previous);
@@ -466,7 +712,7 @@ struct cpu_desc *cpu_catalog_get_by_tracked_idx(int idx)
 
 int cpu_catalog_online_count(void)
 {
-	return cpu_catalog.online_count;
+	return cpu_catalog.detected_online_count;
 }
 
 int cpu_catalog_present_count(void)
@@ -549,6 +795,18 @@ int check_and_rebuild_inventory(void)
 	int prev_tracked_count = cpu_inv.tracked_count;
 	int tracked_changed = 0;
 
+	/*
+	 * The online mask is the authoritative hotplug signal on Linux and is far
+	 * cheaper to read than enumerating every cpuN directory. Keep the full
+	 * catalog scan on the change/fallback path, but make the common unchanged
+	 * interval a single small-file read.
+	 */
+	if (online_membership_is_unchanged()) {
+		pending_tracked_valid = 0;
+		pending_tracked_count = 0;
+		return 0;
+	}
+
 	prev_catalog = cpu_catalog;
 	prev_inventory = cpu_inv;
 
@@ -574,6 +832,12 @@ int check_and_rebuild_inventory(void)
 	 */
 	if (!cpu_filter_enabled && prev_tracked_count > 0 &&
 	    cpu_inv.tracked_count <= 0) {
+		cpu_catalog = prev_catalog;
+		cpu_inv = prev_inventory;
+		pending_tracked_valid = 0;
+		return 0;
+	}
+	if (prev_tracked_count > 0 && cpu_catalog.present_count <= 0) {
 		cpu_catalog = prev_catalog;
 		cpu_inv = prev_inventory;
 		pending_tracked_valid = 0;
@@ -626,6 +890,9 @@ int cpu_sysfs_path(int cpu_id, const char *subpath, char *buf, size_t buflen)
 {
 	int n;
 
+	if (cpu_id < 0 || !buf || buflen == 0)
+		return -1;
+
 	n = snprintf(buf, buflen, "/sys/devices/system/cpu/cpu%d/%s",
 		     cpu_id, subpath ? subpath : "");
 	if (n < 0 || (size_t)n >= buflen)
@@ -665,12 +932,15 @@ int cpu_inventory_seed(const struct cpu_inventory_seed *cpus, int count)
 	cpu_catalog.present_count = count;
 	cpu_catalog.online_count = 0;
 	cpu_catalog.tracked_count = 0;
+	cpu_catalog.detected_present_count = count;
+	cpu_catalog.detected_online_count = 0;
 	for (int i = 0; i < count; i++) {
 		if (cpu_catalog.cpus[i].online)
-			cpu_catalog.online_count++;
+			cpu_catalog.detected_online_count++;
 		if (catalog_cpu_is_tracked(&cpu_catalog.cpus[i]))
 			cpu_catalog.tracked_count++;
 	}
+	cpu_catalog.online_count = cpu_catalog.detected_online_count;
 
 	sort_present_cpus();
 	inventory_build();

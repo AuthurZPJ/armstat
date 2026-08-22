@@ -65,21 +65,42 @@ Current CSV exports include:
 
 - `schema_version`
 - `interval`
+- `duration_us`
 - `timestamp`
+- `timestamp_ns`
 - `timestamp_iso`
 
 So plotting can use real time directly.
 
-The two timestamp fields represent the same sample time in different formats:
+The timestamp fields represent the same sample time in different formats:
 
-- `timestamp`: Unix timestamp (numeric, machine-friendly)
-- `timestamp_iso`: ISO 8601 wall-clock string (human-friendly)
+- `timestamp`: whole Unix seconds, retained for compatibility
+- `timestamp_ns`: Unix nanoseconds, preferred for plotting and subsecond input
+- `timestamp_iso`: RFC 3339 wall-clock string with fractional seconds
 
-The plotting scripts primarily use `timestamp`. `timestamp_iso` is included so
-CSV/JSON exports remain easy to inspect and correlate manually.
+`duration_us` is the actual measured sampling window. It is retained as
+metadata for downstream analysis but is not offered as a default plotted
+metric.
 
-Current machine-readable exports use `schema_version = 4`.
+The plotting scripts prefer `timestamp_ns` and fall back to `timestamp` for
+schema 4/5 input. `timestamp_iso` keeps exports easy to inspect and correlate
+manually.
+
+Current machine-readable exports use `schema_version = 7`. The bundled loaders
+accept versions 4 through 7 so existing traces remain usable. In mixed CSV,
+they skip `PKG` rows and `package.*` columns when loading SUM or CPU plots.
 See `EXPORTS.md` for the exact JSON/CSV structure.
+
+Unavailable values introduced in schema 5 (`null` in JSON and empty CSV cells)
+are loaded as `NaN`. Plots therefore show a gap instead of a false zero;
+smoothing and group aggregation ignore missing points when valid peers are
+available. This also covers package-power or memory-bandwidth fields disabled
+because source discovery was ambiguous.
+
+If armstat reports CPU-inventory truncation on stderr, CPU plots contain only
+the representable exported IDs (`0..1023`). The loaders do not synthesize lines
+for higher IDs; reduce the source system CPU set or rebuild with a larger
+`MAX_CPUS` before treating such a plot as whole-machine coverage.
 
 ## Summary Plots
 
@@ -113,6 +134,8 @@ Notes:
 
 - `--preset freq` plots `avg_freq`, and also `uncore_freq` when the export
   contains it
+- `--y freq` resolves to `avg_freq` for a summary export and to `freq` for a
+  CPU export
 - `--preset temp` plots all available `temp*` lines
 - `--preset power-temp` plots `power` on the left axis and all available
   `temp*` lines on the right axis
@@ -180,7 +203,7 @@ The script accepts human-friendly aliases in addition to raw export field names.
 
 Examples:
 
-- `freq` -> `freq`
+- `freq` -> `freq` for CPU data (`avg_freq` for summary data)
 - `temp` -> `temp`
 - `busy` -> `busy_percent`
 - `idle` -> `idle_percent`
@@ -188,6 +211,9 @@ Examples:
 - `lpi1` -> `lpi1`
 - `cycles` -> `pmu.cycles`
 - `instructions` -> `pmu.instructions`
+
+PMU event paths are unambiguous because armstat rejects duplicate event names
+before sampling starts.
 
 ### CPU selection
 

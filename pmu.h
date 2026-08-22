@@ -27,11 +27,19 @@ int init_pmu_events(const char *events);
 /* Validate a comma-separated event list without opening perf fds. */
 int validate_pmu_event_list(const char *events);
 
+/* Resolve one built-in name or hexadecimal raw event without opening perf. */
+int resolve_pmu_event(const char *event, int *type,
+			      unsigned long long *config);
+
+/* Probe one event on one tracked CPU without creating runtime PMU state. */
+int probe_pmu_event(const char *event);
+
 /* Print built-in PMU event names. */
 void list_builtin_pmu_events(void);
 
 /* Read PMU counters */
-int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS], int max_cpus);
+int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS],
+			  unsigned char *valid, int max_cpus);
 
 /* Rebuild PMU file descriptors after CPU hotplug */
 int rebuild_pmu_events(void);

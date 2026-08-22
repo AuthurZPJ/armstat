@@ -15,6 +15,7 @@
 
 #include "idle_backend.h"
 #include "collector.h"
+#include "cpu_inventory.h"
 
 #define ARRAY_SIZE(arr) ((int)(sizeof(arr) / sizeof((arr)[0])))
 
@@ -23,54 +24,11 @@ static unsigned char nohz_full_cpus[MAX_CPUS];
 static int nohz_full_valid;
 static int nohz_full_count;
 
-static int parse_cpu_range_list(const char *text, unsigned char *mask, int mask_len)
-{
-	char *copy, *token, *saveptr = NULL;
-	int count = 0;
-
-	if (!text || !*text || !mask || mask_len <= 0)
-		return 0;
-
-	copy = strdup(text);
-	if (!copy)
-		return 0;
-
-	for (token = strtok_r(copy, ",", &saveptr);
-	     token;
-	     token = strtok_r(NULL, ",", &saveptr)) {
-		int start, end;
-
-		while (*token == ' ' || *token == '\t')
-			token++;
-
-		if (sscanf(token, "%d-%d", &start, &end) == 2) {
-			if (start > end) {
-				int tmp = start;
-				start = end;
-				end = tmp;
-			}
-			for (int cpu = start; cpu <= end && cpu < mask_len; cpu++) {
-				if (cpu >= 0 && !mask[cpu]) {
-					mask[cpu] = 1;
-					count++;
-				}
-			}
-		} else if (sscanf(token, "%d", &start) == 1) {
-			if (start >= 0 && start < mask_len && !mask[start]) {
-				mask[start] = 1;
-				count++;
-			}
-		}
-	}
-
-	free(copy);
-	return count;
-}
-
 static void refresh_nohz_full_mask(void)
 {
 	FILE *fp;
-	char line[PROC_LINE_MAX];
+	char *line = NULL;
+	size_t line_size = 0;
 
 	memset(nohz_full_cpus, 0, sizeof(nohz_full_cpus));
 	nohz_full_count = 0;
@@ -81,15 +39,18 @@ static void refresh_nohz_full_mask(void)
 		return;
 	}
 
-	if (fgets(line, sizeof(line), fp)) {
+	if (getline(&line, &line_size, fp) > 0) {
 		char *nl = strchr(line, '\n');
 
 		if (nl)
 			*nl = '\0';
-		nohz_full_count = parse_cpu_range_list(line, nohz_full_cpus,
-						       ARRAY_SIZE(nohz_full_cpus));
+		if (parse_cpu_list_mask(line, nohz_full_cpus,
+					ARRAY_SIZE(nohz_full_cpus),
+					&nohz_full_count) < 0)
+			nohz_full_count = 0;
 	}
 
+	free(line);
 	fclose(fp);
 	nohz_full_valid = 1;
 }

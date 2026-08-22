@@ -18,7 +18,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make              # Build armstat binary
 make clean        # Clean build artifacts
-make test         # Run all tests (test_core_logic, test_column_selection, test_runtime_smoke, test_cli_smoke.sh, test_plot_loaders.py)
+make debug-test   # Run the suite under AddressSanitizer + UBSan
+make analyze      # Run GCC's static analyzer in an out-of-tree build
+make test         # Run C, CLI, plotting, streaming, and build/install tests
+make target-test  # Run ARM64 Linux runtime acceptance
 ```
 
 ## Architecture
@@ -40,7 +43,7 @@ armstat_cli.c → armstat.c → collector.c → aggregator.c → formatter_recor
 Key design decisions:
 - **CPU Identity Model**: Two identities coexist - `cpu_id` (real Linux CPU ID, external) and `tracked_idx` (dense internal array index). Output rows are sorted by real CPU ID.
 - **Three Sampling Layers**: Static/rebuild (topology, inventory) → Slow-changing (~5s refresh with budgeted cursor) → Per-interval fast path (frequency, /proc/stat, power, PMU)
-- **Column visibility + field registry** (`columns.c`): owns `show_*` flags, idle-state/temp series visibility + override bitmasks, and the `all_fields[]` descriptor table. CLI writes via `enable_*()`; sample_cache reads for demand-driven sampling.
+- **Column visibility + field registry** (`columns.c`): owns `show_*` flags, idle-state/temp series visibility + override bitmasks, and the `all_fields[]` descriptor table, including scope/type/unit/precision metadata. CLI writes via `enable_*()`; sample_cache reads for demand-driven sampling.
 - **Two-Stage Formatting**: `formatter_record.c` builds a stable `interval_record` (value getters live here), then `formatter_text.c`/`formatter_machine.c` serialize to text/JSON/CSV
 - **CPU inventory** owns the single source of truth for present/online/tracked CPUs; hotplug rebuilds cascade through the entire stack
 
@@ -71,9 +74,9 @@ Key design decisions:
 | Busy% | derived | 100 - Idle% (procstat); sched_runtime_delta_ns / wall_clock_delta_ns × 100 (schedstat) |
 | IOWait% | /proc/stat iowait | iowait_delta_us / interval_delta_us * 100 |
 | LPI-* | cpuidle/stateN/time | state_delta_us / interval_delta_us * 100 (display-adjusted) |
-| Power(mW) | power_meter/power1_average | raw hwmon reading |
+| Power(mW) | one unique power_meter/power1_average | raw hwmon reading |
 | Energy | derived | interval_avg_power_mw * interval_seconds / 1000 |
-| MemBW | platform-specific | (counter_now - counter_prev) / interval_seconds |
+| MemBW (MiB/s) | platform-specific | (counter_now - counter_prev) / interval_seconds / 1024² |
 | IPC | derived | instructions / cycles |
 
 ## Hotplug Rebuild Chain
@@ -96,7 +99,9 @@ When CPU membership changes: rebuild cpu_inventory → sample_cache → cpuidle 
 
 ## Documentation Rule
 
-When behavior changes, update in order: code → README.md → README.zh-CN.md → DESIGN.md → DESIGN.zh-CN.md → armstat.8
+When behavior changes, update in order: code → README.md → README.zh-CN.md →
+DESIGN.md → DESIGN.zh-CN.md → armstat.8 → EXPORTS.md → EXPORTS.zh-CN.md →
+PLOTTING.md → PLOTTING.zh-CN.md → TESTING.md → TESTING.zh-CN.md.
 
 ## Documentation Files
 

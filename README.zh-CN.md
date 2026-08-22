@@ -20,7 +20,10 @@
 MSR/RAPL/TSC 模型。
 
 **关键差异点**：armstat 产出机器可读的 JSON 和 CSV 导出，带每样本
-时间戳和稳定的 `schema_version`（当前为 4）。内置画图脚本，可以从
+时间戳和稳定的 `schema_version`（当前为 7）。schema 5 开始把瞬时缺失
+明确输出为 JSON `null`、CSV 空单元格和 text `-`；schema 6 为 CSV
+加入了不会与 CPU / summary 混淆的 package 行；schema 7 又加入真实采样
+时长、RFC 3339 时区格式以及一致的布尔值与 scope 身份语义。内置画图脚本，可以从
 `armstat -f json -O data.json` 直接生成时序图表，无需手动数据处理。
 详见 [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md) 和
 [PLOTTING.zh-CN.md](PLOTTING.zh-CN.md)。
@@ -34,15 +37,35 @@ MSR/RAPL/TSC 模型。
 - **[CLAUDE.md](CLAUDE.md)** - AI 助手指引（英文）
 - **[QWEN.md](QWEN.md)** - 项目上下文与技术概览（英文）
 
+## 快速开始
+
+采集器面向 ARM64 Linux，需要正常挂载 `/proc` 与 `/sys`。构建需要 C 编译器和
+`make`；画图功能是可选项，需要 Python 3 与 matplotlib。
+
+```bash
+make
+./armstat --probe
+./armstat -i 1 -n 5
+./armstat -S -a -i 1 -n 5
+./armstat -S -a -f json -O armstat.json -i 1 -n 5
+sudo make install
+```
+
+判断可选字段缺失是否为缺陷前，应先检查 `--probe`。PMU/IPC 通常需要 root 或
+宽松的 `perf_event_paranoid`。生产部署前，执行
+[TESTING.zh-CN.md](TESTING.zh-CN.md#3-目标-arm-服务器实机验证) 中带能力强制项的
+目标机验收。
+
 ## 当前输出模型
 
-`armstat` 当前使用 `SUM + CPU 行` 模型：
+`armstat` 当前使用 `SUM + package + CPU 行` 模型：
 
 - 默认 text 模式每个 tracked CPU 只输出一行（不打印汇总或 package 行）
 - `-a` 打开所有支持的基础列组，并在每核 CPU 行之上附加 package 聚合行和 `SUM` 汇总行
 - `-S` 每个 interval 只输出一行 `SUM`
 - JSON 输出 interval 对象数组
-- CSV 输出 CPU 行或 summary 行
+- CSV 根据所选字段输出 summary-only、package-only、CPU-only，或带明确
+  scope 的混合行
 
 它是“ARM 上的 turbostat 风格工具”，但不是 x86 `turbostat` 的
 逐列等价实现。
@@ -55,9 +78,13 @@ MSR/RAPL/TSC 模型。
 2. 等待一个完整 interval
 3. 再采一份新快照
 4. 对两次快照做区间 delta / 百分比计算
-5. 最后格式化成 `SUM`、CPU 行，或两者组合
+5. 最后格式化成 `SUM`、per-package 行、per-CPU 行，或所选组合
 
 因此，第一条可见输出永远代表“一个完整区间”，而不是程序启动瞬间的状态。
+
+后续样本使用锚定到 baseline 的 monotonic-clock deadline。正常采集/格式化开销
+会从下一次等待中扣除，不会逐轮累积成节拍漂移；如果工作耗时超过整个 interval，
+armstat 会跳过错过的 deadline，而不是突发追赶采样。指标公式始终使用实测 delta。
 
 如果运行中发生 CPU 拓扑变化并触发 runtime state 重建，那么这次重建样本会被
 当作新的 baseline，不会再被打印成一条普通 interval 输出。
@@ -78,6 +105,9 @@ MSR/RAPL/TSC 模型。
 - `--cpu` 过滤接受真实 CPU ID 和区间，例如 `0,1,4-7`
 - `--cpu` 是采样过滤器，不只是输出过滤器：只有匹配列表的在线 CPU 才成为 tracked CPU，cpufreq、cpuidle、PMU、per-CPU Busy/Idle 输入以及 tracked-CPU 均值都基于该过滤集
 - 非法 token、反向区间、匹配不到任何在线 CPU 的过滤器都是启动错误
+- 当前构建可表示的 Linux CPU ID 为 `0..1023`；如果 sysfs 报告了更多在线
+  CPU 或更高编号，armstat 会保留真实在线数用于诊断、打印采样截断警告，并且
+  只采样可表示的 CPU ID
 
 ### Idle / Busy
 
@@ -91,11 +121,15 @@ MSR/RAPL/TSC 模型。
   运行时间记账；某个 CPU 不可用时会按 CPU 粒度回退到 `/proc/stat`
 - `--busy-source task-clock` 保留为兼容别名，当前等价于 `schedstat`
 - `IOWait%` 也来自 `/proc/stat`，表示本采样区间内处于 iowait 记账的
-  时间占比
+  时间占比；Linux 的 iowait 属于 idle 计数，因此已包含在 `Idle%` 中，
+  不会算作 busy
 - 分 idle state 驻留列和唤醒列使用 cpuidle `stateN/name`，例如 `LPI-0`、
   `LPI-1`……以及 `LPI-0_wake`（每秒唤醒次数）
 - cpuidle 只用于拆分 `LPI-*` 驻留，不作为 Busy/Idle 的权威来源
 - 当没有 cpuidle 数据时，分 state 列会自动隐藏
+- cpuidle 计数瞬时失败或回退时，可见 LPI 集会保持不可用，直到重新建立
+  baseline
+- state 缺失或被禁用时，其唤醒率为不可用，而不是 `0`
 - formatter 最多暴露八列 `LPI-*`（`LPI-0` ... `LPI-7`）；更深的 cpuidle
   state 会被折叠到最深可见的可用 residual bucket
 - `Busy%` 的计算方式是 `100 - Idle%`
@@ -123,8 +157,9 @@ MSR/RAPL/TSC 模型。
 - 百分比类字段更接近 tracked CPU 的平均视角
 - 当启用 `--cpu` 过滤时，默认不会再自动混出 `SUM`，避免把过滤后的 CPU 行和
   全系统 summary 混在一起
-- 当启用 `--cpu` 过滤时，per-package 聚合行也会被抑制，因为它们会聚合
-  过滤器之外的 CPU
+- 聚合 section 只有在会与 filtered CPU 行隐式混排时才被抑制；像
+  `-s pkg_avg_freq --cpu 0-3` 这样的显式 aggregate-only 请求仍会输出，
+  并基于过滤后的 tracked CPU 集计算
 - 使用 `--cpu` 时，tracked-CPU-derived 的 SUM 字段（如 frequency、idle、LPI、PMU）基于过滤后的 tracked CPU 集；平台/全局字段保持其自然 summary scope
 
 ### nohz_full 与 Busy/Idle
@@ -134,11 +169,16 @@ MSR/RAPL/TSC 模型。
 `/sys/devices/system/cpu/nohz_full` 指定的 CPU 上优先使用
 `/proc/schedstat` 的运行时间记账，而在其它 CPU 上继续沿用 `/proc/stat`。
 
+schedstat 读取器按内核文档解析 9 个 CPU 字段，并使用第 7 字段（任务运行
+总纳秒数）。仅接受已知的 schedstat 版本 10–17；未知版本会安全回退到
+`/proc/stat`，不会猜测字段布局。
+
 ### 功耗与温度
 
 当前实现优先适配如下平台模型：
 
-- package 功耗来自 `hwmon` 中 `name=power_meter` 的 `power1_average`
+- package 功耗来自唯一可判定的 `hwmon` `name=power_meter`，使用其
+  `power1_average`
 - summary 温度来自 `thermal_zoneN/temp`，在当前 `thermal-zone-index`
   策略下，其中 `N` 对应 NUMA/Vdie `N`
 
@@ -147,6 +187,8 @@ MSR/RAPL/TSC 模型。
 - `Power` 是 `SUM` 级字段，单位为 mW
 - CPU 行的 `Temp` 来自该 CPU 所属 NUMA 节点温度，单位为 C
 - `Temp0` ... `Temp3` 只在发现对应 NUMA/Vdie zone 后显示，单位为 C
+- 稀疏 NUMA ID 会保持原编号（例如 node 2 映射到 `Temp2`），并支持有符号
+  毫摄氏度读数
 - 目前不暴露 per-core power / per-core temperature
 
 summary 温度策略现在是显式的，而不是隐含假设：
@@ -154,8 +196,12 @@ summary 温度策略现在是显式的，而不是隐含假设：
 - 默认策略：`thermal-zone-index`
 - 行为：`thermal_zoneN/temp -> TempN -> NUMA/Vdie N`
 - 覆盖方式：`ARMSTAT_TEMP_POLICY=none` 可禁用 summary `TempN` 发现
+- 可用值为 `thermal-zone-index`、`none` 和 `disabled`；未知值会作为启动错误，
+  不会静默丢失温度数据
 
-`--probe` 会打印当前生效的 `summary_temp_policy`，方便排查平台差异。
+`--probe` 会打印当前生效的 `summary_temp_policy`，以及 package 功耗和内存带宽
+来源的候选数量。候选多于一个时会作为歧义禁用，不会任意采用目录遍历遇到的
+第一个来源。
 
 ### PMU
 
@@ -167,14 +213,26 @@ PMU 通过 `perf_event_open()` 实现：
 - 多路复用事件会在导出 interval 值前做 scaling
 - `-I` 会启用 `cycles,instructions` 并打开 IPC 列
 - `-p ...` 只启用 PMU 计数器，不自动显示 IPC
-- 未知 PMU 事件名和超过 `MAX_PMU_EVENTS` 的事件列表立即失败；perf 权限/打开失败仍降级为不可用值
-- PMU 文件描述符使用量与 tracked CPU 数量成正比，`--cpu` 是降低 fd 压力的主要手段
+- 只有事件列表同时包含这两个命名事件且本区间 cycles 非零时，IPC 才可用
+- 未知或重复 PMU 事件名以及超过 `MAX_PMU_EVENTS` 的事件列表立即失败；机器
+  输出的 PMU 对象以事件名为键，因此不允许重名；perf 权限/打开失败仍降级为
+  可见的不可用值
+- 首次 group read、短读/失败、零运行时间或计数器回退都属于不可用 interval；
+  恢复时先重新建立 baseline，不会把故障窗口压缩进一条 delta
+- PMU 文件描述符使用量同时随事件数和 tracked CPU 数增长；打开 group 前，
+  armstat 会在现有 hard limit 内尽力提高 soft `RLIMIT_NOFILE`，预算仍不足时
+  会告警，减少 CPU 或事件任意一项都能降低 fd 压力
 
 PMU 一般需要 root 权限，或者较宽松的
 `/proc/sys/kernel/perf_event_paranoid`。
 
 如果显式请求了 PMU 或 IPC 列，但没有通过 `-p` 指定事件列表，
 armstat 会默认使用 `cycles,instructions`。
+
+ARMv8 raw 别名使用架构 PMUv3 事件号。其中 `mem-read` / `mem-write` 分别
+统计 retired load / store；它们是事件次数，不是传输字节数或内存带宽。
+可选 cache 层事件是否实现仍取决于具体 CPU，因此架构事件名在某台机器上仍
+可能不可用。
 
 ## 架构
 
@@ -214,12 +272,16 @@ sysstat.c              /proc/stat 与 /proc/schedstat 读取
 - **Static / rebuild 层**：
   CPU inventory、topology、传感器发现、cpuidle state 名称、PMU 事件元数据
 - **Slow-changing 层**：
-  CPU min/max 频率、governor、boost、传感器 capability、cpuidle `disable`
+  CPU min/max 频率、governor、boost 与 cpuidle `disable`
 - **Per-interval fast path**：
   当前频率、`/proc/stat` delta、package 功耗、NUMA 温度、PMU 计数、
   cpuidle `stateN/time`
 
 这样“平台上有什么”这类慢变化工作就不会落到每轮热路径里。
+
+hotplug 检测每个 interval 只读取紧凑的 Linux `online` CPU mask。当可表示数量、
+真实总数和具体成员都与缓存 catalog 一致时，armstat 跳过目录枚举；只有真实变化
+或 mask 无法读取时，才执行完整 inventory 扫描和连续两次确认去抖。
 
 ### 1.5. Busy/Idle 执行路径
 
@@ -303,7 +365,8 @@ Busy/Idle。
 
 PMU 以 tracked CPU 为单位建立 perf group。group read 会拿到
 `time_enabled` / `time_running`，多路复用时先做 scaling，再导出 interval
-delta。
+delta。每个 CPU 独立保留 group 有效性，只有所有 tracked CPU 都提供完整
+interval 时，summary PMU 才可用。
 
 ### 6. 两阶段 formatter
 
@@ -319,12 +382,27 @@ delta。
 
 ```bash
 make
+make test
+make debug-test
+make analyze        # Linux 上使用 GCC 静态分析器
+make target-test    # ARM64 Linux 主机运行态验收
+make O=/path/to/output
 ```
 
 armstat 可以从本仓库独立构建，也可以放入 Linux 源码树
 `tools/power/armstat` 后用同样的 `make` 命令构建。交叉编译通过
 `CROSS_COMPILE` 支持（例如 `CROSS_COMPILE=aarch64-linux-gnu-`），
-外部构建通过 `make O=/path/to/output` 支持。
+外部构建通过 `make O=/path/to/output` 支持。binary、object、依赖文件和测试
+binary 都会留在 `O` 下；release、sanitizer、自定义编译参数、compiler version
+或 compiler target architecture 切换时，不兼容的旧 object 会自动失效。
+object 和链接后的 binary 按构建配置指纹隔离，因此并行执行构建目标或快速执行
+release/debug/release 切换也不会复用陈旧 object；选中的 binary 会原子发布到
+`armstat`。
+Linux release 默认同时启用 stack protector、PIE、RELRO 与立即符号绑定。
+对外版本号统一来自仓库根目录的 `VERSION` 文件，并会进入构建指纹和安装文档。
+`make install` 也会安装完整的 GPL-2.0 许可证正文。
+`make analyze` 的 analyzer 专用 binary 会隔离在 `.armstat-analysis/`，不会清理
+或替换普通构建选中的 release `armstat`。
 
 ## 用法
 
@@ -341,11 +419,20 @@ armstat --busy-source schedstat
 armstat --busy-source task-clock
 ```
 
+`-n 0`（默认值）会一直运行到收到中断。`-D` 仍会等待并测量一个完整 interval，
+并不是瞬时点采样。text 模式的 `-D` 会保留 banner 与列表头，使单次结果可以
+自解释；确实需要无表头 text 时再显式添加 `-q`。
+
+最小 interval 为一微秒（`0.000001` 秒）；更小的值会被拒绝，因为 collector
+时间戳和导出 interval 使用微秒精度。text 启动 banner 会保留这种亚秒精度，
+不会把合法短 interval 四舍五入成零。
+
 ### 其他选项
 
 - `-N, --header-iterations N` — 每 N 个 interval 重印一次 text 表头
 - `-J, --joules` — 显示区间能量（焦耳）
 - `-q, --quiet` — 抑制 interval banner 和 text 表头
+- `-h, --help` — 显示完整命令行摘要并退出
 - `-v, --version` — 显示版本并退出
 
 ### 输出格式
@@ -361,9 +448,22 @@ armstat -f csv -O armstat.csv
 `-O` / `--export` 是 `-o` / `--output` 的导出别名。它尤其适合
 JSON / CSV 这类机器可读输出，但 text 模式也同样可用。
 
-CSV 导出现在会在每行前面附带 `schema_version`、`interval`、`timestamp`、
-`timestamp_iso` 四列，方便后处理脚本直接按真实时间对齐样本，并识别当前
-导出契约版本。
+collector 初始化和 baseline 采样成功前，已有输出文件不会被截断。运行态输出
+仍保持 streaming，因此长时间采集成功启动后，下游可以边生成边读取。
+所有成功路径（包括 `--help`、`--version`、`--list` 和 `--probe`）都会在返回
+0 前 flush 并检查 stdout；文件系统已满、导出目标损坏或其他可检测写入失败会
+返回非零状态。下游管道提前关闭时，`SIGPIPE` 会被转成可检查的 `EPIPE`，使
+PMU 与缓存的 sysfs 资源可以在返回 1 前正常清理。
+
+CSV 导出现在会在每行前面附带 `schema_version`、`interval`、真实采样窗口
+`duration_us`、秒级 `timestamp`、纳秒级 `timestamp_ns` 和 RFC 3339
+`timestamp_iso`，方便后处理脚本直接按真实时间对齐亚秒样本，并识别当前
+导出契约版本。JSON 使用相同元数据。
+
+当只输出 summary 时，schema 7 CSV 使用 `Scope` 表头与 `SUM` 值，而不是把
+数据值写成列名。当同时选择多个 scope 时，CSV 使用 `Scope,CPU,Package` 身份列，
+并输出 `SUM`、`PKG` 或 `CPU` 行。像 `-s pkg_avg_freq` 这样的 package 精确
+字段也会生成可用的 package-only 导出，不会只留下空文件。
 
 更完整的 JSON/CSV 字段与结构说明已经单独整理到 [EXPORTS.zh-CN.md](EXPORTS.zh-CN.md)
 （中文）和 [EXPORTS.md](EXPORTS.md)（英文）。
@@ -411,7 +511,11 @@ armstat -s LPI-0,LPI-1,Idle%,Busy%
 armstat -H temp
 ```
 
-`-s` 与 `-H` 均会对未知列组或字段名报启动错误。
+`-s` 与 `-H` 均会对未知列组或字段名报启动错误。完成能力发现后，如果所选
+字段在当前模式下无法产生任何数据行（例如 `-S -s cpu`，或只选了平台上
+不存在的动态字段），armstat 也会明确失败，不会静默输出空数据集。可用
+`--probe` 与 `--list` 定位选择问题。`--list` 会同时列出每个精确字段的
+scope、数据类型、单位、text 标签和 JSON 键，便于在写采集脚本前核对契约。
 
 支持的列组别名：
 
@@ -433,6 +537,10 @@ armstat -H temp
 `-s` / `-H` 现在也支持精确字段名，例如 `Idle%`、`Busy%`、`IOWait%`、
 `SoftIRQs`、`LPI-0`、`Power`。
 
+重复的 `-s` 会取并集。显式指标请求 `-p`、`-I`、`-J` 无论写在 `-s`
+之前还是之后，也都会保留在该并集中；普通参数顺序不会静默关掉已经请求的
+PMU、IPC 或 energy 输出。
+
 ### PMU
 
 ```bash
@@ -450,16 +558,12 @@ armstat -I
 - `branches`
 - `branch-misses`
 - `mem-access`
-- `mem-read`
-- `mem-write`
-- `l1d-cache-refill`
-- `l1d-cache`
-- `l1i-cache-refill`
-- `l1i-cache`
-- `l2d-cache-refill`
-- `l2d-cache`
-- `l3d-cache-refill`
-- `l3d-cache`
+- `mem-read`（架构 load-retired 事件）
+- `mem-write`（架构 store-retired 事件）
+- `l1d-cache-refill`、`l1d-cache`
+- `l1i-cache-refill`、`l1i-cache`
+- `l2d-cache-refill`、`l2d-cache`
+- `l3d-cache-refill`、`l3d-cache`
 
 原始 ARM PMU 事件配置也可以用十六进制值指定，例如 `0x11`。未知事件名和超过
 `MAX_PMU_EVENTS` 的列表在采样开始前失败。如果事件已知但当前机器上 perf
@@ -472,10 +576,15 @@ armstat -l
 armstat --probe
 ```
 
-`-l` 当前会打印内置列组和 PMU 事件名。
+`-l` 会打印内置列组、每个可精确选择字段的 scope/text label/JSON key，以及
+PMU 事件名。脚本中优先使用稳定 field ID，可以避免重名 label 的歧义。
 `--probe` 会一次性打印当前平台的能力摘要，包括 CPU 拓扑、
-effective busy-source 策略、cpuidle/LPI 可用性、温度源、
-内存带宽支持情况，以及基础 PMU 可用性探测。
+effective busy-source 策略、cpuidle/LPI 可用性、温度节点 mask、实际选中的
+package 功耗与内存带宽 sysfs 路径、候选数量与歧义说明，以及基础 PMU 可用性
+探测。PMU 检查只会在
+第一个 tracked CPU 上打开 `cycles`，这是低成本能力检查，不代表每个事件都能
+在每个 CPU 上打开。key-value 输出包含 `probe_schema_version: 1`，部署脚本可
+据此显式拒绝未来不兼容的 probe 契约。
 
 ### 画图
 
@@ -576,13 +685,15 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
   - 来源：
     `scaling_governor`
   - 备注：
-    属于 slow-changing 层字段
+    属于 slow-changing 层字段；不可用时 text 显示 `-`、JSON 为 `null`、
+    CSV 为空单元格，而不是空字符串
 
 - **Boost**
   - 来源：
     优先 per-CPU `cpufreq/boost`，其次全局 `cpu/cpufreq/boost`
   - 值：
-    `1`、`0`，不可用时显示 `-`
+    text/CSV 使用 `1`、`0`；JSON 使用 `true`、`false`；不可用时分别为
+    text `-`、JSON `null`、CSV 空单元格
 
 - **AvgFreq**
   - 每 CPU 公式：
@@ -622,7 +733,8 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
     - `task-clock`：兼容别名，当前等价于 `schedstat`
   - 解读：
     `Idle%` 表示“这个采样窗口里，该 CPU 总体有多 idle”。armstat 会把
-    它当作分 `LPI-*` 展示时要解释清楚的基准值。
+    它当作分 `LPI-*` 展示时要解释清楚的基准值。procstat 的 idle 值包含
+    Linux 的 iowait 字段。
 
 - **IOWait%**（默认关闭；可通过 `-s iowait` 或 `-s IOWait%` 开启）
   - 来源：
@@ -636,9 +748,9 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
   - 公式：
     `100 - Idle%`
   - 备注：
-    当前 `IOWait%` 会单独显示，但不会再从 `Busy%` 中额外扣除
+    `IOWait%` 是 `Idle%` 的子集，因此已经从 `Busy%` 中排除
   - 解读：
-    当前模型满足 `Idle% + Busy% = 100`；`IOWait%` 是额外的参考拆分，
+    当前模型满足 `Idle% + Busy% = 100`；`IOWait%` 是 idle 内部的参考拆分，
     不是第三个互斥分桶
 
 ### LPI / cpuidle 相关字段
@@ -672,6 +784,9 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
   - 结果：
     最终显示出来的 `LPI-*` 是面向解释 `Idle%` 的展示值，并不总是
     `cpuidle/stateN/time` 原始百分比的直接照抄
+  - 失败处理：
+    某个 state 计数不完整或回退时，该 CPU 的全部可见 LPI 值保持不可用，
+    直到下一条完整 interval
 
 ### 功耗与能量
 
@@ -681,7 +796,8 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
   - 单位：
     mW
   - 备注：
-    当前实现将 package 功耗映射到 `SUM` 行，不在 CPU 行伪造 per-core 功耗
+    当前实现只把唯一发现的 package 功耗源映射到 `SUM` 行，不在 CPU 行伪造
+    per-core 功耗；零个或多个候选都会保持不可用
 
 - **区间平均功耗**
   - 公式：
@@ -702,6 +818,8 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
     `thermal_zoneN -> TempN -> NUMA/Vdie N`
   - 单位：
     摄氏度
+  - 说明：
+    NUMA 节点 ID 可以稀疏，温度也可以低于 0 摄氏度
 
 - **CPU 行 Temp**
   - 公式：
@@ -735,13 +853,14 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
 
 - **MemBW**
   - 来源：
-    平台相关的原始内存带宽字节计数器
+    唯一发现的平台相关原始内存带宽字节计数器
   - 公式：
     `(counter_now - counter_prev) / interval_seconds`
   - 单位：
-    MB/s
+    MiB/s（每秒字节数除以 1024²）
   - 备注：
-    如果平台没有可用的 raw counter，`MemBW` 可能长期为 0 或不可用
+    平台暴露零个或多个候选 counter，或唯一 counter 不可读时，`MemBW` 都为
+    不可用；只有有效 interval 内字节增量确实为 0 时才输出 0
 
 ### PMU 与 IPC
 
@@ -752,15 +871,21 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
     per-CPU perf group，读取时带 `time_enabled / time_running`
   - 显示值：
     对 scaling 后的累计计数做 interval delta
+  - 有效性：
+    首次、失败、回退或未被调度运行的 group read 为不可用，并在下一条 delta
+    前重新建立 baseline
 
 - **Summary PMU**
   - 公式：
     对 tracked CPU 的 per-CPU scaled PMU 计数求和，再导出 interval delta
+  - 有效性：
+    只有全部 tracked CPU 都提供完整 group read 时才可用
 
 - **IPC**
   - 公式：
     `instructions / cycles`
   - 作用域：
+    同时存在命名事件 `instructions`、`cycles` 且本区间 cycles 非零时，
     summary 和 CPU 两种视角都支持
 
 ## 降级与失败语义
@@ -776,6 +901,15 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
 - 如果 package 功耗或 NUMA 温度源不可用：
   - 对应字段显示不可用或隐藏
   - 不影响其它字段
+- 如果 package 功耗或内存带宽存在多个候选 sysfs 来源：
+  - 该指标保持不可用，不会非确定性选择第一个来源或静默低估
+  - `--probe` 会报告候选数量和歧义说明
+- 如果通常可用的频率、Busy/Idle、LPI、功耗/能量、温度、内存带宽、系统计数
+  或 PMU 发生瞬时读取失败：
+  - text 输出 `-`，JSON 输出 `null`，CSV 输出空值
+  - 累计来源在恢复时先重新建立 baseline，再输出新区间值，避免伪 0 和恢复尖峰
+  - procstat jiffy delta 无法安全换算成微秒时会显示不可用，而不是溢出后伪造
+    一个看似合理的 Busy/Idle 百分比
 - 如果运行中发生 CPU hotplug：
   - inventory、sample cache、cpuidle 运行态、PMU、topology 会一起重建
   - 下一条样本会作为新的 baseline，避免跨 hotplug 边界混算 delta
@@ -787,7 +921,8 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
 
 当前传感器策略假定：
 
-- package 功耗来自 `power_meter/power1_average`
+- package 功耗要求恰好一个 `power_meter/power1_average` 候选
+- 内存带宽同样要求恰好一个 `mem_bytes_read` 候选
 - summary 温度遵循显式的 `thermal-zone-index` 策略：
   `thermal_zoneN/temp -> TempN -> NUMA/Vdie N`
 
@@ -802,10 +937,12 @@ effective busy-source 策略、cpuidle/LPI 可用性、温度源、
 
 ## 当前限制
 
-- 输出模型仍是 `SUM + CPU 行`，还没有像成熟 `turbostat` 那样的独立
-  core 聚合行（per-package 聚合已实现）
+- 还没有像成熟 `turbostat` 那样的独立 core 聚合行；summary、per-package
+  和 per-CPU 行已经实现
 - per-core power 尚未实现
 - CPU 行温度是 NUMA/die 温度映射，不是 per-core 传感器
+- 当前固定大小采样数组无法表示 1023 以上的 CPU ID；armstat 会打印警告，
+  并继续监控可表示的在线 CPU
 - PMU scaling 已接入，但仍需要在真实目标机上继续验证
 - 没有足够权限时，PMU 初始化会失败
 
@@ -831,4 +968,4 @@ armstat -d -i 1 -n 2
 
 ## 许可证
 
-GPL-2.0
+GPL-2.0。完整许可证正文见 [COPYING](COPYING)。

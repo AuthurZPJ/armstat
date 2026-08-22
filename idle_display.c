@@ -49,6 +49,7 @@ void compute_idle_state_display(double out[MAX_VISIBLE_IDLE_STATES],
 {
 	double remaining = idle_pct;
 	int last_state = -1;
+	int data_complete = !isnan(idle_pct);
 	double hidden_value = summary_mode ? 0.0 : NAN;
 
 	if (state_count > MAX_VISIBLE_IDLE_STATES)
@@ -59,8 +60,10 @@ void compute_idle_state_display(double out[MAX_VISIBLE_IDLE_STATES],
 			get_usable_state(idle_matrix, cpu_idx, s, state_count);
 
 		if (state && visible[s]) {
-			last_state = s;
-			break;
+			if (isnan(state->percentage))
+				data_complete = 0;
+			if (last_state < 0)
+				last_state = s;
 		}
 	}
 
@@ -71,6 +74,10 @@ void compute_idle_state_display(double out[MAX_VISIBLE_IDLE_STATES],
 
 		if (s >= state_count || !state || !visible[s]) {
 			out[s] = hidden_value;
+			continue;
+		}
+		if (!data_complete) {
+			out[s] = NAN;
 			continue;
 		}
 

@@ -45,7 +45,7 @@ struct cpu_row {
 	double iowait_percent;
 	double busy_percent;
 	double ipc;                /* NAN when unavailable */
-	double temp_c;             /* 0 when unavailable */
+	double temp_c;             /* NAN when unavailable */
 
 	/* Display-adjusted per-idle-state residency (NAN when column hidden) */
 	double idle_state_pct[MAX_VISIBLE_IDLE_STATES];
@@ -53,6 +53,7 @@ struct cpu_row {
 
 	/* Owned per-CPU PMU counters */
 	unsigned long long pmu[MAX_PMU_EVENTS];
+	int pmu_valid;
 };
 
 /*
@@ -67,20 +68,21 @@ struct summary_data {
 	double iowait_percent;
 
 	/* Power/Energy */
-	long long power_mw;
+	double power_mw;
 	double energy_joules;
 
 	/* Memory bandwidth */
-	unsigned long long mem_bw;
+	double mem_bw;
 
 	/* Sysstat */
-	unsigned long ctx_switches;
-	unsigned long interrupts;
-	unsigned long soft_interrupts;
+	double ctx_switches;
+	double interrupts;
+	double soft_interrupts;
 
 	/* PMU events (aggregated in summary mode) */
 	unsigned long long pmu[MAX_PMU_EVENTS];
 	int pmu_count;
+	int pmu_valid;
 
 	/* IPC */
 	double ipc;
@@ -98,6 +100,8 @@ struct summary_data {
 struct interval_record {
 	int interval;
 	time_t timestamp;
+	unsigned long long timestamp_ns;
+	unsigned long long duration_us; /* Measured monotonic interval duration */
 
 	/* CPU info */
 	int cpu_count;           /* Tracked CPU count */
@@ -114,6 +118,7 @@ struct interval_record {
 	double summary_idle_state_pct[MAX_VISIBLE_IDLE_STATES];
 	int numa_temps[16];           /* milli-C per NUMA/vdie */
 	int numa_temp_count;
+	unsigned int numa_temp_valid_mask;
 
 	/* Owned per-package aggregation rows */
 	int package_count;
@@ -185,5 +190,8 @@ void cleanup_formatter_pool(void);
  * Close the JSON output array (must be called once when JSON mode ends)
  */
 void close_machine_json(void);
+
+/* Reset JSON/CSV stream state before starting an independent output stream. */
+void reset_machine_state(void);
 
 #endif /* ARMSTAT_FORMATTER_H */

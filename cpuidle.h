@@ -12,6 +12,8 @@ struct idle_state {
 	unsigned long long usage;	/* entry count (cumulative) */
 	double percentage;
 	double wakeups_per_sec;		/* wakeups per second in last interval */
+	int time_valid;
+	int usage_valid;
 	int available;
 	int disabled;
 };

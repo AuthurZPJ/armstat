@@ -18,12 +18,7 @@
  */
 
 #include "power.h"
-
-/* Internal wiring — previously in power_internal.h */
-int  init_power_sensor_subsystem(void);
-void close_power_sensor_subsystem(void);
-int  init_mem_bw(void);
-void close_mem_bw(void);
+#include "power_internal.h"
 
 /*
  * Initialize power subsystem
@@ -31,7 +26,8 @@ void close_mem_bw(void);
  */
 int init_power(void)
 {
-	init_power_sensor_subsystem();
+	if (init_power_sensor_subsystem() < 0)
+		return -1;
 
 	/* Initialize memory bandwidth subsystem */
 	init_mem_bw();

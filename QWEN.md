@@ -17,7 +17,11 @@
 
 ## Key Differentiator
 
-Produces machine-readable JSON and CSV exports with per-sample timestamps and a stable `schema_version` (currently 4). Helper plotting scripts (`scripts/plot_sum.py`, `scripts/plot_cpu.py`) turn exports into time-series charts.
+Produces machine-readable JSON and CSV exports with measured interval duration,
+nanosecond/RFC 3339 timestamps, explicit missing values, and a stable
+`schema_version` (currently 7). Helper plotting scripts
+(`scripts/plot_sum.py`, `scripts/plot_cpu.py`) turn exports into time-series
+charts and retain schema 4–7 compatibility.
 
 ## Architecture
 
@@ -40,7 +44,7 @@ armstat_cli.c (CLI parsing, column selection)
 ### Three Sampling Layers
 
 1. **Static/rebuild** — CPU inventory, topology, sensor discovery, cpuidle state names, PMU event metadata
-2. **Slow-changing (~5s)** — CPU min/max freq, governor, boost, sensor flags, cpuidle disable state. Uses a rolling cursor + budget to avoid periodic spikes.
+2. **Slow-changing (~5s)** — CPU min/max freq, governor, boost, and cpuidle disable state. Uses a rolling cursor + budget to avoid periodic spikes.
 3. **Per-interval fast path** — current frequency, `/proc/stat` deltas, package power, NUMA temperatures, PMU counters, cpuidle `stateN/time`
 
 ### CPU Identity Model
@@ -61,7 +65,7 @@ CPU membership change → rebuild cpu_inventory → sample_cache → cpuidle →
 ## Build Commands
 
 ```bash
-make              # Build armstat binary (default: -O2 -Wall -Wextra)
+make              # Build with the default fortified release warning set
 make clean        # Clean build artifacts
 make debug        # Rebuild with AddressSanitizer + UBSan (-g -O0)
 make test         # Run all smoke tests
@@ -78,18 +82,23 @@ make test
 ```
 
 Runs these tests in order:
-1. `tests/test_core_logic` — idle/busy/iowait/schedstat clamp calculations
-2. `tests/test_column_selection` — `-s`/`-H` field selection, `-a`/`all` behavior
-3. `tests/test_runtime_smoke` — CLI/runtime combinations (`-S -a`, `-a -I`, `--probe`, busy-source parsing, JSON/CSV serialization, schema_version)
-4. `tests/test_cli_smoke.sh` — shell-based CLI smoke checks
-5. `tests/test_plot_loaders.py` — verifies plotting scripts can load current exports
+1. `tests/test_core_logic` — counter, timing, idle/busy, sensor, and PMU calculations
+2. `tests/test_column_selection` — registry uniqueness and `-s`/`-H`/`-a` behavior
+3. `tests/test_runtime_smoke` — CLI/runtime and text/JSON/CSV serialization contracts
+4. `tests/test_cpu_inventory` / `tests/test_section_policy` — CPU identity and output-scope policy
+5. `tests/test_cli_smoke.sh` — shell-based CLI and failure-path checks
+6. `tests/test_plot_loaders.py` / `tests/test_csv_streaming.py` — loader compatibility and bounded CSV loading
+7. `tests/test_build.sh` — out-of-tree build, flag transitions, staged install/uninstall, and license installation
 
-**Note:** Tests validate code structure and export contracts only. ARM runtime behavior (cpuidle, PMU, hotplug, nohz_full, power/temp sensors) requires manual validation on target hardware. See `TESTING.md` for target-machine validation commands.
+`make target-test` adds automated ARM64 Linux runtime acceptance and optional
+capability requirements. PMU, sensor semantics, hotplug, `nohz_full`, and the
+30-minute gate still require the intended deployment hardware. See
+`TESTING.md` for the exact procedure.
 
 ## Usage Examples
 
 ```bash
-armstat                        # Default: per-package + CPU rows, 1s interval
+armstat                        # Default: per-CPU rows, 1s interval
 armstat -i 5                   # 5-second intervals
 armstat -n 10                  # 10 iterations then exit
 armstat -D                     # One-shot (single iteration)
@@ -104,7 +113,7 @@ armstat -I                     # Enable PMU (cycles, instructions, IPC)
 armstat -p cache-misses,branches  # Custom PMU events
 armstat --busy-source auto     # Default: /proc/stat + schedstat for nohz_full
 armstat --probe                # One-shot platform capability dump
-armstat -l                     # List built-in column groups and PMU events
+armstat -l                     # List groups, fields/types/units, and PMU events
 ```
 
 ## Important Semantics
@@ -122,15 +131,19 @@ armstat -l                     # List built-in column groups and PMU events
 ### Code Style
 - Linux kernel C style (tabs for indentation, `snake_case` functions, `UPPER_CASE` constants)
 - SPDX license headers on source files
-- `-Wall -Wextra` enforced; `-D_FORTIFY_SOURCE=2` in default builds
+- `-Wall -Wextra -Wformat=2 -Wundef -Wshadow -Wstrict-prototypes
+  -Wmissing-prototypes` enforced; `-D_FORTIFY_SOURCE=2` in default builds
 
 ### Documentation Rule
-When behavior changes, update **all five** in order:
+When behavior changes, update all behavior documents in order:
 1. Code
 2. `README.md`
 3. `README.zh-CN.md`
 4. `DESIGN.md` / `DESIGN.zh-CN.md`
 5. `armstat.8` (man page)
+6. `EXPORTS.md` / `EXPORTS.zh-CN.md`
+7. `PLOTTING.md` / `PLOTTING.zh-CN.md`
+8. `TESTING.md` / `TESTING.zh-CN.md`
 
 ### Testing
 - Write tests for new functionality (add to existing test files in `tests/`)
@@ -162,9 +175,9 @@ When behavior changes, update **all five** in order:
 | Busy% | derived | 100 - Idle% (procstat); sched_runtime_delta_ns / wall_clock_delta_ns × 100 (schedstat) |
 | IOWait% | `/proc/stat` iowait | iowait_delta_us / interval_delta_us × 100 |
 | LPI-* | `cpuidle/stateN/time` | state_delta_us / interval_delta_us × 100 (display-adjusted) |
-| Power (mW) | `power_meter/power1_average` | raw hwmon reading |
+| Power (mW) | one unique `power_meter/power1_average` | raw hwmon reading |
 | Energy (J) | derived | interval_avg_power_mw × interval_s / 1000 |
-| MemBW | platform-specific counter | (counter_now - counter_prev) / interval_s |
+| MemBW (MiB/s) | platform-specific counter | (counter_now - counter_prev) / interval_s / 1024² |
 | IPC | derived | instructions / cycles |
 | CtxSw | `/proc/stat` ctxt | ctxt_now - ctxt_prev |
 | IRQs | `/proc/stat` intr | intr_now - intr_prev |
@@ -183,7 +196,9 @@ On large systems (256+ CPUs with PMU), total can exceed 500 fds. Use `--cpu` to 
 
 ## Platform-Specific Notes
 
-- **Power**: Looks for `hwmon` device with `name=power_meter`, reads `power1_average`. Degrades silently if missing.
+- **Power / memory bandwidth**: Both require exactly one matching sysfs source;
+  multiple candidates are reported by `--probe` and remain unavailable rather
+  than being selected by directory iteration order.
 - **Temperature**: Default `thermal-zone-index` policy maps `thermal_zoneN/temp` → `TempN` → NUMA/Vdie N. This is a platform convention, not a kernel guarantee. Override with `ARMSTAT_TEMP_POLICY=none`.
-- **Uncore/DevFreq**: Scans `/sys/class/devfreq/` for uncore/interconnect/fabric device. Falls back silently.
+- **Uncore/DevFreq**: Scans `/sys/class/devfreq/` for an uncore/interconnect/fabric device. Unsupported capability is reported by `--probe` and the optional column stays hidden.
 - **PMU**: Requires root or permissive `perf_event_paranoid`. Unknown event names are hard errors; known events that can't be opened degrade to unavailable values.

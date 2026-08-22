@@ -62,6 +62,15 @@ int set_cpu_inventory_filter(const char *cpu_list);
 int cpu_inventory_filter_is_active(void);
 int cpu_filter_contains(int cpu_id);
 
+/* Strictly parse Linux CPU-list syntax (for example 0,2-4,9) into a mask. */
+int parse_cpu_list_mask(const char *text, unsigned char *mask, int mask_len,
+			int *count_out);
+
+/* Also return the unique CPU count before the representable mask is clipped. */
+int parse_cpu_list_mask_with_total(const char *text, unsigned char *mask,
+				   int mask_len, int *count_out,
+				   int *total_count_out);
+
 /* Unified catalog API */
 int cpu_catalog_init(void);
 int cpu_catalog_rebuild(void);
@@ -71,6 +80,10 @@ struct cpu_desc *cpu_catalog_get_by_tracked_idx(int idx);
 int cpu_catalog_online_count(void);
 int cpu_catalog_present_count(void);
 int cpu_catalog_tracked_count(void);
+
+/* Compare a parsed Linux online mask with the current catalog membership. */
+int cpu_catalog_matches_online_mask(const unsigned char *mask, int mask_len,
+				    int represented_count, int total_count);
 void cpu_catalog_cleanup(void);
 
 /*

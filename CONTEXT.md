@@ -24,8 +24,10 @@ current; add a term when a decision resolves one.
 
 - **online** — a CPU that is currently online.
 
-- **tracked** — the online CPUs that armstat actually samples (online count
-  limited by `MAX_CPUS`). The set everything iterates over.
+- **tracked** — the representable online CPUs that pass the optional `--cpu`
+  filter and that armstat actually samples. The current build represents real
+  Linux CPU IDs `0..1023`; higher IDs are reported as truncated rather than
+  being remapped into the dense array. The set everything iterates over.
 
 - **cpu_desc** — the unified per-CPU descriptor: identity (`cpu_id`, present,
   online) plus topology attributes (`package_id`, `core_id`, `numa_node`,
@@ -43,11 +45,13 @@ current; add a term when a decision resolves one.
   decisions. Single owner — no other module defines or mutates the visibility
   state directly.
 
-- **field registry** — the `all_fields[]` descriptor table and its query API
-  (`get_field_desc`, `get_enabled_fields`, `any_fields_enabled`,
-  `field_is_effectively_enabled`), owned by `columns.c`. Ties each field id
-  to its group, scope, series, enabled flag, and value getter. The value
-  getters themselves live in `formatter_record.c` (declared in the private
+- **field registry** — the `all_fields[]` descriptor table and its public query
+  API (`get_field_desc`, `get_all_fields`, `get_field_count`,
+  `get_enabled_fields`, `any_fields_enabled`, `field_is_scope_identity`),
+  owned by `columns.c`. Ties each stable field ID to its text/JSON names,
+  group, scope, series, type, unit, display precision, enabled flag, and value
+  getter. Effective visibility remains an internal registry decision. The
+  value getters live in `formatter_record.c` (declared in the private
   `formatter_fields.h` sub-header); the registry references them by address.
 
 - **snapshot accessors** — the `sys_snapshot_get_*()` functions declared in
@@ -67,6 +71,11 @@ current; add a term when a decision resolves one.
   previously duplicated patterns with a single checked convention (0 on
   success, -1 on failure, value via out-param).
 
+- **Unique sensor-source rule** — package power and memory bandwidth are
+  enabled only when discovery finds exactly one matching sysfs candidate.
+  `--probe` exposes candidate counts and ambiguity notes; directory traversal
+  order is never used as an implicit hardware-selection policy.
+
 - **LPI residual display rule** — the pure function
   `compute_idle_state_display()` in `idle_display.c` / `idle_display.h` that
   transforms raw cpuidle per-state residency percentages into display
@@ -80,7 +89,8 @@ current; add a term when a decision resolves one.
 - **armstat export loader** — the shared Python module
   `scripts/armstat_loader.py` that owns the unified `FIELD_ALIASES` map,
   JSON/CSV loaders (`load_summary_series`, `load_cpu_series`), the
-  `canonicalize_csv_key` canonicalizer, `resolve_field_name` field resolver,
+  `canonicalize_csv_key` canonicalizer, context-aware `resolve_field_name`
+  field resolver (`freq` means summary `avg_freq` or CPU `freq`),
   series slicers, and CSV row counters. The deep module seam between the C
   export contract and the Python plotting scripts. `plot_sum.py` and
   `plot_cpu.py` import from it and retain only their distinct logic (presets,
@@ -98,12 +108,11 @@ current; add a term when a decision resolves one.
 
 - **field value formatting** — the shared `format_field_value()` function
   declared in `columns.h` and implemented in `columns.c`. Renders a
-  `field_desc`'s value into a string buffer with a caller-supplied `nan_str`
-  for NaN placeholder rendering (`""` for CSV, `"-"` for text). Consolidates
-  the previously duplicated 4-case type switch from `formatter_machine.c`'s
-  CSV path and `formatter_text.c`'s text path. The JSON serializer keeps its
-  own `print_json_field_value` because JSON string escaping is stream-based
-  (per-character `putchar`), not buffer-based.
+  `field_desc`'s value into a string buffer with a caller-supplied unavailable
+  placeholder (`""` for CSV, `"-"` for text). It applies descriptor precision
+  and handles numbers, nullable strings, and tri-state booleans. The JSON
+  serializer keeps its own `print_json_field_value` because JSON escaping and
+  native `true`/`false`/`null` emission are stream-based.
 
 - **cpu row identity** — the `get_cpu_row_id(rec, row_idx)` function declared
   in `formatter.h` and implemented in `formatter_record.c`. Hides the

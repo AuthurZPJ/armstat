@@ -11,9 +11,6 @@ struct sys_stat_raw {
 	unsigned long long soft_interrupts;
 };
 
-/* Initialize system statistics */
-int init_sysstat(void);
-
 /* Invalidate /proc/stat cache for fresh read (call at start of each interval) */
 void invalidate_proc_stat_cache(void);
 
@@ -27,35 +24,39 @@ int read_interrupts(unsigned long long *count);
 int read_soft_interrupts(unsigned long long *count);
 
 /*
- * read_all_proc_stat_cpu_idle - Read all CPU idle times from /proc/stat
- * @idles: Output array for idle times (must have size max_cpus)
- * @iowaits: Output array for iowait times (must have size max_cpus)
- * @max_cpus: Size of output arrays
- *
- * Returns: Highest CPU ID seen + 1, or -1 on error
- *
- * This lets callers safely index sparse CPU IDs (for example CPU100 online
- * with CPUs 0-99 offline) without assuming CPU IDs are dense.
+ * Read all CPU idle times from /proc/stat, also reporting which sparse CPU
+ * slots were actually present. Returns highest CPU ID seen + 1, or -1.
  */
-int read_all_proc_stat_cpu_idle(unsigned long long *idles,
-			   unsigned long long *iowaits,
-			   int max_cpus);
+int read_all_proc_stat_cpu_idle_checked(unsigned long long *idles,
+					 unsigned long long *iowaits,
+					 unsigned char *valid,
+					 int max_cpus);
 
 /*
- * read_all_schedstat_cpu_runtime - Read per-CPU runtime from /proc/schedstat
- * @runtime_ns: Output array for runtime in nanoseconds
- * @max_cpus: Size of output array
+ * Parse one per-CPU /proc/stat line.
  *
- * Returns: Highest CPU ID seen + 1, or -1 on error
- *
- * The runtime field represents cumulative task runtime on each CPU in
- * nanoseconds and is useful as a tickless-friendly busy-time source.
+ * The returned idle value includes iowait, matching armstat's contract that
+ * IOWait% is a subset of Idle% rather than additional busy time.
  */
-int read_all_schedstat_cpu_runtime(unsigned long long *runtime_ns, int max_cpus);
+int sysstat_parse_cpu_line(const char *line, int *cpu_id,
+			   unsigned long long *idle_jiffies,
+			   unsigned long long *iowait_jiffies);
+
+/* Parse the stable nine-field per-CPU schedstat record (runtime is field 7). */
+int sysstat_parse_schedstat_cpu_line(const char *line, int *cpu_id,
+				     unsigned long long *runtime_ns);
+
+/*
+ * Read per-CPU runtime from /proc/schedstat, also reporting which sparse CPU
+ * slots were present. Returns highest CPU ID seen + 1, or -1.
+ */
+int read_all_schedstat_cpu_runtime_checked(unsigned long long *runtime_ns,
+					    unsigned char *valid,
+					    int max_cpus);
 
 /*
  * get_kernel_hz - Get kernel HZ (clock ticks per second)
- * Uses sysconf(_SC_CLK_TCK) and sysfs/cmdline fallbacks, then defaults to 100
+ * Uses sysconf(_SC_CLK_TCK), falling back to Linux USER_HZ=100.
  */
 int get_kernel_hz(void);
 

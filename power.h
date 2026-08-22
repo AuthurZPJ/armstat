@@ -16,25 +16,23 @@ void close_power(void);
 
 /* Raw power / temperature readings */
 
-/* Package power in mW — reads hwmon power1_average every call.
- * This is NOT a cached getter; each call performs sysfs I/O.
- * Returns 0 if no power_meter sensor is present on this platform. */
-long long get_total_power(void);
+/* Checked package-power read. Returns 0 on success, -1 if unavailable. */
+int read_total_power_mw(long long *power_mw);
 
-/* Bulk read for all tracked CPUs — fills powers[0..max_cpus-1] in tracked-CPU order. */
-int read_all_cpu_power(long long *powers, int max_cpus);
-
-/* Bulk read for all tracked CPUs — fills temps[0..max_cpus-1] in tracked-CPU order. */
-int read_all_cpu_temp(int *temps, int max_cpus);
-
-/* Read NUMA-level temperatures from thermal_zoneN/temp (milli-C).
- * Fills temps[0..max_numas-1]; actual count available via get_temp_numa_count(). */
-int read_all_numa_temps(int *temps, int max_numas);
+/* Checked bulk read; valid_mask bit N marks temps[N] as current. */
+int read_all_numa_temps_checked(int *temps, unsigned int *valid_mask,
+				int max_numas);
 
 /* Capability / inventory queries */
 
-/* Number of NUMA nodes with temperature sensors. */
+/* Indexed NUMA span represented by temperature data (highest node + 1). */
 int get_temp_numa_count(void);
+
+/* Discovered sensor count and node-index mask. */
+int get_temp_numa_sensor_count(void);
+unsigned int get_temp_numa_mask(void);
+const char *get_package_power_source_path(void);
+int get_package_power_candidate_count(void);
 
 /* Whether per-core power telemetry is available on this platform. */
 int get_per_core_power_support(void);
@@ -53,8 +51,10 @@ double get_interval_energy_joules(void);  /* Joules for last interval */
 void reset_energy(void);
 
 /* Interval-based statistics */
-void update_power_interval_stats(unsigned long long delta_us, unsigned long long current_power);
-long long get_interval_avg_power_mw(void);
+void update_power_interval_stats(unsigned long long delta_us,
+				 unsigned long long current_power,
+				 int current_valid);
+double get_interval_avg_power_mw(void);
 
 /* ============================================================================
  * MEMORY BANDWIDTH MODULE (membw.c)
@@ -62,16 +62,20 @@ long long get_interval_avg_power_mw(void);
  * ============================================================================ */
 
 /* Update memory bandwidth interval stats */
-void update_mem_bw_interval_stats(unsigned long long delta_us, unsigned long long mem_bw_counter);
+void update_mem_bw_interval_stats(unsigned long long delta_us,
+				  unsigned long long mem_bw_counter,
+				  int counter_valid);
 void reset_mem_bw(void);
 
-/* Get interval memory bandwidth (MB/s) */
-unsigned long long get_interval_mem_bw(void);
+/* Get interval memory bandwidth (MiB/s) */
+double get_interval_mem_bw(void);
 
 /* Check if memory bandwidth is supported */
 int get_mem_bw_support(void);
+const char *get_mem_bw_source_path(void);
+int get_mem_bw_candidate_count(void);
 
-/* Raw counter reading */
-unsigned long long read_mem_bw_raw(void);
+/* Checked raw counter read. Returns 0 on success, -1 if unavailable. */
+int read_mem_bw_raw_checked(unsigned long long *counter);
 
 #endif /* ARMSTAT_POWER_H */

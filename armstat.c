@@ -22,6 +22,7 @@
 #include "collector.h"
 #include "aggregator.h"
 #include "formatter.h"
+#include "formatter_section.h"
 #include "topology.h"
 #include "power.h"
 #include "pmu.h"
@@ -29,6 +30,9 @@
 #include "cpu_inventory.h"
 #include "sysstat.h"
 #include "idle_backend.h"
+#include "sampling_deadline.h"
+
+#define PROBE_SCHEMA_VERSION 1
 
 /* ============================================================================
  * MODULE INITIALIZATION
@@ -42,6 +46,22 @@ static void signal_handler(int sig)
 	done = 1;
 }
 
+static int ignore_sigpipe(void)
+{
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_IGN;
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGPIPE, &sa, NULL) < 0) {
+		fprintf(stderr, "Error: failed to ignore SIGPIPE: %s\n",
+			strerror(errno));
+		return -1;
+	}
+
+	return 0;
+}
+
 static int open_output_stream(const char *output_file)
 {
 	if (!output_file)
@@ -49,18 +69,28 @@ static int open_output_stream(const char *output_file)
 
 	FILE *outfp = fopen(output_file, "w");
 	if (!outfp) {
-		fprintf(stderr, "Cannot open %s: %s\n",
+		fprintf(stderr, "Error: cannot open output file %s: %s\n",
 			output_file, strerror(errno));
 		return -1;
 	}
 
 	if (dup2(fileno(outfp), fileno(stdout)) < 0) {
-		fprintf(stderr, "Cannot redirect stdout to %s: %s\n",
+		fprintf(stderr, "Error: cannot redirect stdout to %s: %s\n",
 			output_file, strerror(errno));
 		fclose(outfp);
 		return -1;
 	}
 	fclose(outfp);
+	return 0;
+}
+
+static int finalize_stdout_output(void)
+{
+	if (fflush(stdout) == EOF || ferror(stdout)) {
+		fprintf(stderr, "Error: failed to finalize output: %s\n",
+			strerror(errno ? errno : EIO));
+		return -1;
+	}
 	return 0;
 }
 
@@ -112,10 +142,9 @@ static const char *probe_idle_backend_name(void)
 static int run_probe(struct armstat_options *opts)
 {
 	int pmu_available = 0;
+	int status = -1;
+	long long package_power_mw;
 	const char *idle_backend_name;
-
-	if (open_output_stream(opts->output_file) < 0)
-		return -1;
 
 	if (init_collector() < 0) {
 		fprintf(stderr, "Error: Failed to init collector for probe\n");
@@ -128,12 +157,16 @@ static int run_probe(struct armstat_options *opts)
 
 	idle_backend_name = probe_idle_backend_name();
 
-	if (init_pmu_events("cycles") == 0) {
+	if (probe_pmu_event("cycles") == 0) {
 		pmu_available = 1;
 	}
-	close_pmu_events();
+
+	/* Do not truncate an existing output until platform probing can run. */
+	if (open_output_stream(opts->output_file) < 0)
+		goto out;
 
 	printf("armstat probe\n");
+	printf("  probe_schema_version: %d\n", PROBE_SCHEMA_VERSION);
 	printf("  online_cpus: %d\n", cpu_catalog_online_count());
 	printf("  tracked_cpus: %d\n", cpu_catalog_tracked_count());
 	printf("  sockets: %d\n", get_socket_count());
@@ -158,23 +191,45 @@ static int run_probe(struct armstat_options *opts)
 			       uncore_freq_hz / 1000000.0);
 		}
 	}
-	printf("  package_power_mw: %lld\n", get_total_power());
-	printf("  numa_temp_sensors: %d\n", get_temp_numa_count());
+	if (read_total_power_mw(&package_power_mw) == 0)
+		printf("  package_power_mw: %lld\n", package_power_mw);
+	else
+		printf("  package_power_mw: unavailable\n");
+	if (get_package_power_source_path())
+		printf("  package_power_source: %s\n",
+		       get_package_power_source_path());
+	printf("  package_power_candidates: %d\n",
+	       get_package_power_candidate_count());
+	if (get_package_power_candidate_count() > 1)
+		printf("  package_power_note: ambiguous; expected exactly one "
+		       "power_meter/power1_average source\n");
+	printf("  numa_temp_sensors: %d\n", get_temp_numa_sensor_count());
+	printf("  numa_temp_mask: 0x%08x\n", get_temp_numa_mask());
 	printf("  summary_temp_policy: %s\n", get_summary_temp_policy_name());
 	printf("  per_core_power: %s\n",
 	       probe_yes_no(get_per_core_power_support()));
 	printf("  mem_bw_supported: %s\n",
 	       probe_yes_no(get_mem_bw_support()));
+	if (get_mem_bw_source_path())
+		printf("  mem_bw_source: %s\n", get_mem_bw_source_path());
+	printf("  mem_bw_candidates: %d\n", get_mem_bw_candidate_count());
+	if (get_mem_bw_candidate_count() > 1)
+		printf("  mem_bw_note: ambiguous; expected exactly one "
+		       "mem_bytes_read source\n");
 	printf("  pmu_cycles: %s\n", probe_yes_no(pmu_available));
 	if (!pmu_available)
-		printf("  pmu_note: requires root or permissive perf_event_paranoid; "
-		       "see perf_event_open(2)\n");
+		printf("  pmu_note: unavailable; check perf permissions, kernel PMU "
+		       "support, and perf_event_open(2)\n");
+	if (finalize_stdout_output() < 0)
+		goto out;
+	status = 0;
 
+out:
 	close_topology();
 	close_pmu_events();
 	close_sysstat_fds();
 	cleanup_collector();
-	return 0;
+	return status;
 }
 
 /*
@@ -183,9 +238,6 @@ static int run_probe(struct armstat_options *opts)
 static int init_modules(struct armstat_options *opts, struct sys_snapshot *snapshot)
 {
 	int original_priority;
-
-	if (open_output_stream(opts->output_file) < 0)
-		return -1;
 
 	/* Initialize subsystems */
 	if (opts->debug) fprintf(stderr, "Initializing collector...\n");
@@ -220,7 +272,7 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	update_temp_field_visibility();
 
 	/* Initialize PMU if requested */
-	if (opts->pmu_events) {
+	if (opts->pmu_events && (is_pmu_enabled() || is_ipc_enabled())) {
 		if (opts->debug) fprintf(stderr, "Initializing PMU: %s\n", opts->pmu_events);
 		if (init_pmu_events(opts->pmu_events) < 0) {
 			fprintf(stderr, "Warning: PMU init failed; PMU columns will be shown as unavailable\n");
@@ -231,21 +283,32 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 		}
 	}
 
+	if (!section_has_output()) {
+		fprintf(stderr,
+			"Error: selected columns cannot produce data in this mode/platform\n"
+			"  Use --list for field scopes and --probe for platform capabilities.\n");
+		return -1;
+	}
+
 	/* Setup signal handlers with sigaction for consistent SA_RESTART */
 	{
 		struct sigaction sa;
 		sa.sa_handler = signal_handler;
 		sigemptyset(&sa.sa_mask);
 		sa.sa_flags = SA_RESTART;
-		sigaction(SIGINT, &sa, NULL);
-		sigaction(SIGTERM, &sa, NULL);
+		if (sigaction(SIGINT, &sa, NULL) < 0 ||
+		    sigaction(SIGTERM, &sa, NULL) < 0) {
+			fprintf(stderr, "Error: failed to install signal handlers: %s\n",
+				strerror(errno));
+			return -1;
+		}
 	}
 
 	/*
 	 * Like turbostat, best-effort elevate our own priority for interval
 	 * mode. Ignore failure; lack of privilege is common and not fatal.
 	 */
-	#define SAMPLING_NICE_VALUE (-20)  /* highest real-time priority, matching turbostat */
+	#define SAMPLING_NICE_VALUE (-20)  /* highest normal nice priority */
 
 	original_priority = boost_sampling_priority(SAMPLING_NICE_VALUE);
 	if (opts->debug) {
@@ -256,11 +319,11 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 				original_priority);
 	}
 
-	/* Print interval header */
-	print_interval_header(opts, opts->interval);
-
 	/* Phase 1: Establish baseline */
-	collect_snapshot(snapshot);
+	if (collect_snapshot(snapshot) < 0) {
+		fprintf(stderr, "Error: failed to collect baseline snapshot\n");
+		return -1;
+	}
 
 	/* Setup formatter pool after we know the CPU count */
 	setup_formatter_pool(sys_snapshot_get_effective_cpu_count(snapshot));
@@ -275,6 +338,13 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 		calculate_interval_stats(snapshot, &baseline_stats);
 	}
 
+	/* Preserve an existing output file unless initialization fully succeeds. */
+	if (open_output_stream(opts->output_file) < 0)
+		return -1;
+
+	/* Print interval header only after stdout is on its final destination. */
+	print_interval_header(opts, opts->interval);
+
 	return 0;
 }
 
@@ -288,42 +358,108 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 
 /*
  * Sleep for the requested interval, retrying on signal interruption.
- * Returns 1 if the caller should abort (done flag set), 0 if sleep completed.
+ * Returns 1 if the caller should abort (done flag set), 0 if sleep completed,
+ * or -1 on an unrecoverable sleep error.
  */
 static int safe_interval_sleep(const struct timespec *ts)
 {
 	struct timespec remaining = *ts;
 
 	while (!done && nanosleep(&remaining, &remaining) == -1) {
-		if (errno != EINTR)
-			return 0;
+		if (errno != EINTR) {
+			fprintf(stderr, "Error: interval sleep failed: %s\n",
+				strerror(errno));
+			return -1;
+		}
 	}
 	return done ? 1 : 0;
 }
 
-static void run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
+static int monotonic_now_ns(unsigned long long *now_ns)
+{
+	struct timespec ts;
+
+	if (!now_ns)
+		return -1;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
+		fprintf(stderr, "Error: clock_gettime(CLOCK_MONOTONIC) failed: %s\n",
+			strerror(errno));
+		return -1;
+	}
+	*now_ns = (unsigned long long)ts.tv_sec * 1000000000ULL +
+		  (unsigned long long)ts.tv_nsec;
+	return 0;
+}
+
+static int safe_sleep_until(unsigned long long deadline_ns)
+{
+	unsigned long long now_ns;
+	unsigned long long remaining_ns;
+	struct timespec remaining;
+
+	if (monotonic_now_ns(&now_ns) < 0)
+		return -1;
+	if (now_ns >= deadline_ns)
+		return done ? 1 : 0;
+
+	remaining_ns = deadline_ns - now_ns;
+	remaining.tv_sec = (time_t)(remaining_ns / 1000000000ULL);
+	remaining.tv_nsec = (long)(remaining_ns % 1000000000ULL);
+	return safe_interval_sleep(&remaining);
+}
+
+static int advance_sampling_deadline(unsigned long long *deadline_ns,
+				     unsigned long long interval_ns)
+{
+	unsigned long long now_ns;
+
+	if (monotonic_now_ns(&now_ns) < 0)
+		return -1;
+	if (sampling_deadline_advance(deadline_ns, interval_ns, now_ns) < 0) {
+		fprintf(stderr, "Error: sampling deadline overflow\n");
+		return -1;
+	}
+	return 0;
+}
+
+static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 {
 	struct interval_stats stats;
-	struct timespec ts;
 	struct interval_record *rec;
+	unsigned long long interval_ns;
+	unsigned long long next_deadline_ns;
 	int iteration = 1;
+	int sleep_result;
+	int status = 0;
 
 	/* -D overrides -n: always dump exactly one interval */
 	if (opts->dump_once)
 		opts->iterations = 1;
 
-	/* Wait for first interval */
-	ts.tv_sec = (time_t)opts->interval;
-	ts.tv_nsec = (long)((opts->interval - (double)ts.tv_sec) * 1000000000.0 + 0.5);
-	if (ts.tv_nsec >= 1000000000L) {
-		ts.tv_sec++;
-		ts.tv_nsec -= 1000000000L;
+	interval_ns = (unsigned long long)(opts->interval * 1000000000.0 + 0.5);
+	if (interval_ns == 0)
+		interval_ns = 1;
+	if (sampling_deadline_init(snapshot->sample_monotonic_ns, interval_ns,
+				   &next_deadline_ns) < 0) {
+		fprintf(stderr, "Error: sampling deadline overflow\n");
+		return -1;
 	}
-	if (safe_interval_sleep(&ts)) return;
+
+	/* Wait for the first deadline measured from the baseline snapshot. */
+	sleep_result = safe_sleep_until(next_deadline_ns);
+	if (sleep_result != 0) {
+		if (sleep_result < 0)
+			status = -1;
+		goto out;
+	}
 
 	while (!done) {
 		/* Collect raw data */
-		collect_snapshot(snapshot);
+		if (collect_snapshot(snapshot) < 0) {
+			fprintf(stderr, "Error: sampling stopped after collector failure\n");
+			status = -1;
+			break;
+		}
 
 		/*
 		 * A zero-length interval means we are still on the initial baseline
@@ -333,7 +469,20 @@ static void run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot
 		 * incomplete baseline.
 		 */
 		if (sys_snapshot_get_interval_delta_us(snapshot) == 0) {
-			if (safe_interval_sleep(&ts)) break;
+			/* Consume the rebuilt snapshot as the new internal baseline. */
+			calculate_interval_stats(snapshot, &stats);
+			next_deadline_ns = snapshot->sample_monotonic_ns;
+			if (advance_sampling_deadline(&next_deadline_ns,
+						      interval_ns) < 0) {
+				status = -1;
+				break;
+			}
+			sleep_result = safe_sleep_until(next_deadline_ns);
+			if (sleep_result != 0) {
+				if (sleep_result < 0)
+					status = -1;
+				break;
+			}
 			continue;
 		}
 
@@ -342,33 +491,57 @@ static void run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot
 
 		/* Output — dispatch directly to the serializer for this format */
 		rec = build_interval_record(snapshot, &stats, iteration);
-		if (rec) {
-			switch (opts->format) {
-			case FORMAT_JSON:
-				serialize_json(rec, iteration);
-				break;
-			case FORMAT_CSV:
-				serialize_csv(rec);
-				break;
-			default:
-				serialize_text(rec, iteration);
-				break;
-			}
-			free_interval_record(rec);
+		if (!rec) {
+			fprintf(stderr, "Error: failed to build interval output record\n");
+			status = -1;
+			break;
+		}
+
+		switch (opts->format) {
+		case FORMAT_JSON:
+			serialize_json(rec, iteration);
+			break;
+		case FORMAT_CSV:
+			serialize_csv(rec);
+			break;
+		default:
+			serialize_text(rec, iteration);
+			break;
+		}
+		free_interval_record(rec);
+
+		if (fflush(stdout) == EOF || ferror(stdout)) {
+			status = -1;
+			break;
 		}
 
 		/* Check exit condition */
 		if (opts->iterations > 0 && iteration >= opts->iterations)
 			break;
 
-		/* Sleep before next sample */
-		if (safe_interval_sleep(&ts)) break;
+		/* Hold an absolute cadence instead of accumulating output overhead. */
+		if (advance_sampling_deadline(&next_deadline_ns, interval_ns) < 0) {
+			status = -1;
+			break;
+		}
+		sleep_result = safe_sleep_until(next_deadline_ns);
+		if (sleep_result != 0) {
+			if (sleep_result < 0)
+				status = -1;
+			break;
+		}
 		iteration++;
 	}
 
+out:
 	/* Close output format (close the JSON array) */
 	if (opts->format == FORMAT_JSON)
 		close_machine_json();
+
+	if (finalize_stdout_output() < 0)
+		status = -1;
+
+	return status;
 }
 
 /* ============================================================================
@@ -399,11 +572,25 @@ int main(int argc, char *argv[])
 	struct armstat_options opts = default_options;
 	struct sys_snapshot snapshot;
 	int parse_result;
+	int run_result;
+
+	/* Turn a closed output pipe into a checked EPIPE and orderly cleanup. */
+	if (ignore_sigpipe() < 0)
+		return 1;
 
 	/* Parse command line */
 	parse_result = parse_args(argc, argv, &opts);
-	if (parse_result)
-		return parse_result < 0 ? 1 : 0;  /* Exited early */
+	if (parse_result) {
+		if (parse_result < 0)
+			return 1;
+		return finalize_stdout_output() < 0 ? 1 : 0;
+	}
+
+	/* Listing static metadata does not probe the host platform. */
+	if (opts.list_counters) {
+		list_counters();
+		return finalize_stdout_output() < 0 ? 1 : 0;
+	}
 
 #if !defined(__aarch64__) || !defined(__linux__)
 	fprintf(stderr,
@@ -411,13 +598,8 @@ int main(int argc, char *argv[])
 		"will be unavailable on other platforms.\n");
 #endif
 
-	apply_default_pmu_events(&opts);
-
-	/* List counters and exit */
-	if (opts.list_counters) {
-		list_counters();
-		return 0;
-	}
+	if (apply_default_pmu_events(&opts) < 0)
+		return 1;
 
 	if (opts.probe_only)
 		return run_probe(&opts) < 0 ? 1 : 0;
@@ -429,10 +611,10 @@ int main(int argc, char *argv[])
 	}
 
 	/* Run main sampling loop */
-	run_loop(&opts, &snapshot);
+	run_result = run_loop(&opts, &snapshot);
 
 	/* Cleanup */
 	cleanup_modules(&opts);
 
-	return 0;
+	return run_result < 0 ? 1 : 0;
 }

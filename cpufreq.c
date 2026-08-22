@@ -17,6 +17,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "cpufreq.h"
 #include "collector.h"
@@ -133,7 +134,7 @@ int read_cpu_freq(int tracked_idx, unsigned int *freq)
 	unsigned int freq_khz = 0;
 	int cpu_id;
 
-	if (tracked_idx < 0 || tracked_idx >= cpu_count)
+	if (!freq || tracked_idx < 0 || tracked_idx >= cpu_count)
 		return -1;
 
 	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
@@ -154,15 +155,23 @@ int read_cpu_freq(int tracked_idx, unsigned int *freq)
 			}
 		}
 
-		if (fd >= 0)
-			freq_khz = (fd_read_ull_checked(fd, &freq_raw) == 0)
-				? (unsigned int)freq_raw : 0;
+		if (fd >= 0) {
+			if (fd_read_ull_checked(fd, &freq_raw) == 0 &&
+			    freq_raw > 0 && freq_raw <= UINT_MAX) {
+				freq_khz = (unsigned int)freq_raw;
+			} else {
+				close(fd);
+				cur_freq_fds[tracked_idx] = -1;
+				cur_freq_fd_open_count--;
+			}
+		}
 	}
 
 	if (freq_khz == 0) {
 		cpu_sysfs_path(cpu_id, "cpufreq/scaling_cur_freq",
 			       path, sizeof(path));
-		if (sysfs_read_ull_checked(path, &freq_raw) == 0)
+		if (sysfs_read_ull_checked(path, &freq_raw) == 0 &&
+		    freq_raw > 0 && freq_raw <= UINT_MAX)
 			freq_khz = (unsigned int)freq_raw;
 	}
 	if (freq_khz == 0)
@@ -172,29 +181,38 @@ int read_cpu_freq(int tracked_idx, unsigned int *freq)
 	return 0;
 }
 
-int read_cpu_min_max_freq(int tracked_idx, unsigned int *min, unsigned int *max)
+int read_cpu_min_max_freq_checked(int tracked_idx,
+				  unsigned int *min, int *min_valid,
+				  unsigned int *max, int *max_valid)
 {
 	char path[CPUFREQ_SYSFS_PATH_LEN];
 	unsigned long long raw = 0;
 	int cpu_id;
+
+	if (!min || !min_valid || !max || !max_valid)
+		return -1;
+	*min = 0;
+	*max = 0;
+	*min_valid = 0;
+	*max_valid = 0;
 
 	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
 	if (cpu_id < 0)
 		return -1;
 
 	cpu_sysfs_path(cpu_id, "cpufreq/scaling_min_freq", path, sizeof(path));
-	if (sysfs_read_ull_checked(path, &raw) == 0)
+	if (sysfs_read_ull_checked(path, &raw) == 0 && raw <= UINT_MAX) {
 		*min = (unsigned int)raw;
-	else
-		*min = 0;
+		*min_valid = 1;
+	}
 
 	cpu_sysfs_path(cpu_id, "cpufreq/scaling_max_freq", path, sizeof(path));
-	if (sysfs_read_ull_checked(path, &raw) == 0)
+	if (sysfs_read_ull_checked(path, &raw) == 0 && raw <= UINT_MAX) {
 		*max = (unsigned int)raw;
-	else
-		*max = 0;
+		*max_valid = 1;
+	}
 
-	return 0;
+	return *min_valid || *max_valid ? 0 : -1;
 }
 
 int read_cpu_governor(int tracked_idx, char *governor, size_t len)
@@ -203,6 +221,9 @@ int read_cpu_governor(int tracked_idx, char *governor, size_t len)
 	char gov_buf[32];
 	char *gov;
 	int cpu_id;
+
+	if (!governor || len == 0)
+		return -1;
 
 	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
 	if (cpu_id < 0)
@@ -230,7 +251,7 @@ int read_cpu_boost(int tracked_idx, int *boost)
 
 	/* Try per-CPU boost file first */
 	cpu_sysfs_path(cpu_id, "cpufreq/boost", path, sizeof(path));
-	if (sysfs_read_ull_checked(path, &value) == 0) {
+	if (sysfs_read_ull_checked(path, &value) == 0 && value <= 1) {
 		*boost = (int)value;
 		return 0;
 	}
@@ -238,7 +259,7 @@ int read_cpu_boost(int tracked_idx, int *boost)
 	/* Fall back to global boost file */
 	snprintf(path, sizeof(path),
 		 "/sys/devices/system/cpu/cpufreq/boost");
-	if (sysfs_read_ull_checked(path, &value) == 0) {
+	if (sysfs_read_ull_checked(path, &value) == 0 && value <= 1) {
 		*boost = (int)value;
 		return 0;
 	}
@@ -249,6 +270,7 @@ int read_cpu_boost(int tracked_idx, int *boost)
 int read_uncore_freq(unsigned long long *freq_hz)
 {
 	unsigned long long value = 0;
+	int read_ok = 0;
 
 	if (!freq_hz || !uncore_freq_available || uncore_freq_path[0] == '\0')
 		return -1;
@@ -256,13 +278,20 @@ int read_uncore_freq(unsigned long long *freq_hz)
 	if (uncore_freq_fd < 0)
 		uncore_freq_fd = open(uncore_freq_path, O_RDONLY);
 
-	if (uncore_freq_fd >= 0)
-		fd_read_ull_checked(uncore_freq_fd, &value);
+	if (uncore_freq_fd >= 0) {
+		if (fd_read_ull_checked(uncore_freq_fd, &value) == 0 && value > 0) {
+			read_ok = 1;
+		} else {
+			close(uncore_freq_fd);
+			uncore_freq_fd = -1;
+		}
+	}
 
-	if (value == 0)
-		sysfs_read_ull_checked(uncore_freq_path, &value);
+	if (!read_ok && sysfs_read_ull_checked(uncore_freq_path, &value) == 0 &&
+	    value > 0)
+		read_ok = 1;
 
-	if (value == 0)
+	if (!read_ok)
 		return -1;
 
 	*freq_hz = value;
@@ -302,6 +331,11 @@ int init_cpufreq(void)
 	return 0;
 }
 
+int get_cpufreq_tracked_count(void)
+{
+	return cpu_count;
+}
+
 void close_cpufreq(void)
 {
 	if (cur_freq_fds) {
@@ -321,4 +355,5 @@ void close_cpufreq(void)
 	uncore_freq_available = 0;
 	uncore_freq_path[0] = '\0';
 	uncore_freq_device[0] = '\0';
+	cpu_count = 0;
 }

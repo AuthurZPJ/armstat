@@ -23,6 +23,10 @@
 #include "formatter.h"
 #include "formatter_section.h"
 #include "pmu.h"
+
+#ifndef ARMSTAT_VERSION
+#define ARMSTAT_VERSION "development"
+#endif
 #include "cpuidle.h"
 #include "idle_backend.h"
 #include "power.h"
@@ -80,7 +84,7 @@ static struct option long_options[] = {
 
 static void print_version(void)
 {
-	printf("armstat version 1.0\n");
+	printf("armstat version %s\n", ARMSTAT_VERSION);
 	printf("ARM Server performance monitoring tool\n");
 	printf("\n");
 	printf("License GPLv2: GNU GPL version 2\n");
@@ -92,14 +96,14 @@ static void print_help(void)
 	printf("\n");
 	printf("Options:\n");
 	printf("  -i, --interval <sec>   Measurement interval (default: 1.0)\n");
-	printf("  -n, --num-iterations   Number of iterations\n");
-	printf("  -N, --header-iterations Reprint text header every N intervals\n");
+	printf("  -n, --num-iterations <count> Samples to print (0 = unlimited)\n");
+	printf("  -N, --header-iterations <count> Reprint text header every N samples (0 = first only)\n");
 	printf("  -c, --cpu <list>       Real CPU IDs to monitor (e.g. 0,1,4-7)\n");
 	printf("  -B, --busy-source <src> Busy/Idle source hint: auto, procstat, schedstat, task-clock\n");
-	printf("  -o, --output <file>    Output file\n");
-	printf("  -O, --export <file>    Export text/json/csv output to file\n");
-	printf("  -q, --quiet            Quiet mode\n");
-	printf("  -D, --dump             Dump once and exit\n");
+	printf("  -o, --output <file>    Write output to file\n");
+	printf("  -O, --export <file>    Alias for --output\n");
+	printf("  -q, --quiet            Suppress text banner and headers\n");
+	printf("  -D, --dump             Collect one complete interval and exit\n");
 	printf("  -S, --summary          Summary mode (SUM only)\n");
 	printf("  -a, --all              Enable all supported base column groups (use -I for IPC, -p for PMU)\n");
 	printf("  -f, --format <fmt>     Output format: text, json, csv\n");
@@ -108,11 +112,11 @@ static void print_help(void)
 	printf("  -p, --pmu-events <evts> Enable PMU events\n");
 	printf("  -I, --ipc              Enable cycles,instructions PMU + IPC columns\n");
 	printf("  -J, --joules           Show interval energy in Joules\n");
-	printf("  -l, --list             List built-in column groups and PMU events\n");
+	printf("  -l, --list             List groups, exact fields, and PMU events\n");
 	printf("  -P, --probe            Probe current platform capabilities and sources\n");
 	printf("  -d, --debug            Enable debug output\n");
 	printf("  -v, --version          Show version\n");
-	printf("  -?, --help             Show help\n");
+	printf("  -h, --help             Show help\n");
 	printf("\n");
 	printf("Column groups:\n");
 	printf("  cpu\n");
@@ -131,8 +135,43 @@ static void print_help(void)
 	printf("  all\n");
 }
 
+static const char *field_scope_name(enum field_scope scope)
+{
+	switch (scope) {
+	case FIELD_SCOPE_SYSTEM:
+		return "summary";
+	case FIELD_SCOPE_PACKAGE:
+		return "package";
+	case FIELD_SCOPE_CPU:
+		return "cpu";
+	default:
+		return "unknown";
+	}
+}
+
+static const char *field_type_name(enum field_type type)
+{
+	switch (type) {
+	case FIELD_TYPE_INT:
+		return "int";
+	case FIELD_TYPE_LLONG:
+		return "int64";
+	case FIELD_TYPE_DOUBLE:
+		return "number";
+	case FIELD_TYPE_STRING:
+		return "string";
+	case FIELD_TYPE_BOOL:
+		return "boolean";
+	default:
+		return "unknown";
+	}
+}
+
 void list_counters(void)
 {
+	struct field_desc *fields = get_all_fields();
+	int field_count = get_field_count();
+
 	printf("Built-in column groups:\n");
 	printf("  cpu\n");
 	printf("  pkg, package\n");
@@ -150,23 +189,46 @@ void list_counters(void)
 	printf("  all\n");
 	printf("\n");
 	printf("Use lowercase names with -s/-H (e.g. -s cpu,freq,power).\n");
-	printf("Exact field names like Idle%%, Busy%%, LPI-0 are also accepted.\n");
+	printf("\nExact fields (stable ID; scope; type; unit; text label; JSON key):\n");
+	for (int i = 0; i < field_count; i++) {
+		printf("  %-24s [%-7s] type=%-7s unit=%-18s text=%-12s json=%s\n",
+		       fields[i].id ? fields[i].id : "",
+		       field_scope_name(fields[i].scope),
+		       field_type_name(fields[i].type),
+		       fields[i].unit && fields[i].unit[0] ? fields[i].unit : "-",
+		       fields[i].label ? fields[i].label : "",
+		       fields[i].json_label ? fields[i].json_label : "");
+	}
+	printf("Stable IDs are unambiguous exact -s/-H tokens; labels and JSON keys also work when they do not collide with group aliases.\n");
+	printf("Machine output uses JSON null / empty CSV cells for unavailable values.\n");
+	printf("\n");
 	printf("Built-in PMU events:\n");
 	list_builtin_pmu_events();
 }
 
 /*
  * Print the startup banner for text mode. Suppressed for machine-readable
- * formats and for -q / -D (quiet). Declared in armstat_cli.h.
+ * formats and for explicit -q. Declared in armstat_cli.h.
  */
 void print_interval_header(const struct armstat_options *opts, double interval)
 {
+	char interval_text[64];
+	char *end;
+
 	if (opts->format == FORMAT_JSON || opts->format == FORMAT_CSV)
 		return;
 	if (opts->quiet)
 		return;
+
+	snprintf(interval_text, sizeof(interval_text), "%.6f", interval);
+	end = interval_text + strlen(interval_text);
+	while (end > interval_text && end[-1] == '0')
+		*--end = '\0';
+	if (end > interval_text && end[-1] == '.')
+		*--end = '\0';
+
 	printf("armstat - ARM Server Performance Monitor\n");
-	printf("Sampling interval: %.1f second(s)\n", interval);
+	printf("Sampling interval: %s second(s)\n", interval_text);
 	printf("\n");
 }
 
@@ -178,7 +240,7 @@ struct column_alias_group {
 	void (*set_visible)(int enable);
 };
 
-void parse_column_option(const char *arg, int enable);
+int parse_column_option(const char *arg, int enable);
 
 /* Track unmatched tokens for whitelist validation */
 static int unknown_column_count;
@@ -261,15 +323,17 @@ void set_all_columns_enabled(int enable)
 static int parse_positive_double_arg(const char *option, const char *arg,
 				     double *value)
 {
+	const double min_interval = 0.000001;
 	char *end = NULL;
 	double parsed;
 
 	errno = 0;
 	parsed = strtod(arg, &end);
 	if (errno || end == arg || (end && *end) ||
-	    !isfinite(parsed) || parsed <= 0.0 || parsed > 31536000.0) {
-		fprintf(stderr, "Error: %s requires a positive number: %s\n",
-			option, arg ? arg : "");
+	    !isfinite(parsed) || parsed < min_interval || parsed > 31536000.0) {
+		fprintf(stderr,
+			"Error: %s requires a value from %.6f to 31536000 seconds: %s\n",
+			option, min_interval, arg ? arg : "");
 		return -1;
 	}
 
@@ -316,19 +380,19 @@ static int apply_busy_source_option(struct armstat_options *opts, const char *ar
 	return 0;
 }
 
-static int apply_show_option(const char *arg)
+static int apply_show_option(const char *arg, int reset_selection)
 {
-	/* Show whitelist: clear all, then enable specified */
+	/* The first -s starts a whitelist; repeated -s options extend it. */
 	if (!arg || !*arg) {
 		fprintf(stderr, "Error: --show requires at least one column group or field name\n");
 		return -1;
 	}
-	clear_columns();
+	if (reset_selection)
+		clear_columns();
 	unknown_column_count = 0;
-	parse_column_option(arg, 1);
-	set_section_default_summary_output(1);
-	if (unknown_column_count > 0)
+	if (parse_column_option(arg, 1) < 0)
 		return -1;
+	set_section_default_summary_output(1);
 	return 0;
 }
 
@@ -340,8 +404,7 @@ static int apply_hide_option(const char *arg)
 		return -1;
 	}
 	unknown_column_count = 0;
-	parse_column_option(arg, 0);
-	if (unknown_column_count > 0)
+	if (parse_column_option(arg, 0) < 0)
 		return -1;
 	return 0;
 }
@@ -375,7 +438,25 @@ static int apply_format_option(struct armstat_options *opts, const char *arg)
 /*
  * Parse column visibility string (for -s/-H options)
  */
-void parse_column_option(const char *arg, int enable)
+static int column_list_has_empty_token(const char *list)
+{
+	int need_value = 1;
+
+	for (const char *p = list; p && *p; p++) {
+		if (*p == ',') {
+			if (need_value)
+				return 1;
+			need_value = 1;
+			continue;
+		}
+		if (*p != ' ' && *p != '\t')
+			need_value = 0;
+	}
+
+	return need_value;
+}
+
+int parse_column_option(const char *arg, int enable)
 {
 	static const char *const cpu_aliases[] = {"cpu"};
 	static const char *const package_aliases[] = {"pkg", "package"};
@@ -408,13 +489,18 @@ void parse_column_option(const char *arg, int enable)
 	char *arg_copy, *token, *saveptr = NULL;
 	struct field_desc *fields = get_all_fields();
 	int field_count = get_field_count();
+	int all_selected = 0;
 
-	if (!arg || !*arg)
-		return;
+	if (!arg || !*arg || column_list_has_empty_token(arg)) {
+		fprintf(stderr, "Error: column list contains an empty token\n");
+		return -1;
+	}
 
 	arg_copy = strdup(arg);
-	if (!arg_copy)
-		return;
+	if (!arg_copy) {
+		fprintf(stderr, "Error: out of memory while parsing column list\n");
+		return -1;
+	}
 
 	for (token = strtok_r(arg_copy, ",", &saveptr);
 	     token;
@@ -434,6 +520,8 @@ void parse_column_option(const char *arg, int enable)
 		if (strcmp(token, "all") == 0) {
 			set_all_columns_enabled(enable);
 			clear_field_overrides();
+			if (enable)
+				all_selected = 1;
 			continue;
 		}
 
@@ -444,8 +532,9 @@ void parse_column_option(const char *arg, int enable)
 		for (int i = 0; i < ARRAY_SIZE(groups); i++) {
 			if (option_matches_alias_group(token, &groups[i])) {
 				groups[i].set_visible(enable);
-				set_group_field_overrides(groups[i].field_group_mask,
-							 enable, enable);
+				if (!(enable && all_selected))
+					set_group_field_overrides(groups[i].field_group_mask,
+								 enable, enable);
 				matched = 1;
 				break;
 			}
@@ -470,7 +559,10 @@ void parse_column_option(const char *arg, int enable)
 			 */
 			if (enable)
 				*fields[i].enabled_ptr = 1;
-			set_field_override_by_index(i, enable, enable);
+			if (enable && fields[i].scope == FIELD_SCOPE_PACKAGE)
+				enable_package(1);
+			if (!(enable && all_selected))
+				set_field_override_by_index(i, enable, enable);
 			matched = 1;
 
 			if (fields[i].series == FIELD_SERIES_IDLE_STATE &&
@@ -483,12 +575,13 @@ void parse_column_option(const char *arg, int enable)
 		}
 
 		if (!matched) {
-			fprintf(stderr, "Warning: unknown column group/field '%s'\n", token);
+			fprintf(stderr, "Error: unknown column group/field '%s'\n", token);
 			unknown_column_count++;
 		}
 	}
 
 	free(arg_copy);
+	return unknown_column_count > 0 ? -1 : 0;
 }
 
 /*
@@ -501,10 +594,12 @@ void parse_column_option(const char *arg, int enable)
 int parse_args(int argc, char *argv[], struct armstat_options *opts)
 {
 	int opt;
+	int energy_requested = 0;
+	int show_option_seen = 0;
 
 	set_cpu_inventory_filter(NULL);
 
-	while ((opt = getopt_long(argc, argv, "i:n:N:c:B:o:O:qDSf:s:H:df:p:lJIPv?a",
+	while ((opt = getopt_long(argc, argv, "i:n:N:c:B:o:O:qDSf:s:H:df:p:lJIPv?ah",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'i':
@@ -529,8 +624,6 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			break;
 		case 'D':
 			opts->dump_once = 1;
-			opts->quiet = 1;
-			set_text_quiet(1);
 			break;
 		case 'S':
 			opts->summary_mode = 1;
@@ -555,8 +648,21 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			opts->output_file = optarg;
 			break;
 		case 's':
-			if (apply_show_option(optarg) < 0)
+			if (apply_show_option(optarg, !show_option_seen) < 0)
 				return -1;
+			show_option_seen = 1;
+			/* Independent metric requests remain in the whitelist union. */
+			if (opts->pmu_events)
+				enable_pmu(1);
+			if (opts->ipc_requested) {
+				enable_pmu(1);
+				enable_ipc(1);
+				set_group_field_overrides(FIELD_GROUP_IPC, 1, 1);
+			}
+			if (energy_requested) {
+				enable_energy(1);
+				set_group_field_overrides(FIELD_GROUP_ENERGY, 1, 1);
+			}
 			break;
 		case 'H':
 			if (apply_hide_option(optarg) < 0)
@@ -570,11 +676,16 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			break;
 		case 'J':
 			/* Energy in Joules */
+			energy_requested = 1;
 			reset_energy();
 			enable_energy(1);
+			if (show_option_seen)
+				set_group_field_overrides(FIELD_GROUP_ENERGY, 1, 1);
 			break;
 		case 'I':
 			apply_ipc_option(opts);
+			if (show_option_seen)
+				set_group_field_overrides(FIELD_GROUP_IPC, 1, 1);
 			break;
 		case 'P':
 			opts->probe_only = 1;
@@ -614,7 +725,7 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 	return 0;  /* Continue execution */
 }
 
-void apply_default_pmu_events(struct armstat_options *opts)
+int apply_default_pmu_events(struct armstat_options *opts)
 {
 	/*
 	 * If the user explicitly asked for PMU/IPC columns but did not provide
@@ -630,8 +741,9 @@ void apply_default_pmu_events(struct armstat_options *opts)
 	 * existing -p events without duplicating.
 	 */
 	if (opts->ipc_requested && opts->pmu_events) {
-		static char merged[256];
+		static char merged[512];
 		int has_cycles = 0, has_instructions = 0;
+		int written = 0;
 		const char *p = opts->pmu_events;
 
 		while (*p) {
@@ -639,6 +751,10 @@ void apply_default_pmu_events(struct armstat_options *opts)
 			const char *end = p;
 			while (*end && *end != ',')
 				end++;
+			while (start < end && (*start == ' ' || *start == '\t'))
+				start++;
+			while (end > start && (end[-1] == ' ' || end[-1] == '\t'))
+				end--;
 			if ((end - start) == 6 && strncmp(start, "cycles", 6) == 0)
 				has_cycles = 1;
 			if ((end - start) == 12 && strncmp(start, "instructions", 12) == 0)
@@ -648,15 +764,24 @@ void apply_default_pmu_events(struct armstat_options *opts)
 
 		if (!has_cycles || !has_instructions) {
 			if (!has_cycles && !has_instructions)
-				snprintf(merged, sizeof(merged),
-					 "cycles,instructions,%s", opts->pmu_events);
+				written = snprintf(merged, sizeof(merged),
+						   "cycles,instructions,%s", opts->pmu_events);
 			else if (!has_cycles)
-				snprintf(merged, sizeof(merged),
-					 "cycles,%s", opts->pmu_events);
+				written = snprintf(merged, sizeof(merged),
+						   "cycles,%s", opts->pmu_events);
 			else
-				snprintf(merged, sizeof(merged),
-					 "instructions,%s", opts->pmu_events);
+				written = snprintf(merged, sizeof(merged),
+						   "instructions,%s", opts->pmu_events);
+			if (written < 0 || (size_t)written >= sizeof(merged)) {
+				fprintf(stderr, "Error: combined PMU event list is too long\n");
+				return -1;
+			}
 			opts->pmu_events = merged;
 		}
 	}
+
+	if (opts->pmu_events && validate_pmu_event_list(opts->pmu_events) < 0)
+		return -1;
+
+	return 0;
 }

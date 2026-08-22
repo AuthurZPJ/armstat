@@ -25,7 +25,7 @@ double get_cpu_freq_mhz(const struct interval_record *rec, int row_idx);
 double get_cpu_min_freq_mhz(const struct interval_record *rec, int row_idx);
 double get_cpu_max_freq_mhz(const struct interval_record *rec, int row_idx);
 const char *get_cpu_governor(const struct interval_record *rec, int row_idx);
-const char *get_cpu_boost(const struct interval_record *rec, int row_idx);
+int get_cpu_boost(const struct interval_record *rec, int row_idx);
 double get_cpu_busy_percent(const struct interval_record *rec, int row_idx);
 double get_cpu_idle_percent(const struct interval_record *rec, int row_idx);
 double get_cpu_iowait_percent(const struct interval_record *rec, int row_idx);
@@ -74,12 +74,12 @@ double get_summary_uncore_freq_mhz(const struct interval_record *rec, int row_id
 double get_summary_busy_percent(const struct interval_record *rec, int row_idx);
 double get_summary_idle_percent(const struct interval_record *rec, int row_idx);
 double get_summary_iowait_percent(const struct interval_record *rec, int row_idx);
-long long get_summary_power_mw(const struct interval_record *rec, int row_idx);
+double get_summary_power_mw(const struct interval_record *rec, int row_idx);
 double get_summary_energy_joules(const struct interval_record *rec, int row_idx);
-long long get_summary_mem_bw(const struct interval_record *rec, int row_idx);
-long long get_summary_ctx_switches(const struct interval_record *rec, int row_idx);
-long long get_summary_interrupts(const struct interval_record *rec, int row_idx);
-long long get_summary_soft_interrupts(const struct interval_record *rec, int row_idx);
+double get_summary_mem_bw(const struct interval_record *rec, int row_idx);
+double get_summary_ctx_switches(const struct interval_record *rec, int row_idx);
+double get_summary_interrupts(const struct interval_record *rec, int row_idx);
+double get_summary_soft_interrupts(const struct interval_record *rec, int row_idx);
 double get_summary_ipc(const struct interval_record *rec, int row_idx);
 
 /* Package-scope getters */
