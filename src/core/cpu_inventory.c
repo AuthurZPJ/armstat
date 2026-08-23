@@ -190,6 +190,8 @@ int parse_cpu_list_mask_with_total(const char *text, unsigned char *mask,
 	size_t range_count = 0;
 	size_t range_capacity = 0;
 	int count = 0;
+	int merged_start;
+	int merged_end;
 	long long total_count = 0;
 
 	if (count_out)
@@ -258,27 +260,27 @@ int parse_cpu_list_mask_with_total(const char *text, unsigned char *mask,
 		}
 	}
 
+	if (range_count == 0)
+		goto fail;
 	qsort(ranges, range_count, sizeof(*ranges), compare_cpu_range);
-	if (range_count > 0) {
-		int merged_start = ranges[0].start;
-		int merged_end = ranges[0].end;
+	merged_start = ranges[0].start;
+	merged_end = ranges[0].end;
 
-		for (size_t i = 1; i < range_count; i++) {
-			if (ranges[i].start <= merged_end) {
-				if (ranges[i].end > merged_end)
-					merged_end = ranges[i].end;
-				continue;
-			}
-			total_count += (long long)merged_end - merged_start + 1;
-			if (total_count > INT_MAX)
-				goto fail;
-			merged_start = ranges[i].start;
-			merged_end = ranges[i].end;
+	for (size_t i = 1; i < range_count; i++) {
+		if (ranges[i].start <= merged_end) {
+			if (ranges[i].end > merged_end)
+				merged_end = ranges[i].end;
+			continue;
 		}
 		total_count += (long long)merged_end - merged_start + 1;
 		if (total_count > INT_MAX)
 			goto fail;
+		merged_start = ranges[i].start;
+		merged_end = ranges[i].end;
 	}
+	total_count += (long long)merged_end - merged_start + 1;
+	if (total_count > INT_MAX)
+		goto fail;
 
 	free(ranges);
 	free(copy);

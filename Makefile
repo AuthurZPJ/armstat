@@ -9,6 +9,7 @@ PLATFORM_DIR	:= $(CODE_DIR)/platform
 OUTPUT_DIR	:= $(CODE_DIR)/output
 DOC_DIR		:= $(SRC_DIR)/docs
 MANPAGE		:= $(SRC_DIR)/man/armstat.8
+ARMSTAT_DATA_DIR = $(DESTDIR)$(PREFIX)/share/armstat
 BUILD_OUTPUT	:= $(CURDIR)
 PREFIX		?= /usr
 DESTDIR		?=
@@ -18,7 +19,7 @@ PROJECT_CPPFLAGS := -I$(APP_DIR) -I$(CORE_DIR) -I$(PLATFORM_DIR) \
 		    -I$(OUTPUT_DIR)
 COMMON_CFLAGS	:= -Wall -Wextra -Wformat=2 -Wundef -Wshadow \
 		   -Wstrict-prototypes -Wmissing-prototypes \
-		   -I../../../include -D_FILE_OFFSET_BITS=64 -MMD -MP
+		   -D_FILE_OFFSET_BITS=64 -MMD -MP
 DEFAULT_CFLAGS	:= -O2 $(COMMON_CFLAGS) -D_FORTIFY_SOURCE=2
 DEFAULT_LDFLAGS	:=
 DEBUG_CFLAGS	:= $(COMMON_CFLAGS) -g -O0 \
@@ -151,6 +152,13 @@ analyze:
 install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/armstat
+	install -m 755 scripts/plot_sum.py \
+		$(DESTDIR)$(PREFIX)/bin/armstat-plot-summary
+	install -m 755 scripts/plot_cpu.py \
+		$(DESTDIR)$(PREFIX)/bin/armstat-plot-cpu
+	install -d $(ARMSTAT_DATA_DIR)
+	install -m 644 scripts/plot_utils.py scripts/armstat_loader.py \
+		$(ARMSTAT_DATA_DIR)
 	install -d $(DESTDIR)$(PREFIX)/share/man/man8
 	install -m 644 $(MANPAGE) $(DESTDIR)$(PREFIX)/share/man/man8/armstat.8
 	install -d $(DESTDIR)$(PREFIX)/share/doc/armstat
@@ -159,13 +167,13 @@ install: $(TARGET)
 	install -d $(DESTDIR)$(PREFIX)/share/doc/armstat/docs
 	install -m 644 $(DOC_DIR)/REFERENCE.md $(DOC_DIR)/REFERENCE.zh-CN.md \
 		$(DESTDIR)$(PREFIX)/share/doc/armstat/docs
-	install -d $(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
-	install -m 755 scripts/plot_sum.py scripts/plot_cpu.py scripts/plot_utils.py scripts/armstat_loader.py \
-		$(DESTDIR)$(PREFIX)/share/doc/armstat/scripts
 
 .PHONY: uninstall
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/armstat
+	rm -f $(DESTDIR)$(PREFIX)/bin/armstat-plot-summary
+	rm -f $(DESTDIR)$(PREFIX)/bin/armstat-plot-cpu
+	rm -rf $(ARMSTAT_DATA_DIR)
 	rm -f $(DESTDIR)$(PREFIX)/share/man/man8/armstat.8
 	rm -rf $(DESTDIR)$(PREFIX)/share/doc/armstat
 
@@ -178,6 +186,7 @@ test: $(TARGET) $(TEST_BINS)
 	$(BUILD_OUTPUT)/tests/test_section_policy
 	ARMSTAT_BIN=$(TARGET) sh $(SRC_DIR)/tests/test_cli_smoke.sh
 	python3 $(SRC_DIR)/tests/test_plot_loaders.py
+	python3 $(SRC_DIR)/tests/test_plot_render.py
 	python3 $(SRC_DIR)/tests/test_csv_streaming.py
 	sh $(SRC_DIR)/tests/test_build.sh
 

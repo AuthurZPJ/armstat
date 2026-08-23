@@ -131,7 +131,7 @@ void set_idle_state_override(int state_idx, int enable, int whitelist)
 #define SUMMARY_IDLE_FIELD(idx)							\
 	{"sum_idle_state" #idx, idle_state_labels[idx], "lpi" #idx, "%",	\
 	 FIELD_SCOPE_SYSTEM, FIELD_TYPE_DOUBLE, 2, FIELD_GROUP_IDLE,		\
-	 FIELD_SERIES_IDLE_STATE, idx,					\
+	 FIELD_SERIES_IDLE_STATE_RESIDENCY, idx,				\
 	 &show_summary_idle_state[idx],					\
 	 .getter.get_double = get_summary_idle_state##idx}
 
@@ -145,14 +145,14 @@ void set_idle_state_override(int state_idx, int enable, int whitelist)
 #define CPU_IDLE_USAGE_FIELD(idx)						\
 	{"idle_state_usage" #idx, idle_state_usage_labels[idx], "lpi" #idx "_usage", "/s", \
 	 FIELD_SCOPE_CPU, FIELD_TYPE_DOUBLE, 2, FIELD_GROUP_IDLE,	\
-	 FIELD_SERIES_IDLE_STATE, idx,					\
+	 FIELD_SERIES_IDLE_STATE_USAGE, idx,					\
 	 &show_idle_state[idx],						\
 	 .getter.get_double = get_cpu_idle_state_usage##idx}
 
 #define CPU_IDLE_FIELD(idx)							\
 	{"idle_state" #idx, idle_state_labels[idx], "lpi" #idx, "%",		\
 	 FIELD_SCOPE_CPU, FIELD_TYPE_DOUBLE, 2, FIELD_GROUP_IDLE,		\
-	 FIELD_SERIES_IDLE_STATE, idx,					\
+	 FIELD_SERIES_IDLE_STATE_RESIDENCY, idx,				\
 	 &show_idle_state[idx],						\
 	 .getter.get_double = get_cpu_idle_state##idx}
 
@@ -349,7 +349,7 @@ static int field_is_effectively_enabled(int field_index)
 	    !has_uncore_freq_support())
 		return 0;
 
-	if (field->series == FIELD_SERIES_IDLE_STATE &&
+	if (field_series_is_idle_state(field->series) &&
 	    !*field->enabled_ptr)
 		return 0;
 
@@ -452,6 +452,23 @@ void get_enabled_fields(enum field_scope scope, struct field_desc **fields, int 
 	}
 }
 
+unsigned int get_enabled_series_mask(enum field_scope scope,
+				     enum field_series series)
+{
+	unsigned int mask = 0;
+
+	for (int i = 0; i < NUM_FIELDS; i++) {
+		if (all_fields[i].scope != scope || all_fields[i].series != series ||
+		    all_fields[i].series_index < 0 ||
+		    all_fields[i].series_index >= 32 ||
+		    !field_is_effectively_enabled(i))
+			continue;
+		mask |= 1U << all_fields[i].series_index;
+	}
+
+	return mask;
+}
+
 int field_is_scope_identity(const struct field_desc *field)
 {
 	return field && field->scope == FIELD_SCOPE_PACKAGE && field->id &&
@@ -508,15 +525,6 @@ void update_idle_state_visibility(void)
 		show_idle_state[i] = enabled;
 		show_summary_idle_state[i] = enabled;
 	}
-}
-
-int idle_state_columns_enabled(void)
-{
-	for (int i = 0; i < ARRAY_SIZE(show_idle_state); i++) {
-		if (show_idle_state[i] || show_summary_idle_state[i])
-			return 1;
-	}
-	return 0;
 }
 
 void enable_cpu(int e)    { show_cpu    = e; }

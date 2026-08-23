@@ -92,21 +92,17 @@ struct summary_data {
  * Interval record - unified intermediate model
  * Built from sys_snapshot + interval_stats, consumed by serializers
  *
- * The record owns all per-interval values (CPU rows, package rows, summary
- * idle-state residency, NUMA temps) so serializers never dereference the raw
- * snapshot or interval stats after build. Static identity fields (package,
- * core, numa_node) are looked up at output time via the topology caches.
+ * The record owns all selected per-interval values (CPU rows, package rows,
+ * summary idle-state residency, NUMA temps) so serializers never dereference
+ * the raw snapshot or interval stats after build. Unselected row scopes are
+ * not materialized. Static identity fields (package, core, numa_node) are
+ * looked up at output time via the topology caches.
  */
 struct interval_record {
 	unsigned long long interval;
 	time_t timestamp;
 	unsigned long long timestamp_ns;
 	unsigned long long duration_us; /* Measured monotonic interval duration */
-
-	/* CPU info */
-	int cpu_count;           /* Tracked CPU count */
-	int cpu_count_filtered;  /* Tracked count after --cpu sampling filter */
-	int cpu_truncated;       /* Truncation warning flag */
 
 	/* PMU event count - global, used for column alignment in text/CSV */
 	int pmu_event_count;
@@ -167,7 +163,7 @@ void serialize_csv(const struct interval_record *rec);
 
 /*
  * Setup memory pool for interval_record
- * Called by main to pre-allocate based on expected CPU count
+ * Called by main to pre-allocate the CPU rows the selected mode can emit.
  */
 void setup_formatter_pool(int max_cpus);
 

@@ -7,7 +7,6 @@
 #define MAX_IDLE_STATES	16
 
 struct idle_state {
-	char name[32];
 	unsigned long long time;	/* microseconds */
 	unsigned long long usage;	/* entry count (cumulative) */
 	double percentage;
@@ -37,8 +36,21 @@ void enable_cpuidle(int enable);
 /* Check if cpuidle is enabled */
 int is_cpuidle_enabled(void);
 
-/* Update idle states for all CPUs */
-void update_idle_states(unsigned long long elapsed_us);
+/*
+ * Pure interval helpers. Invalid baselines, zero-length intervals, and counter
+ * resets return NAN; residency is capped at 100%.
+ */
+double cpuidle_residency_percent(unsigned long long current, int current_valid,
+				 unsigned long long previous, int previous_valid,
+				 unsigned long long elapsed_us);
+double cpuidle_usage_per_sec(unsigned long long current, int current_valid,
+			     unsigned long long previous, int previous_valid,
+			     unsigned long long elapsed_us);
+
+/* Update only the selected state counters for all tracked CPUs. */
+void update_idle_states(unsigned long long elapsed_us,
+			unsigned int residency_mask,
+			unsigned int usage_mask);
 
 /*
  * Refresh cached cpuidle disable bits for a limited number of tracked CPUs.

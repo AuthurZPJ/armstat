@@ -19,6 +19,8 @@ jobs:
     name: ARM64 Linux build and tests
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
+    env:
+      ARMSTAT_REQUIRE_PLOT_RENDER: "1"
 
     steps:
       - name: Check out source
@@ -26,11 +28,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install plot rendering dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y python3-matplotlib
+
       - name: Release build with warnings as errors
         run: >-
           make
           CFLAGS="-O2 -Wall -Wextra -Werror -Wformat=2 -Wundef -Wshadow
-          -Wstrict-prototypes -Wmissing-prototypes -I../../../include
+          -Wstrict-prototypes -Wmissing-prototypes
           -D_FILE_OFFSET_BITS=64 -MMD -MP -D_FORTIFY_SOURCE=2
           -fstack-protector-strong -fPIE"
           test

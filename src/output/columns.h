@@ -68,14 +68,22 @@ enum field_group_mask {
  * Optional field series metadata.
  *
  * Most fields are standalone, but some belong to indexed families such as
- * split idle-state residency or summary TempN values. Keep that identity in
- * field metadata so CLI selection does not have to infer it from field ids.
+ * split idle-state residency/usage or summary TempN values. Keep that identity
+ * in field metadata so CLI selection and demand-driven collection do not have
+ * to infer it from field ids.
  */
 enum field_series {
 	FIELD_SERIES_NONE = 0,
-	FIELD_SERIES_IDLE_STATE,
+	FIELD_SERIES_IDLE_STATE_RESIDENCY,
+	FIELD_SERIES_IDLE_STATE_USAGE,
 	FIELD_SERIES_SUMMARY_TEMP,
 };
+
+static inline int field_series_is_idle_state(enum field_series series)
+{
+	return series == FIELD_SERIES_IDLE_STATE_RESIDENCY ||
+	       series == FIELD_SERIES_IDLE_STATE_USAGE;
+}
 
 /*
  * Field type - defines the data type of a field
@@ -155,8 +163,11 @@ extern int show_energy;
 
 /* Convenience getters for demand-driven sampling decisions. */
 static inline int is_freq_enabled(void)    { return show_freq; }
+static inline int is_idle_enabled(void)    { return show_idle; }
+static inline int is_iowait_enabled(void)  { return show_iowait; }
 static inline int is_power_enabled(void)   { return show_power; }
 static inline int is_temp_enabled(void)    { return show_temp; }
+static inline int is_sysstat_enabled(void) { return show_sysstat; }
 static inline int is_energy_enabled(void)  { return show_energy; }
 static inline int is_membw_enabled(void)   { return show_membw; }
 static inline int is_pmu_enabled(void)     { return show_pmu; }
@@ -181,6 +192,8 @@ struct field_desc *get_all_fields(void);
 int get_field_count(void);
 int any_fields_enabled(enum field_scope scope);
 void get_enabled_fields(enum field_scope scope, struct field_desc **fields, int *count);
+unsigned int get_enabled_series_mask(enum field_scope scope,
+				     enum field_series series);
 int field_is_scope_identity(const struct field_desc *field);
 void clear_field_overrides(void);
 void set_field_override_by_index(int field_index, int enable, int whitelist);
@@ -189,7 +202,6 @@ void set_field_override_by_index(int field_index, int enable, int whitelist);
  * Idle-state series visibility + overrides.
  */
 void update_idle_state_visibility(void);
-int idle_state_columns_enabled(void);
 void clear_idle_state_overrides(void);
 void set_idle_state_override(int state_idx, int enable, int whitelist);
 

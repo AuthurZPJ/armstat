@@ -3,10 +3,10 @@
 """Plot per-CPU time-series data exported by armstat.
 
 Recommended input:
-    armstat -f json -O cpus.json
+    armstat -a -f json -O cpus.json
 
 The script can also read per-CPU CSV exported with:
-    armstat -f csv -O cpus.csv
+    armstat -a -f csv -O cpus.csv
 
 JSON carries real timestamps. CSV exports now include `timestamp` and
 `timestamp_iso`, so plots can use real time directly.
@@ -21,9 +21,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
+_SCRIPT_PATH = Path(__file__).resolve()
+_MODULE_DIRS = (
+    _SCRIPT_PATH.parent,
+    _SCRIPT_PATH.parent.parent / "share" / "armstat",
+)
+for _module_dir in reversed(_MODULE_DIRS):
+    if _module_dir.is_dir() and str(_module_dir) not in sys.path:
+        sys.path.insert(0, str(_module_dir))
 
 from armstat_loader import (  # noqa: E402
     CpuSeriesData,
@@ -32,11 +37,14 @@ from armstat_loader import (  # noqa: E402
     slice_cpu_series,
 )
 from plot_utils import (  # noqa: E402
+    field_axis_label,
+    field_list_label,
+    is_finite_number,
     is_number,
-    smooth_series,
-    to_float,
     finalize_figure_layout,
     load_plotting_modules,
+    smooth_series,
+    to_float,
 )
 
 PRESET_NAMES = ("freq", "temp", "idle", "busy", "iowait", "ipc")
@@ -69,16 +77,29 @@ def parse_cpu_list(expr: Optional[str]) -> Optional[List[int]]:
         part = token.strip()
         if not part:
             continue
-        if "-" in part:
-            start_str, end_str = part.split("-", 1)
-            start = int(start_str)
-            end = int(end_str)
-            if end < start:
-                start, end = end, start
-            for cpu in range(start, end + 1):
+        try:
+            if "-" in part:
+                start_str, end_str = part.split("-", 1)
+                start = int(start_str)
+                end = int(end_str)
+                if start < 0 or end < 0:
+                    raise ValueError
+                if end < start:
+                    start, end = end, start
+                for cpu in range(start, end + 1):
+                    selected.add(cpu)
+            else:
+                cpu = int(part)
+                if cpu < 0:
+                    raise ValueError
                 selected.add(cpu)
-        else:
-            selected.add(int(part))
+        except ValueError as exc:
+            raise SystemExit(
+                f"Invalid --cpu-filter token '{part}'. Use values such as 0,1,4-7."
+            ) from exc
+
+    if not selected:
+        raise SystemExit("--cpu-filter must contain at least one CPU ID.")
 
     return sorted(selected)
 
@@ -98,15 +119,21 @@ def select_cpu_ids(series: CpuSeriesData, cpu_filter: Optional[str]) -> List[int
     return selected
 
 
-def sort_entity_keys(keys: Iterable[object]) -> List[object]:
-    def sort_key(value: object) -> Tuple[int, object]:
+def entity_sort_key(value: object) -> Tuple[Tuple[int, object], ...]:
+    def scalar_sort_key(value: object) -> Tuple[int, object]:
         if isinstance(value, (int, float)):
             return (0, value)
         if isinstance(value, str) and value and is_number(value):
             return (0, to_float(value))
         return (1, str(value))
 
-    return sorted(keys, key=sort_key)
+    if isinstance(value, tuple):
+        return tuple(scalar_sort_key(part) for part in value)
+    return (scalar_sort_key(value),)
+
+
+def sort_entity_keys(keys: Iterable[object]) -> List[object]:
+    return sorted(keys, key=entity_sort_key)
 
 
 def get_cpu_group_value(series: CpuSeriesData,
@@ -119,7 +146,11 @@ def get_cpu_group_value(series: CpuSeriesData,
         value = row.get(group_field)
         if value is None or value == "":
             continue
-        if isinstance(value, str) and is_number(value):
+        if isinstance(value, (int, float)) or (
+            isinstance(value, str) and is_number(value)
+        ):
+            if not is_finite_number(value):
+                continue
             numeric = to_float(value)
             if float(numeric).is_integer():
                 return int(numeric)
@@ -130,24 +161,31 @@ def get_cpu_group_value(series: CpuSeriesData,
 
 def build_cpu_groups(series: CpuSeriesData,
                      cpu_ids: Sequence[int],
-                     group_by: Optional[str]) -> Tuple[Dict[object, List[int]], Optional[str], Optional[str]]:
+                     group_by: Optional[str]) -> Tuple[
+                         Dict[object, List[int]], Optional[str]
+                     ]:
     if group_by is None:
-        return {}, None, None
+        return {}, None
 
     if group_by == "node":
-        group_field = "node"
+        group_fields = ("node",)
         group_label = "node"
     elif group_by == "core":
-        group_field = "core"
+        group_fields = ("package", "core")
         group_label = "core"
     else:
         raise SystemExit(f"Unsupported --group-by value '{group_by}'.")
 
     groups: Dict[object, List[int]] = {}
     for cpu_id in cpu_ids:
-        group_value = get_cpu_group_value(series, cpu_id, group_field)
-        if group_value is None:
+        group_values = tuple(
+            get_cpu_group_value(series, cpu_id, field) for field in group_fields
+        )
+        if any(value is None for value in group_values):
             continue
+        group_value: object = (
+            group_values[0] if len(group_values) == 1 else group_values
+        )
         groups.setdefault(group_value, []).append(cpu_id)
 
     if not groups:
@@ -156,7 +194,7 @@ def build_cpu_groups(series: CpuSeriesData,
             "Check that the export contains the required topology fields."
         )
 
-    return groups, group_field, group_label
+    return groups, group_label
 
 
 def extract_series(samples: Sequence[Dict[int, Dict[str, object]]],
@@ -167,6 +205,49 @@ def extract_series(samples: Sequence[Dict[int, Dict[str, object]]],
         row = sample.get(cpu_id, {})
         values.append(to_float(row.get(field)))
     return values
+
+
+def entity_has_field_data(series: CpuSeriesData,
+                          cpu_ids: Sequence[int],
+                          field: str) -> bool:
+    for sample in series.samples:
+        for cpu_id in cpu_ids:
+            if is_finite_number(sample.get(cpu_id, {}).get(field)):
+                return True
+    return False
+
+
+def filter_cpu_ids_with_data(series: CpuSeriesData,
+                             cpu_ids: Sequence[int],
+                             field: str) -> Tuple[List[int], List[int]]:
+    selected = []
+    skipped = []
+    for cpu_id in cpu_ids:
+        target = selected if entity_has_field_data(series, [cpu_id], field) else skipped
+        target.append(cpu_id)
+    return selected, skipped
+
+
+def filter_groups_with_data(series: CpuSeriesData,
+                            groups: Dict[object, List[int]],
+                            field: str) -> Tuple[
+                                Dict[object, List[int]], List[object]
+                            ]:
+    selected: Dict[object, List[int]] = {}
+    skipped: List[object] = []
+    for group_value in sort_entity_keys(groups):
+        cpu_ids = groups[group_value]
+        if entity_has_field_data(series, cpu_ids, field):
+            selected[group_value] = cpu_ids
+        else:
+            skipped.append(group_value)
+    return selected, skipped
+
+
+def format_bounded_list(values: Sequence[object], limit: int = 16) -> str:
+    visible = ",".join(str(value) for value in values[:limit])
+    remaining = len(values) - min(len(values), limit)
+    return f"{visible},... (+{remaining} more)" if remaining else visible
 
 
 def average_field_value(series: CpuSeriesData, cpu_id: int, field: str) -> float:
@@ -280,14 +361,31 @@ def apply_top_group_selection(series: CpuSeriesData,
 
     ranked = sorted(
         groups.items(),
-        key=lambda item: (
-            aggregate_group_value(series, item[1], field, rank_by, aggregate_mode),
-            str(item[0]),
+        key=lambda item: entity_sort_key(item[0]),
+    )
+    ranked.sort(
+        key=lambda item: aggregate_group_value(
+            series, item[1], field, rank_by, aggregate_mode
         ),
         reverse=True,
     )
     selected = ranked[:top_n]
-    return dict(sorted(selected, key=lambda item: sort_entity_keys([item[0]])[0]))
+    selected_groups = dict(selected)
+    return {
+        group_value: selected_groups[group_value]
+        for group_value in sort_entity_keys(selected_groups)
+    }
+
+
+def require_cpu_field_data(series: CpuSeriesData,
+                           cpu_ids: Sequence[int],
+                           fields: Sequence[str]) -> None:
+    for field in fields:
+        if not entity_has_field_data(series, cpu_ids, field):
+            raise SystemExit(
+                f"Field '{field}' has no numeric values for the selected CPUs "
+                "and sample range."
+            )
 
 
 def build_output_path(input_path: Path,
@@ -321,7 +419,7 @@ def build_output_path(input_path: Path,
 def list_fields(series: CpuSeriesData) -> None:
     print("Available numeric CPU fields:")
     for field in series.numeric_fields:
-        print(f"  {field}")
+        print(f"  {field_list_label(field)}")
 
 
 def list_cpus(series: CpuSeriesData) -> None:
@@ -330,6 +428,9 @@ def list_cpus(series: CpuSeriesData) -> None:
 
 
 def format_group_name(group_label: str, group_value: object) -> str:
+    if group_label == "core" and isinstance(group_value, tuple):
+        package, core = group_value
+        return f"pkg{package}/core{core}"
     return f"{group_label}{group_value}"
 
 
@@ -364,11 +465,13 @@ def plot_cpu_series(series: CpuSeriesData,
         handles.append(line)
         labels.append(f"cpu{cpu_id}:{left_field}")
 
-    ax1.set_ylabel(left_field)
+    ax1.set_ylabel(field_axis_label([left_field]))
 
     if right_field:
         ax2 = ax1.twinx()
         for index, cpu_id in enumerate(cpu_ids):
+            if not entity_has_field_data(series, [cpu_id], right_field):
+                continue
             color = color_map(index % 20)
             values = smooth_series(extract_series(series.samples, cpu_id, right_field),
                                    smooth_window)
@@ -382,7 +485,7 @@ def plot_cpu_series(series: CpuSeriesData,
             )[0]
             handles.append(line)
             labels.append(f"cpu{cpu_id}:{right_field}")
-        ax2.set_ylabel(right_field)
+        ax2.set_ylabel(field_axis_label([right_field]))
 
     if series.x_values and isinstance(series.x_values[0], datetime):
         locator = mdates.AutoDateLocator()
@@ -433,11 +536,15 @@ def plot_group_series(series: CpuSeriesData,
         handles.append(line)
         labels.append(label)
 
-    ax1.set_ylabel(left_field)
+    ax1.set_ylabel(field_axis_label([left_field]))
 
     if right_field:
         ax2 = ax1.twinx()
         for index, group_value in enumerate(ordered_group_values):
+            if not entity_has_field_data(
+                series, groups[group_value], right_field
+            ):
+                continue
             color = color_map(index % 20)
             values = smooth_series(
                 aggregate_group_series(
@@ -455,7 +562,7 @@ def plot_group_series(series: CpuSeriesData,
             )[0]
             handles.append(line)
             labels.append(label)
-        ax2.set_ylabel(right_field)
+        ax2.set_ylabel(field_axis_label([right_field]))
 
     if series.x_values and isinstance(series.x_values[0], datetime):
         locator = mdates.AutoDateLocator()
@@ -518,9 +625,9 @@ def parse_args() -> argparse.Namespace:
         "--top",
         type=int,
         help=(
-            "Select the top N CPUs ranked by the average value of the primary field "
-            "over the plotted time range. Applied after --cpu-filter, and after "
-            "grouping when --group-by is used."
+            "Select the top N CPUs or groups according to --rank-by on the primary "
+            "field over the plotted time range. Applied after --cpu-filter, and "
+            "after grouping when --group-by is used."
         ),
     )
     parser.add_argument(
@@ -529,13 +636,13 @@ def parse_args() -> argparse.Namespace:
         default="avg",
         help=(
             "Ranking rule for --top. "
-            "'avg' uses the time-average, 'max' uses the peak value, and "
+            "'avg' uses the mean of visible samples, 'max' uses the peak value, and "
             "'last' uses the last visible sample. Default: avg."
         ),
     )
     parser.add_argument("--y", help="Primary CPU field to plot")
     parser.add_argument("--y2", help="Optional secondary CPU field for a right-side axis")
-    parser.add_argument("-o", "--output", help="Output PNG path")
+    parser.add_argument("-o", "--output", help="Output image path")
     parser.add_argument("--output-dir", help="Directory for auto-generated output files")
     parser.add_argument(
         "--format",
@@ -606,9 +713,23 @@ def main() -> int:
         default_title = None
 
     cpu_ids = select_cpu_ids(series, args.cpu_filter)
-    groups, group_field, group_label = build_cpu_groups(series, cpu_ids, args.group_by)
+    groups, group_label = build_cpu_groups(series, cpu_ids, args.group_by)
 
     if group_label is None:
+        cpu_ids, skipped_cpu_ids = filter_cpu_ids_with_data(
+            series, cpu_ids, left_field
+        )
+        if skipped_cpu_ids:
+            print(
+                f"Warning: skipping CPUs with no numeric '{left_field}' data: "
+                f"{format_bounded_list(skipped_cpu_ids)}",
+                file=sys.stderr,
+            )
+        if not cpu_ids:
+            raise SystemExit(
+                f"Field '{left_field}' has no numeric values for the selected CPUs "
+                "and sample range."
+            )
         cpu_ids = apply_top_selection(series, cpu_ids, left_field, args.top, args.rank_by)
         if args.top is None and len(cpu_ids) > DEFAULT_CPU_PLOT_LIMIT:
             raise SystemExit(
@@ -616,12 +737,69 @@ def main() -> int:
                 "with --cpu-filter or --top."
             )
     else:
+        groups, skipped_groups = filter_groups_with_data(
+            series, groups, left_field
+        )
+        if skipped_groups:
+            skipped_names = [
+                format_group_name(group_label, value)
+                for value in skipped_groups
+            ]
+            print(
+                f"Warning: skipping groups with no numeric '{left_field}' data: "
+                f"{format_bounded_list(skipped_names)}",
+                file=sys.stderr,
+            )
+        if not groups:
+            raise SystemExit(
+                f"Field '{left_field}' has no numeric values for the selected "
+                "CPU groups and sample range."
+            )
         groups = apply_top_group_selection(
             series, groups, left_field, args.top, args.rank_by, args.aggregate)
         if args.top is None and len(groups) > DEFAULT_CPU_PLOT_LIMIT:
             raise SystemExit(
                 f"The grouped plot contains {len(groups)} groups. Please narrow the "
                 "plot with --cpu-filter or --top."
+            )
+
+    selected_cpu_ids = (
+        sorted({cpu for members in groups.values() for cpu in members})
+        if group_label is not None else cpu_ids
+    )
+    require_cpu_field_data(
+        series,
+        selected_cpu_ids,
+        [left_field, *([right_field] if right_field else [])],
+    )
+
+    if right_field and group_label is None:
+        missing_secondary = [
+            cpu_id for cpu_id in cpu_ids
+            if not entity_has_field_data(series, [cpu_id], right_field)
+        ]
+        if missing_secondary:
+            print(
+                f"Warning: skipping secondary '{right_field}' lines with no "
+                f"numeric data for CPUs: {format_bounded_list(missing_secondary)}",
+                file=sys.stderr,
+            )
+    elif right_field:
+        missing_secondary_groups = [
+            group_value for group_value in sort_entity_keys(groups)
+            if not entity_has_field_data(
+                series, groups[group_value], right_field
+            )
+        ]
+        if missing_secondary_groups:
+            missing_names = [
+                format_group_name(group_label, value)
+                for value in missing_secondary_groups
+            ]
+            print(
+                f"Warning: skipping secondary '{right_field}' lines with no "
+                f"numeric data for groups: {format_bounded_list(missing_names)}",
+                file=sys.stderr,
             )
 
     if args.output:
@@ -641,6 +819,8 @@ def main() -> int:
             output_dir,
             args.format,
         )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if group_label is None:
         plot_cpu_series(

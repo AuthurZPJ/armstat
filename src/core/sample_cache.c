@@ -23,6 +23,7 @@
 #include "cpu_inventory.h"
 #include "idle_backend.h"
 #include "columns.h"
+#include "formatter_section.h"
 
 /* MAX_CPUS is defined in collector.h — single source of truth */
 
@@ -216,7 +217,8 @@ static void slow_refresh_cpu(int tracked_idx)
 	int min_valid;
 	int max_valid;
 
-	if (tracked_idx < 0 || tracked_idx >= get_tracked_cpu_count())
+	if (!is_freq_enabled() || tracked_idx < 0 ||
+	    tracked_idx >= get_tracked_cpu_count())
 		return;
 
 	read_cpu_min_max_freq_checked(tracked_idx, &min_freq, &min_valid,
@@ -319,14 +321,15 @@ static void collect_freq_snapshot(struct sys_snapshot *snapshot, int tracked)
 	snapshot->freqs = freqs_pool;
 	snapshot->uncore_freq_hz = 0;
 	snapshot->uncore_freq_valid = 0;
+	if (!is_freq_enabled())
+		return;
 
 	/*
 	 * Uncore/devfreq is a platform-level summary signal. Keep its sampling
 	 * independent from the per-CPU cpufreq array so the code reads as
 	 * "summary frequency + per-CPU frequencies", not as one monolithic block.
 	 */
-	if (is_freq_enabled() &&
-	    read_uncore_freq(&snapshot->uncore_freq_hz) == 0)
+	if (read_uncore_freq(&snapshot->uncore_freq_hz) == 0)
 		snapshot->uncore_freq_valid = 1;
 
 	if (!snapshot->freqs)
@@ -377,7 +380,9 @@ static void initialize_idle_snapshot(struct sys_snapshot *snapshot)
 }
 
 static void collect_idle_snapshot(struct sys_snapshot *snapshot, int tracked,
-				  unsigned long long delta_us)
+				  unsigned long long delta_us,
+				  unsigned int residency_mask,
+				  unsigned int usage_mask)
 {
 	initialize_idle_snapshot(snapshot);
 	(void)tracked;
@@ -391,9 +396,10 @@ static void collect_idle_snapshot(struct sys_snapshot *snapshot, int tracked,
 	 * advances on state exit, while still exposing ARM-specific split idle
 	 * residency columns.
 	 */
-	if (is_cpuidle_enabled() && idle_state_columns_enabled() &&
+	if (is_cpuidle_enabled() &&
+	    (residency_mask || usage_mask) &&
 	    snapshot->idle && snapshot->idle_state_count > 0)
-		update_idle_states(delta_us);
+		update_idle_states(delta_us, residency_mask, usage_mask);
 }
 
 static void collect_power_and_temp_snapshot(struct sys_snapshot *snapshot)
@@ -424,7 +430,9 @@ static void collect_power_and_temp_snapshot(struct sys_snapshot *snapshot)
 	}
 }
 
-static void collect_system_counter_snapshot(struct sys_snapshot *snapshot)
+static void collect_system_counter_snapshot(
+	struct sys_snapshot *snapshot,
+	unsigned int idle_residency_mask)
 {
 	static unsigned long long procstat_idles[MAX_CPUS];
 	static unsigned long long procstat_iowaits[MAX_CPUS];
@@ -434,6 +442,8 @@ static void collect_system_counter_snapshot(struct sys_snapshot *snapshot)
 	int procstat_limit;
 	int schedstat_limit = -1;
 	int tracked = get_tracked_cpu_count();
+	int need_idle = is_idle_enabled() || is_iowait_enabled() ||
+		idle_residency_mask;
 
 	memset(procstat_idles, 0, sizeof(procstat_idles));
 	memset(procstat_iowaits, 0, sizeof(procstat_iowaits));
@@ -447,17 +457,26 @@ static void collect_system_counter_snapshot(struct sys_snapshot *snapshot)
 		memset(snapshot->authoritative_runtime_valid, 0,
 		       tracked * sizeof(*snapshot->authoritative_runtime_valid));
 
-	/* Invalidate /proc/stat cache so we get fresh values this interval */
-	invalidate_proc_stat_cache();
-	snapshot->counters.sysstat_valid =
-		read_ctx_switches(&snapshot->counters.ctx_switches) == 0 &&
-		read_interrupts(&snapshot->counters.interrupts) == 0 &&
-		read_soft_interrupts(&snapshot->counters.soft_interrupts) == 0;
-
-	procstat_limit = read_all_proc_stat_cpu_idle_checked(procstat_idles,
-							     procstat_iowaits,
-							     procstat_valid,
-							     MAX_CPUS);
+	procstat_limit = -1;
+	snapshot->counters.sysstat_valid = 0;
+	if (need_idle || is_sysstat_enabled()) {
+		/* One fresh /proc/stat parse serves idle and system counters. */
+		invalidate_proc_stat_cache();
+		if (is_sysstat_enabled()) {
+			snapshot->counters.sysstat_valid =
+				read_ctx_switches(&snapshot->counters.ctx_switches) == 0 &&
+				read_interrupts(&snapshot->counters.interrupts) == 0 &&
+				read_soft_interrupts(
+					&snapshot->counters.soft_interrupts) == 0;
+		}
+		if (need_idle) {
+			procstat_limit =
+				read_all_proc_stat_cpu_idle_checked(procstat_idles,
+								procstat_iowaits,
+								procstat_valid,
+								MAX_CPUS);
+		}
+	}
 
 	for (int i = 0; i < tracked; i++) {
 		int cpu_id = get_cpu_id_by_tracked_idx(i);
@@ -479,7 +498,7 @@ static void collect_system_counter_snapshot(struct sys_snapshot *snapshot)
 				snapshot->authoritative_procstat_valid[i] = 1;
 		}
 
-		if (!busy_source_uses_schedstat_cpu(cpu_id))
+		if (!need_idle || !busy_source_uses_schedstat_cpu(cpu_id))
 			continue;
 
 		if (schedstat_limit < 0) {
@@ -559,12 +578,18 @@ static void collect_pmu_snapshot(struct sys_snapshot *snapshot, int tracked)
  */
 static void collect_sample_data(struct sys_snapshot *snapshot)
 {
+	unsigned int idle_residency_mask = 0;
+	unsigned int idle_usage_mask = 0;
 	int tracked = get_tracked_cpu_count();
 
+	section_get_idle_collection_masks(&idle_residency_mask,
+					  &idle_usage_mask);
+
 	collect_freq_snapshot(snapshot, tracked);
-	collect_idle_snapshot(snapshot, tracked, snapshot->interval_delta_us);
+	collect_idle_snapshot(snapshot, tracked, snapshot->interval_delta_us,
+			      idle_residency_mask, idle_usage_mask);
 	collect_power_and_temp_snapshot(snapshot);
-	collect_system_counter_snapshot(snapshot);
+	collect_system_counter_snapshot(snapshot, idle_residency_mask);
 	collect_pmu_snapshot(snapshot, tracked);
 }
 

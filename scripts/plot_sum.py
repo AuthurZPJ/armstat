@@ -18,11 +18,16 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
+_SCRIPT_PATH = Path(__file__).resolve()
+_MODULE_DIRS = (
+    _SCRIPT_PATH.parent,
+    _SCRIPT_PATH.parent.parent / "share" / "armstat",
+)
+for _module_dir in reversed(_MODULE_DIRS):
+    if _module_dir.is_dir() and str(_module_dir) not in sys.path:
+        sys.path.insert(0, str(_module_dir))
 
 from armstat_loader import (  # noqa: E402
     SeriesData,
@@ -31,9 +36,11 @@ from armstat_loader import (  # noqa: E402
     slice_summary_series,
 )
 from plot_utils import (  # noqa: E402
-    smooth_series,
+    field_axis_label,
+    field_list_label,
     finalize_figure_layout,
     load_plotting_modules,
+    smooth_series,
     to_float,
 )
 
@@ -47,16 +54,7 @@ def extract_series(rows: List[Dict[str, object]], field: str) -> List[float]:
 def list_fields(series: SeriesData) -> None:
     print("Available numeric summary fields:")
     for field in series.numeric_fields:
-        print(f"  {field}")
-
-
-def first_available_field(available_fields: Iterable[str],
-                          candidates: Iterable[str]) -> Optional[str]:
-    available = set(available_fields)
-    for candidate in candidates:
-        if candidate in available:
-            return candidate
-    return None
+        print(f"  {field_list_label(field)}")
 
 
 def get_available_temp_fields(series: SeriesData) -> List[str]:
@@ -69,16 +67,30 @@ def get_available_lpi_fields(series: SeriesData) -> List[str]:
     return [field for field in lpi_candidates if field in set(series.numeric_fields)]
 
 
+def require_preset_fields(series: SeriesData,
+                          preset: str,
+                          fields: Sequence[str]) -> None:
+    available = set(series.numeric_fields)
+    missing = [field for field in fields if field not in available]
+    if missing:
+        raise SystemExit(
+            f"The '{preset}' preset requires fields missing from this export: "
+            f"{', '.join(missing)}. Use --list-fields to inspect available data."
+        )
+
+
 def resolve_preset(series: SeriesData, preset: str) -> Tuple[List[str], List[str], str]:
     temp_fields = get_available_temp_fields(series)
     lpi_fields = get_available_lpi_fields(series)
 
     if preset == "freq":
+        require_preset_fields(series, preset, ["freq"])
         fields = ["freq"]
         if "uncore_freq" in set(series.numeric_fields):
             fields.append("uncore_freq")
         return fields, [], "armstat summary: frequency"
     if preset == "power":
+        require_preset_fields(series, preset, ["power"])
         return ["power"], [], "armstat summary: power"
     if preset == "temp":
         if not temp_fields:
@@ -88,6 +100,7 @@ def resolve_preset(series: SeriesData, preset: str) -> Tuple[List[str], List[str
             )
         return temp_fields, [], "armstat summary: temperature"
     if preset == "power-temp":
+        require_preset_fields(series, preset, ["power"])
         if not temp_fields:
             raise SystemExit(
                 "The selected export does not contain any summary temperature field "
@@ -95,6 +108,7 @@ def resolve_preset(series: SeriesData, preset: str) -> Tuple[List[str], List[str
             )
         return ["power"], temp_fields, "armstat summary: power vs temperature"
     if preset == "idle-lpi":
+        require_preset_fields(series, preset, ["busy_percent", "idle_percent"])
         if not lpi_fields:
             raise SystemExit(
                 "The selected export does not contain any summary idle-state field "
@@ -104,7 +118,10 @@ def resolve_preset(series: SeriesData, preset: str) -> Tuple[List[str], List[str
             "armstat summary: busy/idle/lpi"
         )
     if preset == "sysstat":
-        return ["ctx_switches", "interrupts", "soft_interrupts"], ["mem_bw"], (
+        system_fields = ["ctx_switches", "interrupts", "soft_interrupts"]
+        require_preset_fields(series, preset, system_fields)
+        right_fields = ["mem_bw"] if "mem_bw" in set(series.numeric_fields) else []
+        return system_fields, right_fields, (
             "armstat summary: sysstat"
         )
 
@@ -163,7 +180,7 @@ def plot_summary(
         handles.append(line)
         labels.append(field)
 
-    ax1.set_ylabel(", ".join(left_fields), color=left_colors[0])
+    ax1.set_ylabel(field_axis_label(left_fields), color=left_colors[0])
     ax1.tick_params(axis="y", labelcolor=left_colors[0])
 
     if right_fields:
@@ -180,7 +197,7 @@ def plot_summary(
             handles.append(line)
             labels.append(field)
 
-        ax2.set_ylabel(", ".join(right_fields), color=right_colors[0])
+        ax2.set_ylabel(field_axis_label(right_fields), color=right_colors[0])
         ax2.tick_params(axis="y", labelcolor=right_colors[0])
 
     if series.x_values and isinstance(series.x_values[0], datetime):
@@ -213,7 +230,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--y", help="Primary summary field to plot")
     parser.add_argument("--y2", help="Optional secondary summary field for a right-side axis")
-    parser.add_argument("-o", "--output", help="Output PNG path")
+    parser.add_argument("-o", "--output", help="Output image path")
     parser.add_argument("--output-dir", help="Directory for auto-generated output files")
     parser.add_argument(
         "--format",
@@ -286,6 +303,8 @@ def main() -> int:
             output_dir,
             args.format,
         )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     plot_summary(
         series,

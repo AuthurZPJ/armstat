@@ -14,6 +14,7 @@
 #include <math.h>
 
 #include "formatter.h"
+#include "formatter_section.h"
 #include "idle_display.h"
 #include "pmu.h"
 #include "topology.h"
@@ -116,8 +117,7 @@ static struct interval_record *allocate_interval_record(int tracked_count)
 
 static void fill_record_metadata(struct interval_record *rec,
 				 const struct sys_snapshot *raw,
-				 unsigned long long iteration,
-				 int tracked_count)
+				 unsigned long long iteration)
 {
 	struct timespec ts;
 
@@ -135,10 +135,6 @@ static void fill_record_metadata(struct interval_record *rec,
 		rec->timestamp_ns =
 			(unsigned long long)rec->timestamp * 1000000000ULL;
 	}
-	rec->cpu_count = sys_snapshot_get_effective_cpu_count(raw);
-	rec->cpu_count_filtered = tracked_count;
-	rec->cpu_truncated = sys_snapshot_get_cpu_truncated(raw);
-	rec->cpu_row_count = tracked_count;
 	rec->pmu_event_count = get_pmu_event_count();
 }
 
@@ -297,35 +293,53 @@ static void materialize_summary_idle_states(struct interval_record *rec,
 		rec->summary_idle_state_pct[s] = acc[s] / tracked_count;
 }
 
+static int summary_idle_states_are_emitted(void)
+{
+	if (!section_is_summary_mode() && !section_emit_default_summary())
+		return 0;
+
+	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++) {
+		if (show_summary_idle_state[s])
+			return 1;
+	}
+	return 0;
+}
+
 struct interval_record *build_interval_record(
 	const struct sys_snapshot *raw,
 	const struct interval_stats *stats,
 	unsigned long long iteration)
 {
 	struct interval_record *rec;
+	int cpu_row_count;
 	int tracked_count;
 
 	if (!raw || !stats)
 		return NULL;
 
 	tracked_count = sys_snapshot_get_effective_cpu_count(raw);
+	cpu_row_count = !section_is_summary_mode() && section_emit_cpu() ?
+		tracked_count : 0;
 
-	rec = allocate_interval_record(tracked_count);
+	rec = allocate_interval_record(cpu_row_count);
 	if (!rec)
 		return NULL;
 
-	if (tracked_count > 0 && !rec->cpu_rows) {
+	if (cpu_row_count > 0 && !rec->cpu_rows) {
 		if (rec != rec_pool)
 			free(rec);
 		return NULL;
 	}
 
-	fill_record_metadata(rec, raw, iteration, tracked_count);
+	fill_record_metadata(rec, raw, iteration);
+	rec->cpu_row_count = cpu_row_count;
 	fill_record_summary(rec, raw, stats);
-	materialize_cpu_rows(rec, raw, stats, tracked_count);
-	materialize_packages(rec, stats);
+	materialize_cpu_rows(rec, raw, stats, cpu_row_count);
+	if (!section_is_summary_mode() && section_emit_package())
+		materialize_packages(rec, stats);
 	materialize_numa_temps(rec, raw);
-	materialize_summary_idle_states(rec, raw, stats, tracked_count);
+	if (summary_idle_states_are_emitted())
+		materialize_summary_idle_states(rec, raw, stats, tracked_count);
 
 	return rec;
 }
@@ -358,9 +372,10 @@ void setup_formatter_pool(int max_cpus)
 	}
 
 	rec_pool = calloc(1, sizeof(struct interval_record));
-	cpu_rows_pool = calloc(max_cpus, sizeof(struct cpu_row));
+	cpu_rows_pool = max_cpus > 0 ?
+		calloc(max_cpus, sizeof(struct cpu_row)) : NULL;
 
-	if (!rec_pool || !cpu_rows_pool) {
+	if (!rec_pool || (max_cpus > 0 && !cpu_rows_pool)) {
 		fprintf(stderr, "Error: failed to allocate formatter pool\n");
 		free(rec_pool);
 		free(cpu_rows_pool);

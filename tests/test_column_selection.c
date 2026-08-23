@@ -162,12 +162,35 @@ static void test_temp_and_idle_field_metadata(void)
 	assert(summary_temp->enabled_ptr == &show_temp);
 	assert((cpu_temp->group_mask & FIELD_GROUP_TEMP) != 0);
 	assert(cpu_temp->series == FIELD_SERIES_NONE);
-	assert(cpu_lpi0->series == FIELD_SERIES_IDLE_STATE);
+	assert(cpu_lpi0->series == FIELD_SERIES_IDLE_STATE_RESIDENCY);
 	assert(cpu_lpi0->series_index == 0);
-	assert(cpu_lpi0_usage->series == FIELD_SERIES_IDLE_STATE);
+	assert(cpu_lpi0_usage->series == FIELD_SERIES_IDLE_STATE_USAGE);
 	assert(cpu_lpi0_usage->series_index == 0);
 	assert(strcmp(cpu_lpi0_usage->json_label, "lpi0_usage") == 0);
 	assert(strcmp(cpu_lpi0->label, cpu_lpi0_usage->label) != 0);
+}
+
+static void test_idle_residency_and_usage_are_independently_selectable(void)
+{
+	clear_columns();
+	assert(parse_column_option("lpi0_usage", 1) == 0);
+	assert(scope_has_field(FIELD_SCOPE_CPU, "lpi0_usage"));
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "lpi0"));
+	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "lpi0"));
+	assert(get_enabled_series_mask(
+		FIELD_SCOPE_CPU, FIELD_SERIES_IDLE_STATE_USAGE) == 1U);
+	assert(get_enabled_series_mask(
+		FIELD_SCOPE_CPU, FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0U);
+
+	clear_columns();
+	assert(parse_column_option("lpi0", 1) == 0);
+	assert(scope_has_field(FIELD_SCOPE_CPU, "lpi0"));
+	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "lpi0"));
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "lpi0_usage"));
+	assert(get_enabled_series_mask(
+		FIELD_SCOPE_CPU, FIELD_SERIES_IDLE_STATE_RESIDENCY) == 1U);
+	assert(get_enabled_series_mask(
+		FIELD_SCOPE_CPU, FIELD_SERIES_IDLE_STATE_USAGE) == 0U);
 }
 
 static void test_all_columns_enable_base_groups_but_not_pmu_or_ipc(void)
@@ -244,6 +267,7 @@ int main(void)
 	test_idle_group_whitelist_obeys_runtime_lpi_availability();
 	test_temp_group_whitelist_obeys_runtime_temp_availability();
 	test_temp_and_idle_field_metadata();
+	test_idle_residency_and_usage_are_independently_selectable();
 	test_all_columns_enable_base_groups_but_not_pmu_or_ipc();
 	test_show_all_remains_union_with_later_tokens();
 	test_hide_all_turns_off_explicit_pmu_and_ipc();

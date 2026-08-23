@@ -169,6 +169,40 @@ static void test_summary_rejects_cpu_only_selection(void)
 	CHECK(section_has_output() == 1);
 }
 
+static void test_idle_collection_masks_follow_emitted_sections(void)
+{
+	unsigned int residency;
+	unsigned int usage;
+
+	reset_policy_state();
+	section_get_idle_collection_masks(&residency, &usage);
+	CHECK(residency == 0x3U);
+	CHECK(usage == 0U);
+
+	clear_columns();
+	CHECK(parse_column_option("lpi0", 1) == 0);
+	section_get_idle_collection_masks(&residency, &usage);
+	CHECK(residency == 0x1U);
+	CHECK(usage == 0U);
+
+	set_section_summary_mode(1);
+	section_get_idle_collection_masks(&residency, &usage);
+	CHECK(residency == 0x1U);
+	CHECK(usage == 0U);
+
+	reset_policy_state();
+	clear_columns();
+	CHECK(parse_column_option("lpi0_usage", 1) == 0);
+	section_get_idle_collection_masks(&residency, &usage);
+	CHECK(residency == 0U);
+	CHECK(usage == 0x1U);
+
+	set_section_summary_mode(1);
+	section_get_idle_collection_masks(&residency, &usage);
+	CHECK(residency == 0U);
+	CHECK(usage == 0U);
+}
+
 int main(void)
 {
 	test_default_mode();
@@ -179,6 +213,7 @@ int main(void)
 	test_cpu_filter_keeps_explicit_aggregate_only_output();
 	test_clear_columns();
 	test_summary_rejects_cpu_only_selection();
+	test_idle_collection_masks_follow_emitted_sections();
 
 	if (failures) {
 		printf("test_section_policy: %d failure(s)\n", failures);

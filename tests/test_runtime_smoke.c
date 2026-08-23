@@ -208,8 +208,6 @@ static void make_synthetic_record(struct interval_record *rec,
 	rec->timestamp = 1774665600;
 	rec->timestamp_ns = 1774665600123456789ULL;
 	rec->duration_us = raw->interval_delta_us;
-	rec->cpu_count = 1;
-	rec->cpu_count_filtered = 1;
 	rec->cpu_row_count = 1;
 	rec->cpu_rows = cpu_rows;
 	rec->numa_temp_count = 1;
@@ -876,6 +874,38 @@ static void test_text_serializer_emits_column_headers_and_values(void)
 	free(output);
 }
 
+static void test_text_header_interval_counts_complete_data_rows(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[1];
+	struct cpu_freq_info freqs[1];
+	struct serializer_args args;
+	char *output;
+
+	reset_test_state();
+	set_text_header_interval(2);
+	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	args.rec = &rec;
+
+	rec.interval = 1;
+	output = capture_stdout(emit_text_record, &args);
+	assert(strstr(output, "Freq") != NULL);
+	free(output);
+
+	rec.interval = 2;
+	output = capture_stdout(emit_text_record, &args);
+	assert(strstr(output, "Freq") == NULL);
+	free(output);
+
+	rec.interval = 3;
+	output = capture_stdout(emit_text_record, &args);
+	assert(strstr(output, "Freq") != NULL);
+	free(output);
+	set_text_header_interval(0);
+}
+
 static void test_default_text_emits_summary_and_package_rows(void)
 {
 	struct interval_record rec;
@@ -987,8 +1017,6 @@ static void make_multi_cpu_synthetic_record(struct interval_record *rec,
 	rec->timestamp = 1774665600;
 	rec->timestamp_ns = 1774665600123456789ULL;
 	rec->duration_us = raw->interval_delta_us;
-	rec->cpu_count = 3;
-	rec->cpu_count_filtered = 3;
 	rec->cpu_row_count = 3;
 	rec->cpu_rows = cpu_rows;
 	rec->summary.avg_mhz = stats->avg_mhz;
@@ -1054,7 +1082,7 @@ static void test_package_csv_serializer_emits_package_rows(void)
 	args.rec = &rec;
 
 	output = capture_stdout(emit_csv_mixed_scope, &args);
-	assert(strstr(output, "Package,Freq") != NULL);
+	assert(strstr(output, "Package,freq") != NULL);
 	assert(strstr(output, "8,1,1000000,") != NULL);
 	assert(strstr(output, ",7,2134.50") != NULL);
 	assert(strstr(output, "Scope") == NULL);
@@ -1126,9 +1154,8 @@ static void test_summary_csv_serializer_emits_metadata_and_summary_fields(void)
 	assert(strstr(output, "timestamp_ns") != NULL);
 	assert(strstr(output, "duration_us") != NULL);
 
-	/* Header should contain summary-scoped field labels */
-	assert(strstr(output, "Freq") != NULL);
-	assert(strstr(output, "Power") != NULL);
+	/* Machine formats always use stable JSON field names. */
+	assert(strstr(output, "timestamp_iso,Scope,freq,power") != NULL);
 
 	/* Data row should have the schema_version value */
 	assert(strstr(output, "8,") != NULL);
@@ -1162,6 +1189,7 @@ static void test_interval_record_materializes_owned_values(void)
 	struct interval_record *rec;
 
 	reset_test_state();
+	enable_cpu(1);
 	seed_single_cpu_inventory();
 
 	memset(&raw, 0, sizeof(raw));
@@ -1277,6 +1305,23 @@ static void test_interval_record_materializes_owned_values(void)
 	assert(rec->summary_idle_state_pct[2] == 0.0);
 
 	free_interval_record(rec);
+
+	/* Summary/package output must not materialize unused per-CPU rows. */
+	enable_cpu(0);
+	rec = build_interval_record(&raw, &stats, 2);
+	assert(rec != NULL);
+	assert(rec->cpu_row_count == 0);
+	assert(rec->package_count == 1);
+	free_interval_record(rec);
+
+	/* Summary-only mode also omits package rows, even if selected globally. */
+	set_section_summary_mode(1);
+	enable_cpu(1);
+	rec = build_interval_record(&raw, &stats, 3);
+	assert(rec != NULL);
+	assert(rec->cpu_row_count == 0);
+	assert(rec->package_count == 0);
+	free_interval_record(rec);
 }
 
 int main(void)
@@ -1304,6 +1349,7 @@ int main(void)
 	test_empty_json_selection_has_no_dangling_comma();
 	test_empty_json_stream_closes_as_empty_array();
 	test_text_serializer_emits_column_headers_and_values();
+	test_text_header_interval_counts_complete_data_rows();
 	test_default_text_emits_summary_and_package_rows();
 	test_multi_cpu_csv_serializer_emits_all_cpu_rows();
 	test_package_csv_serializer_emits_package_rows();

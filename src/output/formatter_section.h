@@ -37,6 +37,10 @@ int section_default_summary_output(void);
 /* Whether the configured mode can emit at least one meaningful data row. */
 int section_has_output(void);
 
+/* Exact cpuidle state/counter families required by sections that can emit. */
+void section_get_idle_collection_masks(unsigned int *residency_mask,
+				       unsigned int *usage_mask);
+
 void set_section_summary_mode(int summary);
 void set_section_default_summary_output(int enable);
 

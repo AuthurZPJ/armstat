@@ -66,18 +66,24 @@ only enumerates all \fBcpuN\fR directories after a change or read failure
 .IP \(bu 2
 slow-changing CPU attributes such as min/max frequency, governor, boost, and
 cpuidle disable flags are refreshed with a rolling budget instead of full
-machine sweeps
+machine sweeps, and cpufreq data is skipped entirely when no frequency field
+is visible
 .IP \(bu 2
-\fB/proc/stat\fR is parsed once per interval and reused for idle, iowait,
-\fBCtxSw\fR, \fBIRQs\fR, and \fBSoftIRQs\fR
+\fB/proc/stat\fR is parsed only when selected Busy/Idle/IOWait, LPI residency,
+or system-counter fields require it, then reused by all such consumers in that
+interval; usage-only LPI output does not require it
 .IP \(bu 2
-cpuidle state time is refreshed only when \fBLPI-*\fR columns are visible
+cpuidle reads are selected independently by output scope, visible state index,
+and counter family: summary residency does not read \fBstateN/usage\fR, while
+\fBLPI-N_usage\fR alone does not read \fBstateN/time\fR
 .IP \(bu 2
 power, energy, and temperature sensors are only sampled when a visible field
 depends on them
 .IP \(bu 2
 PMU counters are opened as perf groups per tracked CPU and multiplexed
 intervals are scaled using \fBtime_enabled\fR / \fBtime_running\fR
+.IP \(bu 2
+summary-only and package-only output do not materialize unused per-CPU rows
 .IP \(bu 2
 before normal interval sampling, armstat makes a best-effort attempt to lower
 its own nice value, matching turbostat's intent to reduce monitor-induced
@@ -100,7 +106,7 @@ subsecond precision
 Number of completed samples to print. Zero means unlimited and is the default
 .TP
 .BI \-N ", " \-\-header-iterations " n"
-Reprint the text header every N iterations
+Reprint the text header after every N data rows
 .TP
 .BI \-c ", " \-\-cpu " cpu-list"
 Monitor only the specified real CPU IDs. Accepts comma-separated values and
@@ -175,6 +181,8 @@ Print a one-shot capability summary for the current platform, including CPU
 topology, effective busy-source policy, cpuidle/LPI availability,
 the temperature node mask, selected package-power and memory-bandwidth sysfs
 paths, source candidate counts and ambiguity notes, and basic PMU availability.
+When cpuidle states are present, \fBidle_state_N_name\fR maps each visible
+\fBLPI-N\fR field to the corresponding Linux \fBstateN/name\fR value.
 The PMU check opens \fBcycles\fR on the
 first tracked CPU only and is not a full event-by-CPU validation. The
 key-value contract reports \fBprobe_schema_version: 1\fR
@@ -307,7 +315,9 @@ Mixed output uses the identity columns
 \fBScope,CPU,Package\fR and \fBSUM\fR, \fBPKG\fR, or \fBCPU\fR rows; fields are
 prefixed with \fBsummary.\fR, \fBpackage.\fR, or \fBcpu.\fR. A package-only
 selection such as \fB-s pkg_freq_mhz\fR uses a compact \fBPackage\fR layout;
-the physical package identity is serialized once. Schema 8 JSON and CSV also
+the physical package identity is serialized once. Compact CSV data columns use
+the canonical JSON field keys, and compact PMU columns use \fBpmu.<event>\fR.
+Schema 8 JSON and CSV also
 include the measured sampling window in \fBduration_us\fR and nanosecond Unix
 time in \fBtimestamp_ns\fR. The existing \fBtimestamp\fR remains whole seconds,
 and \fBtimestamp_iso\fR is RFC 3339 with nine fractional digits.
@@ -436,6 +446,12 @@ deepest visible usable state may be residual-adjusted so visible
 idle-state breakdown input, while \fBIdle%\fR remains the authoritative total
 idle budget. At most eight LPI columns are printed.
 .IP \(bu 2
+\fBLPI-*_usage\fR: per-CPU cpuidle \fBstateN/usage\fR delta divided by the
+measured interval in seconds. Counter failures and resets are unavailable;
+recovery establishes a new baseline. cpuidle reads are selected independently
+by visible state and counter family, so usage-only output does not read
+\fBstateN/time\fR or require \fB/proc/stat\fR.
+.IP \(bu 2
 \fBPower\fR: package power from exactly one discovered
 \fBpower_meter/power1_average\fR source
 .IP \(bu 2
@@ -522,8 +538,8 @@ PMU monitoring usually requires root privileges or permissive perf settings
 armstat returns 0 only after the requested operation and its stdout flush have
 succeeded. It returns 1 for invalid arguments, initialization or collection
 failure, an unusable effective field selection, and detected output write or
-finalization failure. A closed downstream pipe is handled as \\fBEPIPE\\fR
-rather than terminating through \\fBSIGPIPE\\fR, so resources are cleaned up
+finalization failure. A closed downstream pipe is handled as \fBEPIPE\fR
+rather than terminating through \fBSIGPIPE\fR, so resources are cleaned up
 before armstat returns 1.
 
 .SH EXAMPLES
@@ -561,6 +577,12 @@ Export JSON to file:
 Export CSV to file:
 .B armstat -f csv -O armstat.csv
 .TP
+Plot an installed summary export:
+.B armstat-plot-summary summary.json --preset power-temp
+.TP
+Plot selected CPUs from an installed export:
+.B armstat-plot-cpu cpus.csv --cpu-filter 0-7 --preset busy
+.TP
 List built-in column groups and PMU event names:
 .B armstat -l
 .TP
@@ -570,13 +592,20 @@ Probe the current platform:
 .PP
 Architecture, machine-readable exports, plotting, and release validation are
 documented together in \fBREFERENCE.md\fR and \fBREFERENCE.zh-CN.md\fR.
-When installed with \fBmake install\fR, the reference and helper scripts are
-installed under \fBshare/doc/armstat/\fR.
+When installed with \fBmake install\fR, plotting is exposed through
+\fBarmstat-plot-summary\fR and \fBarmstat-plot-cpu\fR; their shared modules
+are installed under \fBshare/armstat/\fR and reference documentation under
+\fBshare/doc/armstat/\fR. Known field units are shown in field listings and
+axis labels. Sample-based smoothing preserves unavailable samples as gaps;
+CPUs or groups with no primary-field data in the selected window are reported
+and skipped rather than producing empty legend entries. In a two-axis CPU
+plot, an entity with no secondary-field data keeps its primary line while its
+empty secondary line is reported and skipped.
 
 .SH SEE ALSO
 .BR turbostat (8),
 .BR perf (1)
 
 .SH LICENSE
-GPL-2.0. The complete license text is distributed in \\fBCOPYING\\fR and is
-installed under \\fBshare/doc/armstat/COPYING\\fR.
+GPL-2.0. The complete license text is distributed in \fBCOPYING\fR and is
+installed under \fBshare/doc/armstat/COPYING\fR.

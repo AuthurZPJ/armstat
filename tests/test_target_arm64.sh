@@ -3,6 +3,7 @@
 
 set -eu
 
+src_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 armstat_bin=${ARMSTAT_BIN:-./armstat}
 sample_interval=${ARMSTAT_TARGET_INTERVAL:-0.1}
 sample_count=${ARMSTAT_TARGET_SAMPLES:-5}
@@ -265,6 +266,21 @@ if [ "$require_cpuidle" -eq 1 ] && [ "$idle_states" -eq 0 ]; then
 	echo "target-test requires cpuidle states, but --probe reported none" >&2
 	exit 1
 fi
+if [ "$require_cpuidle" -eq 1 ]; then
+	visible_idle_states=$idle_states
+	if [ "$visible_idle_states" -gt 8 ]; then
+		visible_idle_states=8
+	fi
+	state=0
+	while [ "$state" -lt "$visible_idle_states" ]; do
+		state_name=$(probe_value "idle_state_${state}_name")
+		if [ -z "$state_name" ]; then
+			echo "target-test requires a name for cpuidle state $state" >&2
+			exit 1
+		fi
+		state=$((state + 1))
+	done
+fi
 if [ "$require_power" -eq 1 ] && [ "$package_power_mw" = unavailable ]; then
 	echo "target-test requires package power, but --probe reported unavailable" >&2
 	exit 1
@@ -510,6 +526,34 @@ if require_uncore:
 PY
 fi
 
+if [ "$require_cpuidle" -eq 1 ]; then
+	"$armstat_bin" -a -s idle_state_usage0 -f json \
+		-i "$sample_interval" -n "$sample_count" \
+		>"$tmp_dir/required-cpuidle-usage.json"
+	python3 - "$tmp_dir/required-cpuidle-usage.json" <<'PY'
+import json
+import math
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    samples = json.load(stream)
+
+values = [
+    cpu.get("lpi0_usage")
+    for sample in samples
+    for cpu in sample.get("cpus", [])
+]
+valid = [
+    value for value in values
+    if isinstance(value, (int, float)) and not isinstance(value, bool)
+    and math.isfinite(value) and value >= 0
+]
+assert valid, "LPI-0_usage remained unavailable during required sampling"
+PY
+	python3 "$src_dir/scripts/plot_cpu.py" \
+		"$tmp_dir/required-cpuidle-usage.json" --list-fields >/dev/null
+fi
+
 "$armstat_bin" -S -a -f csv -i "$sample_interval" -n "$sample_count" \
 	>"$tmp_dir/samples.csv"
 python3 - "$tmp_dir/samples.csv" "$sample_count" <<'PY'
@@ -533,6 +577,9 @@ assert all(row[6] == "SUM" for row in rows[1:])
 assert len({len(row) for row in rows}) == 1
 assert all(cell != "-" for row in rows[1:] for cell in row)
 PY
+
+python3 "$src_dir/scripts/plot_sum.py" "$tmp_dir/samples.csv" \
+	--list-fields >/dev/null
 
 "$armstat_bin" -a -f csv -i "$sample_interval" -n 1 \
 	>"$tmp_dir/mixed.csv"
@@ -562,6 +609,9 @@ for row in rows[1:]:
         assert row[7] != "" and row[8] == ""
 PY
 
+python3 "$src_dir/scripts/plot_cpu.py" "$tmp_dir/mixed.csv" \
+	--list-fields >/dev/null
+
 "$armstat_bin" -s pkg_freq_mhz -f csv -i "$sample_interval" -n 1 \
 	>"$tmp_dir/package.csv"
 python3 - "$tmp_dir/package.csv" <<'PY'
@@ -573,7 +623,7 @@ with open(sys.argv[1], newline="", encoding="utf-8") as stream:
 assert len(rows) > 1
 assert rows[0][:8] == [
     "schema_version", "interval", "duration_us", "timestamp", "timestamp_ns",
-    "timestamp_iso", "Package", "Freq",
+    "timestamp_iso", "Package", "freq",
 ]
 assert len({len(row) for row in rows}) == 1
 assert all(row[0] == "8" and int(row[2]) > 0 and row[6] != ""

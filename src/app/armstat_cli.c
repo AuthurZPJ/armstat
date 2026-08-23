@@ -97,7 +97,7 @@ static void print_help(void)
 	printf("Options:\n");
 	printf("  -i, --interval <sec>   Measurement interval (default: 1.0)\n");
 	printf("  -n, --num-iterations <count> Samples to print (0 = unlimited)\n");
-	printf("  -N, --header-iterations <count> Reprint text header every N samples (0 = first only)\n");
+	printf("  -N, --header-iterations <count> Reprint text header after every N samples (0 = first only)\n");
 	printf("  -c, --cpu <list>       Real CPU IDs to monitor (e.g. 0,1,4-7)\n");
 	printf("  -B, --busy-source <src> Busy/Idle source hint: auto, procstat, schedstat, task-clock\n");
 	printf("  -o, --output <file>    Write output to file\n");
@@ -233,7 +233,6 @@ void print_interval_header(const struct armstat_options *opts, double interval)
 }
 
 struct column_alias_group {
-	const char *group_key;
 	const char *const *aliases;
 	int alias_count;
 	unsigned int field_group_mask;
@@ -472,19 +471,32 @@ int parse_column_option(const char *arg, int enable)
 	static const char *const ipc_aliases[] = {"ipc"};
 	static const char *const energy_aliases[] = {"energy", "joules"};
 	static const struct column_alias_group groups[] = {
-		{"cpu", cpu_aliases, ARRAY_SIZE(cpu_aliases), FIELD_GROUP_NONE, enable_cpu},
-		{"package", package_aliases, ARRAY_SIZE(package_aliases), FIELD_GROUP_PACKAGE, enable_package},
-		{"core", core_aliases, ARRAY_SIZE(core_aliases), FIELD_GROUP_CORE, enable_core},
-		{"numa", numa_aliases, ARRAY_SIZE(numa_aliases), FIELD_GROUP_NUMA, enable_numa},
-		{"freq", freq_aliases, ARRAY_SIZE(freq_aliases), FIELD_GROUP_FREQ, enable_freq},
-		{"idle", idle_aliases, ARRAY_SIZE(idle_aliases), FIELD_GROUP_IDLE, set_idle_columns},
-		{"power", power_aliases, ARRAY_SIZE(power_aliases), FIELD_GROUP_POWER, enable_power},
-		{"temp", temp_aliases, ARRAY_SIZE(temp_aliases), FIELD_GROUP_TEMP, enable_temp},
-		{"pmu", pmu_aliases, ARRAY_SIZE(pmu_aliases), FIELD_GROUP_NONE, enable_pmu},
-		{"sysstat", sysstat_aliases, ARRAY_SIZE(sysstat_aliases), FIELD_GROUP_SYSSTAT, enable_sysstat},
-		{"membw", membw_aliases, ARRAY_SIZE(membw_aliases), FIELD_GROUP_MEMBW, enable_membw},
-		{"ipc", ipc_aliases, ARRAY_SIZE(ipc_aliases), FIELD_GROUP_IPC, enable_ipc},
-		{"energy", energy_aliases, ARRAY_SIZE(energy_aliases), FIELD_GROUP_ENERGY, enable_energy},
+		{cpu_aliases, ARRAY_SIZE(cpu_aliases),
+		 FIELD_GROUP_NONE, enable_cpu},
+		{package_aliases, ARRAY_SIZE(package_aliases),
+		 FIELD_GROUP_PACKAGE, enable_package},
+		{core_aliases, ARRAY_SIZE(core_aliases),
+		 FIELD_GROUP_CORE, enable_core},
+		{numa_aliases, ARRAY_SIZE(numa_aliases),
+		 FIELD_GROUP_NUMA, enable_numa},
+		{freq_aliases, ARRAY_SIZE(freq_aliases),
+		 FIELD_GROUP_FREQ, enable_freq},
+		{idle_aliases, ARRAY_SIZE(idle_aliases),
+		 FIELD_GROUP_IDLE, set_idle_columns},
+		{power_aliases, ARRAY_SIZE(power_aliases),
+		 FIELD_GROUP_POWER, enable_power},
+		{temp_aliases, ARRAY_SIZE(temp_aliases),
+		 FIELD_GROUP_TEMP, enable_temp},
+		{pmu_aliases, ARRAY_SIZE(pmu_aliases),
+		 FIELD_GROUP_NONE, enable_pmu},
+		{sysstat_aliases, ARRAY_SIZE(sysstat_aliases),
+		 FIELD_GROUP_SYSSTAT, enable_sysstat},
+		{membw_aliases, ARRAY_SIZE(membw_aliases),
+		 FIELD_GROUP_MEMBW, enable_membw},
+		{ipc_aliases, ARRAY_SIZE(ipc_aliases),
+		 FIELD_GROUP_IPC, enable_ipc},
+		{energy_aliases, ARRAY_SIZE(energy_aliases),
+		 FIELD_GROUP_ENERGY, enable_energy},
 	};
 	char *arg_copy, *token, *saveptr = NULL;
 	struct field_desc *fields = get_all_fields();
@@ -567,7 +579,7 @@ int parse_column_option(const char *arg, int enable)
 				set_field_override_by_index(i, enable, enable);
 			matched = 1;
 
-			if (fields[i].series == FIELD_SERIES_IDLE_STATE &&
+			if (field_series_is_idle_state(fields[i].series) &&
 			    fields[i].series_index >= 0) {
 				if (enable)
 					enable_cpuidle(1);

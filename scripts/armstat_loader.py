@@ -20,18 +20,16 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 import re
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from plot_utils import (
     SUPPORTED_SCHEMA_VERSION,
     flatten_dict,
-    is_number,
+    is_finite_number,
     normalize_field_name,
     parse_sample_range,
     to_float,
@@ -122,6 +120,9 @@ for _idx in range(8):
     FIELD_ALIASES[f"lpi-{_idx}"] = f"lpi{_idx}"
     FIELD_ALIASES[f"sum_idle_state{_idx}"] = f"lpi{_idx}"
     FIELD_ALIASES[f"idle_state{_idx}"] = f"lpi{_idx}"
+    FIELD_ALIASES[f"lpi{_idx}_usage"] = f"lpi{_idx}_usage"
+    FIELD_ALIASES[f"lpi-{_idx}_usage"] = f"lpi{_idx}_usage"
+    FIELD_ALIASES[f"idle_state_usage{_idx}"] = f"lpi{_idx}_usage"
 
 
 # ---------------------------------------------------------------------------
@@ -151,13 +152,22 @@ class CpuSeriesData:
 
 def sample_x_value(timestamp: object, sample_index: int,
                    timestamp_ns: object = None) -> object:
-    if timestamp_ns not in (None, "") and is_number(timestamp_ns):
-        return datetime.fromtimestamp(to_float(timestamp_ns) / 1_000_000_000.0)
-    if isinstance(timestamp, (int, float)):
-        return datetime.fromtimestamp(timestamp)
-    if isinstance(timestamp, str) and timestamp and is_number(timestamp):
-        return datetime.fromtimestamp(to_float(timestamp))
+    try:
+        if timestamp_ns not in (None, "") and is_finite_number(timestamp_ns):
+            return datetime.fromtimestamp(to_float(timestamp_ns) / 1_000_000_000.0)
+        if is_finite_number(timestamp):
+            return datetime.fromtimestamp(to_float(timestamp))
+    except (OverflowError, OSError, ValueError):
+        pass
     return sample_index
+
+
+def finalize_x_axis(x_values: List[object],
+                    sample_values: List[int]) -> Tuple[List[object], str]:
+    if x_values and all(isinstance(value, datetime) for value in x_values):
+        return x_values, "time"
+
+    return list(sample_values), "sample"
 
 
 def canonicalize_csv_key(key: str) -> str:
@@ -180,15 +190,25 @@ def collect_numeric_fields(rows_or_samples: Iterable) -> List[str]:
                 for key, value in row.items():
                     if key.startswith("__"):
                         continue
-                    if is_number(value):
+                    if is_finite_number(value):
                         seen.setdefault(key, None)
         else:
             for key, value in item.items():
                 if key.startswith("__"):
                     continue
-                if is_number(value):
+                if is_finite_number(value):
                     seen.setdefault(key, None)
     return sorted(seen.keys())
+
+
+def parse_cpu_id(value: object, source: Path) -> int:
+    if not is_finite_number(value):
+        raise SystemExit(f"{source} contains an invalid CPU ID: {value!r}.")
+
+    numeric = to_float(value)
+    if not numeric.is_integer() or numeric < 0:
+        raise SystemExit(f"{source} contains an invalid CPU ID: {value!r}.")
+    return int(numeric)
 
 
 def resolve_field_name(requested: str, available_fields: Iterable[str]) -> str:
@@ -239,12 +259,8 @@ def count_csv_summary_samples(path: Path) -> int:
     count = 0
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        is_mixed_scope = reader.fieldnames and "Scope" in reader.fieldnames
         for item in reader:
-            if is_mixed_scope:
-                if item.get("Scope") == "SUM":
-                    count += 1
-            elif item.get("SUM") == "SUM":
+            if item.get("Scope") == "SUM":
                 count += 1
     return count
 
@@ -281,6 +297,7 @@ def load_json_summary(path: Path) -> SeriesData:
 
     rows: List[Dict[str, object]] = []
     x_values: List[object] = []
+    sample_values: List[int] = []
 
     for sample_index, item in enumerate(data, start=1):
         if not isinstance(item, dict):
@@ -299,6 +316,7 @@ def load_json_summary(path: Path) -> SeriesData:
         x_values.append(sample_x_value(
             item.get("timestamp"), sample_index, item.get("timestamp_ns")
         ))
+        sample_values.append(sample_index)
 
     if not rows:
         raise SystemExit(
@@ -306,7 +324,7 @@ def load_json_summary(path: Path) -> SeriesData:
             "Use summary JSON export, for example: armstat -S -f json -O summary.json"
         )
 
-    x_label = "time" if isinstance(x_values[0], datetime) else "sample"
+    x_values, x_label = finalize_x_axis(x_values, sample_values)
     return SeriesData(
         x_values=x_values,
         x_label=x_label,
@@ -327,26 +345,26 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
 
     rows: List[Dict[str, object]] = []
     x_values: List[object] = []
+    sample_values: List[int] = []
 
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames:
             raise SystemExit(f"{path} does not contain a CSV header.")
 
-        is_mixed_scope = "Scope" in reader.fieldnames
-
-        if "SUM" not in reader.fieldnames and not is_mixed_scope:
+        required_columns = {"schema_version", "Scope"}
+        missing_columns = required_columns.difference(reader.fieldnames)
+        if missing_columns:
             raise SystemExit(
-                f"{path} does not look like summary CSV. "
+                f"{path} is missing required summary CSV columns: "
+                f"{', '.join(sorted(missing_columns))}. "
                 "Use summary CSV export, for example: armstat -S -f csv -O summary.csv"
             )
+        is_mixed_scope = {"CPU", "Package"}.issubset(reader.fieldnames)
 
         sample_index = 0
         for item in reader:
-            if is_mixed_scope:
-                if item.get("Scope") != "SUM":
-                    continue
-            elif item.get("SUM") != "SUM":
+            if item.get("Scope") != "SUM":
                 continue
             sample_index += 1
             if sample_index < start_sample:
@@ -358,7 +376,7 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
             row = {}
             for key, value in item.items():
                 if key in {
-                    "SUM", "Scope", "CPU", "Package",
+                    "Scope", "CPU", "Package",
                     "schema_version", "interval", "duration_us", "timestamp",
                     "timestamp_ns", "timestamp_iso",
                 }:
@@ -375,11 +393,12 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
             x_values.append(sample_x_value(
                 item.get("timestamp"), sample_index, item.get("timestamp_ns")
             ))
+            sample_values.append(sample_index)
 
     if not rows:
         raise SystemExit(f"{path} does not contain summary rows.")
 
-    x_label = "time" if isinstance(x_values[0], datetime) else "sample"
+    x_values, x_label = finalize_x_axis(x_values, sample_values)
     return SeriesData(
         x_values=x_values,
         x_label=x_label,
@@ -389,15 +408,18 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
 
 
 def load_summary_series(path: Path, sample_range: Optional[str] = None) -> SeriesData:
-    suffix = path.suffix.lower()
-    if suffix == ".json":
-        return load_json_summary(path)
-    if suffix == ".csv":
-        return load_csv_summary(path, sample_range)
-    raise SystemExit(
-        f"Unsupported input format for {path}. "
-        "Use summary JSON or summary CSV exported by armstat."
-    )
+    try:
+        suffix = path.suffix.lower()
+        if suffix == ".json":
+            return load_json_summary(path)
+        if suffix == ".csv":
+            return load_csv_summary(path, sample_range)
+        raise SystemExit(
+            f"Unsupported input format for {path}. "
+            "Use summary JSON or summary CSV exported by armstat."
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, csv.Error) as exc:
+        raise SystemExit(f"Could not read {path}: {exc}") from exc
 
 
 def slice_summary_series(series: SeriesData,
@@ -408,11 +430,12 @@ def slice_summary_series(series: SeriesData,
     start, end = parsed
     start_idx = start - 1
     end_idx = end
+    sliced_rows = series.rows[start_idx:end_idx]
     return SeriesData(
         x_values=series.x_values[start_idx:end_idx],
         x_label=series.x_label,
-        rows=series.rows[start_idx:end_idx],
-        numeric_fields=series.numeric_fields,
+        rows=sliced_rows,
+        numeric_fields=collect_numeric_fields(sliced_rows),
     )
 
 
@@ -427,6 +450,7 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
 
     samples: List[Dict[int, Dict[str, object]]] = []
     x_values: List[object] = []
+    sample_values: List[int] = []
     cpu_ids: Set[int] = set()
 
     for sample_index, item in enumerate(data, start=1):
@@ -441,11 +465,7 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
         for cpu_entry in cpus:
             if not isinstance(cpu_entry, dict):
                 continue
-            cpu_value = cpu_entry.get("cpu")
-            if cpu_value is None or not is_number(cpu_value):
-                continue
-
-            cpu_id = int(to_float(cpu_value))
+            cpu_id = parse_cpu_id(cpu_entry.get("cpu"), path)
             row: Dict[str, object] = {}
             for key, value in cpu_entry.items():
                 if key == "cpu":
@@ -462,14 +482,15 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
         x_values.append(sample_x_value(
             item.get("timestamp"), len(samples), item.get("timestamp_ns")
         ))
+        sample_values.append(len(samples))
 
     if not samples:
         raise SystemExit(
             f"{path} does not contain per-CPU JSON records. "
-            "Use CPU JSON export, for example: armstat -f json -O cpus.json"
+            "Use CPU JSON export, for example: armstat -a -f json -O cpus.json"
         )
 
-    x_label = "time" if isinstance(x_values[0], datetime) else "sample"
+    x_values, x_label = finalize_x_axis(x_values, sample_values)
     return CpuSeriesData(
         x_values=x_values,
         x_label=x_label,
@@ -491,6 +512,7 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
 
     samples: List[Dict[int, Dict[str, object]]] = []
     x_values: List[object] = []
+    sample_values: List[int] = []
     cpu_ids: Set[int] = set()
 
     with path.open("r", encoding="utf-8", newline="") as handle:
@@ -500,10 +522,13 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
 
         is_mixed_scope = "Scope" in reader.fieldnames
 
-        if "CPU" not in reader.fieldnames:
+        required_columns = {"schema_version", "CPU"}
+        missing_columns = required_columns.difference(reader.fieldnames)
+        if missing_columns:
             raise SystemExit(
-                f"{path} does not look like per-CPU CSV. "
-                "Use CPU CSV export, for example: armstat -f csv -O cpus.csv"
+                f"{path} is missing required per-CPU CSV columns: "
+                f"{', '.join(sorted(missing_columns))}. "
+                "Use CPU CSV export, for example: armstat -a -f csv -O cpus.csv"
             )
 
         current_key: Optional[Tuple[object, object, object, object]] = None
@@ -520,6 +545,7 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
                 x_values.append(sample_x_value(
                     current_key[1], sample_index, current_key[2]
                 ))
+                sample_values.append(sample_index)
             current_sample = {}
 
         for item in reader:
@@ -527,8 +553,8 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
                 continue
 
             cpu_value = item.get("CPU")
-            if not cpu_value:
-                continue
+            if cpu_value in (None, ""):
+                raise SystemExit(f"{path} contains a per-CPU row without a CPU ID.")
             validate_schema_version(item.get("schema_version"), path)
 
             key = (
@@ -539,12 +565,12 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
                 current_key = key
             elif key != current_key:
                 flush_sample()
+                if end_sample is not None and sample_index >= end_sample:
+                    current_key = None
+                    break
                 current_key = key
 
-            if not is_number(cpu_value):
-                continue
-
-            cpu_id = int(to_float(cpu_value))
+            cpu_id = parse_cpu_id(cpu_value, path)
             row = {}
             for key, value in item.items():
                 if key in {
@@ -559,14 +585,16 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
                         continue
                 row[canonicalize_csv_key(key)] = value
             current_sample[cpu_id] = row
-            cpu_ids.add(cpu_id)
 
         flush_sample()
 
     if not samples:
         raise SystemExit(f"{path} does not contain per-CPU rows.")
 
-    x_label = "time" if isinstance(x_values[0], datetime) else "sample"
+    for sample in samples:
+        cpu_ids.update(sample.keys())
+
+    x_values, x_label = finalize_x_axis(x_values, sample_values)
     return CpuSeriesData(
         x_values=x_values,
         x_label=x_label,
@@ -577,15 +605,18 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
 
 
 def load_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSeriesData:
-    suffix = path.suffix.lower()
-    if suffix == ".json":
-        return load_json_cpu_series(path)
-    if suffix == ".csv":
-        return load_csv_cpu_series(path, sample_range)
-    raise SystemExit(
-        f"Unsupported input format for {path}. "
-        "Use CPU JSON or CPU CSV exported by armstat."
-    )
+    try:
+        suffix = path.suffix.lower()
+        if suffix == ".json":
+            return load_json_cpu_series(path)
+        if suffix == ".csv":
+            return load_csv_cpu_series(path, sample_range)
+        raise SystemExit(
+            f"Unsupported input format for {path}. "
+            "Use CPU JSON or CPU CSV exported by armstat."
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, csv.Error) as exc:
+        raise SystemExit(f"Could not read {path}: {exc}") from exc
 
 
 def slice_cpu_series(series: CpuSeriesData,

@@ -84,13 +84,19 @@ another row. The rebuild interval is not presented as a normal measurement.
   identity, and PMU metadata.
 - Slow-changing data: frequency limits, governor, boost, and cpuidle enable
   state, refreshed with a rolling budget.
-- Per-interval data: current frequency and Busy/Idle inputs, plus column-gated
+- Per-interval data is demand-driven: current frequency, Busy/Idle inputs,
   cpuidle split counters, package power, temperature, memory bandwidth, and
-  PMU counters.
+  PMU counters are read only when selected fields require them. `/proc/stat`
+  is shared by the selected Busy/Idle, LPI-residency, and system-counter
+  consumers. cpuidle selection is exact by output scope, state index, and
+  counter family: summary residency does not read `stateN/usage`, while an
+  `LPI-N_usage`-only CPU export does not read `stateN/time` or `/proc/stat`.
 
 `src/core/sample_cache.c` owns reusable storage and cached descriptors.
 `src/core/collector.c` exposes snapshot accessors for fields consumed by more
 than one downstream module; the snapshot is not yet fully opaque.
+The record builder likewise omits per-CPU and package materialization when the
+selected output policy cannot emit those scopes.
 
 ## Metric invariants and sources
 
@@ -106,6 +112,9 @@ maintainer invariants that calculations and serializers must preserve:
   time. The deepest visible usable state absorbs the residual so displayed
   states approximate `Idle%` rather than claiming raw cpuidle counters are a
   second Busy/Idle authority.
+- Per-CPU `LPI-N_usage` is the finite, non-negative `stateN/usage` counter
+  delta divided by measured interval seconds. Failure and counter reset samples
+  are unavailable and recovery establishes a new baseline.
 - `SUM` percentages and frequency are averages across valid tracked CPUs;
   system counters and PMU counters are interval deltas or aggregates.
 - Package rows group tracked CPUs by the physical package ID supplied by
@@ -193,8 +202,10 @@ layouts:
 - mixed-scope: identity columns `Scope,CPU,Package`, with rows ordered `SUM`,
   `PKG`, then `CPU` for each interval.
 
-Mixed headers qualify data columns as `summary.<field>`, `package.<field>`, or
-`cpu.<field>`. PMU fields use `summary.pmu.<event>` and `cpu.pmu.<event>`.
+Compact headers use the canonical JSON field keys. Mixed headers additionally
+qualify data columns as `summary.<field>`, `package.<field>`, or `cpu.<field>`.
+Compact PMU fields use `pmu.<event>`; mixed PMU fields use
+`summary.pmu.<event>` and `cpu.pmu.<event>`.
 Cells outside a row's scope and unavailable values are empty; valid zeroes
 remain zero. Fields containing a comma, quote, newline, or carriage return are
 quoted according to CSV rules, including doubling embedded quotes.
@@ -229,21 +240,39 @@ armstat -a -f json -O cpus.json
 armstat -a -f csv -O cpus.csv
 ```
 
-`scripts/plot_sum.py` handles summary series; `scripts/plot_cpu.py` handles
-per-CPU and grouped series. Both use `scripts/armstat_loader.py` for schema
-validation, field aliases, missing-value handling, and timestamps.
+Installed builds provide `armstat-plot-summary` for summary series and
+`armstat-plot-cpu` for per-CPU and grouped series. From a source tree, the
+equivalent entry points are `scripts/plot_sum.py` and `scripts/plot_cpu.py`.
+Both use the shared loader for schema validation, field aliases, missing-value
+handling, and timestamps. Inputs must contain the exact integer
+`schema_version` supported by the scripts; an absent or fractional version is
+rejected rather than guessed.
 
 ```bash
-python3 scripts/plot_sum.py summary.json --preset freq
-python3 scripts/plot_sum.py summary.json --y power --y2 temp0
-python3 scripts/plot_cpu.py cpus.json --preset busy --top 8
-python3 scripts/plot_cpu.py cpus.csv --group-by node --y busy
+armstat-plot-summary summary.json --preset freq
+armstat-plot-summary summary.json --y power --y2 temp0
+armstat-plot-cpu cpus.json --preset busy --top 8
+armstat-plot-cpu cpus.csv --group-by node --y busy
+armstat-plot-cpu cpus.csv --y lpi0_usage --top 8
 ```
 
 Use `--list-fields` to inspect available series. CPU plots should normally use
 `--cpu-filter`, `--top`, or `--group-by` on large machines. JSON inputs are
 loaded in full; CSV with `--sample-range` is streamed so only the requested
-sample window is retained. Missing values become `NaN` and appear as gaps.
+sample window is retained. Missing values become `NaN` and appear as gaps;
+presets fail clearly when all required source fields are unavailable. Real
+time is used only when every selected sample has a valid timestamp; otherwise
+the entire x-axis falls back to sample numbers instead of mixing axis types.
+Known fields show their canonical output units in field listings and axis
+labels. Smoothing is sample-based and preserves a gap when the current sample
+is unavailable, so a failed read or offline CPU is not drawn as stale data.
+CPUs or groups with no primary-field data anywhere in the selected window are
+reported and skipped, while intermittent missing samples remain visible gaps.
+For two-axis CPU plots, an entity that lacks only the secondary field keeps its
+primary line; its empty secondary line is reported and skipped.
+`--group-by core` uses `(package, core)` identity so equal core IDs from
+different packages never merge. `--rank-by avg` is the arithmetic mean of the
+visible samples, not a duration-weighted time average.
 
 ## Build and validation
 
@@ -258,9 +287,12 @@ make analyze
 ```
 
 `make test` covers C calculation and policy tests, CLI/error-path tests,
-text/JSON/CSV contracts, streaming and plotting loaders, and build/install
-transitions. `make debug-test` rebuilds and runs the suite with AddressSanitizer
-and UndefinedBehaviorSanitizer. On Linux with GCC, `make analyze` runs the
+text/JSON/CSV contracts, streaming and plotting loaders, optional real plot
+rendering when matplotlib is installed, and build/install transitions. Set
+`ARMSTAT_REQUIRE_PLOT_RENDER=1` to turn a missing matplotlib dependency into a
+test failure; CI enables this gate after installing the dependency.
+`make debug-test` rebuilds and runs the suite with AddressSanitizer and
+UndefinedBehaviorSanitizer. On Linux with GCC, `make analyze` runs the
 path-sensitive static analyzer in `.armstat-analysis/`.
 
 Out-of-tree builds use `O` and must keep generated files under that directory:
@@ -301,6 +333,12 @@ run can be requested with `ARMSTAT_SOAK_ITERATIONS` and
 `ARMSTAT_MAX_RSS_KIB`, `ARMSTAT_MAX_OPEN_FDS`, and
 `ARMSTAT_MAX_DIAGNOSTIC_LINES`.
 
+With `ARMSTAT_REQUIRE_CPUIDLE=1`, the target gate verifies every visible
+`idle_state_N_name` probe mapping, summary residency, and at least one finite,
+non-negative per-CPU `lpi0_usage` sample. That sample is also passed through
+the CPU plotting loader, so the checked path covers collection, export, and
+plot ingestion rather than stopping at the text display.
+
 Before release, require all host gates, the capability-appropriate target
 test, valid default text plus `-S`, JSON and CSV samples, and a sustained run
 on the actual server. Container or virtual ARM64 execution proves portability
@@ -311,11 +349,12 @@ semantics.
 
 `make install` installs:
 
-- `armstat` under `PREFIX/bin`;
+- `armstat`, `armstat-plot-summary`, and `armstat-plot-cpu` under
+  `PREFIX/bin`;
 - `man/armstat.8` under `PREFIX/share/man/man8`;
 - the README pair under `PREFIX/share/doc/armstat` and this reference pair
   under `PREFIX/share/doc/armstat/docs`;
-- plotting and loader scripts under `PREFIX/share/doc/armstat/scripts`.
+- shared plotting modules under `PREFIX/share/armstat`.
 
 The default `PREFIX` is `/usr`; staging with `DESTDIR` is supported.
 

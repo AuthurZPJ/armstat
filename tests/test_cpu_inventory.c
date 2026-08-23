@@ -130,6 +130,7 @@ static void test_cpu_list_mask_parser(void)
 	assert(parse_cpu_list_mask("4-2", mask, MAX_CPUS, &count) < 0);
 	assert(parse_cpu_list_mask("1x", mask, MAX_CPUS, &count) < 0);
 	assert(parse_cpu_list_mask("1,,2", mask, MAX_CPUS, &count) < 0);
+	assert(parse_cpu_list_mask(" \n", mask, MAX_CPUS, &count) < 0);
 	assert(parse_cpu_list_mask_with_total("0-10,5-15,7,20-22", mask,
 					      MAX_CPUS, &count,
 					      &total_count) == 0);

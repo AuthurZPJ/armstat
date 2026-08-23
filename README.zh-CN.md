@@ -50,6 +50,9 @@ make
 sudo make install
 ```
 
+安装后还会提供 `armstat-plot-summary` 与 `armstat-plot-cpu`；只有实际画图时
+才需要 matplotlib。
+
 判断可选字段缺失是否为缺陷前，应先检查 `--probe`。PMU/IPC 通常需要 root 或
 宽松的 `perf_event_paranoid`。生产部署前，执行
 [REFERENCE.zh-CN.md](docs/REFERENCE.zh-CN.md#arm64-目标机验收) 中带能力强制项的
@@ -259,8 +262,8 @@ src/output/    字段注册、中间记录以及 text/JSON/CSV serializer
 - **Slow-changing 层**：
   CPU min/max 频率、governor、boost 与 cpuidle `disable`
 - **Per-interval fast path**：
-  当前频率、`/proc/stat` delta、package 功耗、NUMA 温度、PMU 计数、
-  cpuidle `stateN/time`
+  按当前字段选择读取当前频率、`/proc/stat` delta、package 功耗、NUMA 温度、
+  PMU 计数和 cpuidle `stateN/time` 或 `stateN/usage`
 
 这样“平台上有什么”这类慢变化工作就不会落到每轮热路径里。
 
@@ -341,10 +344,17 @@ Busy/Idle。
 
 不是所有来源都会在每轮采样：
 
-- 只有显示 `LPI-*` 时才刷新 cpuidle 分 state 数据
+- 只有显示频率字段时才读取 per-CPU 当前频率及其 slow-changing cpufreq 元数据
+- 只有 Busy/Idle/IOWait、LPI residency 或系统计数字段需要时才解析
+  `/proc/stat`；只选择 usage 时不依赖它
+- cpuidle 只读取所选 state 与所需计数器类型：summary residency 不读取
+  `stateN/usage`，只选择 `LPI-N_usage` 时不读取 `stateN/time`
 - 只有有可见字段依赖 package power 时才读取功耗
 - 只有显示温度字段时才读取温度
 - 只有 PMU active 时才读取 PMU
+
+记录物化也遵循同一原则：summary-only 与 package-only 输出不会分配或填充
+per-CPU 输出行。
 
 ### 5. PMU grouping + scaling
 
@@ -375,6 +385,9 @@ make analyze        # Linux 上使用 GCC 静态分析器
 make target-test    # ARM64 Linux 主机运行态验收
 make O=/path/to/output
 ```
+
+本地构建可不安装画图库。如果发布门槛要求缺少 matplotlib 时测试必须失败，使用
+`ARMSTAT_REQUIRE_PLOT_RENDER=1 make test`；CI 会安装 matplotlib 并启用该门槛。
 
 armstat 可以从本仓库独立构建，也可以放入 Linux 源码树
 `tools/power/armstat` 后用同样的 `make` 命令构建。交叉编译通过
@@ -416,7 +429,7 @@ armstat --busy-source task-clock
 
 ### 其他选项
 
-- `-N, --header-iterations N` — 每 N 个 interval 重印一次 text 表头
+- `-N, --header-iterations N` — 每输出 N 行数据后重印一次 text 表头
 - `-J, --joules` — 显示区间能量（焦耳）
 - `-q, --quiet` — 抑制 interval banner 和 text 表头
 - `-h, --help` — 显示完整命令行摘要并退出
@@ -451,6 +464,8 @@ CSV 导出现在会在每行前面附带 `schema_version`、`interval`、真实�
 数据值写成列名。当同时选择多个 scope 时，CSV 使用 `Scope,CPU,Package` 身份列，
 并输出 `SUM`、`PKG` 或 `CPU` 行。像 `-s pkg_freq_mhz` 这样的 package 精确
 字段也会生成可用的 package-only 导出，不会只留下空文件。
+所有 CSV 数据列都使用与 JSON 相同的稳定字段 key；只有 mixed-scope CSV 会再加
+`summary.`、`package.` 或 `cpu.` 限定前缀。
 
 更完整的 JSON/CSV 字段与结构说明见[中文综合参考](docs/REFERENCE.zh-CN.md#输出契约)
 和[英文综合参考](docs/REFERENCE.md#output-contract)。
@@ -570,11 +585,16 @@ package 功耗与内存带宽 sysfs 路径、候选数量与歧义说明，以�
 探测。PMU 检查只会在
 第一个 tracked CPU 上打开 `cycles`，这是低成本能力检查，不代表每个事件都能
 在每个 CPU 上打开。key-value 输出包含 `probe_schema_version: 1`，部署脚本可
-据此显式拒绝未来不兼容的 probe 契约。
+据此显式拒绝未来不兼容的 probe 契约。当存在 cpuidle 状态时，
+`idle_state_N_name` 会把每个可见的 `LPI-N` 字段映射到 Linux 对应的
+`stateN/name` 值。
 
 ### 画图
 
-附带的画图脚本说明见[综合参考](docs/REFERENCE.zh-CN.md#导出画图)。
+附带的画图脚本会在字段列表和坐标轴显示标准单位；平滑不会抹掉不可用样本的
+断点。在所选时间窗内完全没有主字段数据的 CPU 或分组会被明确报告并跳过，
+不会生成只有图例的空线。在双轴 CPU 图中，只有主字段数据的实体仍会保留，
+但其空的次轴线会被报告并跳过。完整说明见[综合参考](docs/REFERENCE.zh-CN.md#导出画图)。
 
 ### 导出契约
 

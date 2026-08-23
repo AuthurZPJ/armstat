@@ -55,6 +55,9 @@ make
 sudo make install
 ```
 
+An installed build also provides `armstat-plot-summary` and
+`armstat-plot-cpu`; they require matplotlib only when a plot is rendered.
+
 Review `--probe` before treating missing optional fields as a defect. PMU/IPC
 normally requires root or a permissive `perf_event_paranoid` setting. Before a
 production rollout, run the capability-enforced target procedure in
@@ -299,8 +302,9 @@ systems" rather than "read everything on every interval".
 - **Slow-changing layer**:
   CPU min/max frequency, governor, boost, and cpuidle `disable` state
 - **Per-interval fast path**:
-  current frequency, `/proc/stat` deltas, package power, NUMA temperatures,
-  PMU counters, cpuidle `stateN/time`
+  the currently selected subset of current frequency, `/proc/stat` deltas,
+  package power, NUMA temperatures, PMU counters, and cpuidle `stateN/time` or
+  `stateN/usage`
 
 This keeps the expensive "what exists on this platform?" work out of the hot
 path.
@@ -391,10 +395,19 @@ interval percentages itself.
 
 Not every source is refreshed on every interval:
 
-- cpuidle `LPI-*` data is only refreshed when idle-state columns are visible
+- per-CPU current frequency and its slow-changing cpufreq metadata are only
+  read when frequency fields are visible
+- `/proc/stat` is only parsed when Busy/Idle/IOWait, LPI residency, or
+  system-counter fields need it; a usage-only selection does not require it
+- cpuidle reads only the selected state indices and counter family: summary
+  residency does not read `stateN/usage`, and `LPI-N_usage` alone does not read
+  `stateN/time`
 - power/energy sampling is only done when a visible field needs package power
 - temperature sampling is only done when temperature fields are visible
 - PMU sampling only runs when PMU is active
+
+Record materialization follows the same rule: summary-only and package-only
+output do not allocate or populate per-CPU output rows.
 
 ### 5. PMU grouping and scaling
 
@@ -427,6 +440,10 @@ make analyze        # GCC static analyzer on Linux
 make target-test    # ARM64 Linux host runtime acceptance
 make O=/path/to/output
 ```
+
+Plot rendering is optional for local builds. Set
+`ARMSTAT_REQUIRE_PLOT_RENDER=1 make test` when a missing matplotlib
+dependency must fail the test run; CI installs matplotlib and enables this gate.
 
 armstat can be built standalone from this repository, or placed inside the
 Linux source tree at `tools/power/armstat` and built there with the same
@@ -473,7 +490,7 @@ precision instead of rounding a valid short interval to zero.
 
 ### Other options
 
-- `-N, --header-iterations N` — reprint text header every N intervals
+- `-N, --header-iterations N` — reprint the text header after every N data rows
 - `-J, --joules` — show interval energy in Joules
 - `-q, --quiet` — suppress interval banner and text headers
 - `-h, --help` — show the complete command-line summary and exit
@@ -512,6 +529,8 @@ Summary CSV uses a `Scope` identity column containing `SUM`. When multiple
 scopes are selected, schema 8 CSV additionally uses `CPU,Package` identity
 columns and emits `SUM`, `PKG`, or `CPU` rows. Exact package fields such as
 `-s pkg_freq_mhz` produce a usable package-only export instead of an empty file.
+All CSV data columns use the same stable field keys as JSON; only mixed-scope
+CSV adds `summary.`, `package.`, or `cpu.` qualifiers.
 
 Detailed JSON/CSV field and structure documentation lives in the
 [English](docs/REFERENCE.md#output-contract) and
@@ -642,12 +661,18 @@ PMU availability probe. The PMU check
 opens `cycles` on the first tracked CPU only; it is a cheap capability check,
 not proof that every event can open on every CPU. The key-value output reports
 `probe_schema_version: 1` so deployment parsers can reject incompatible future
-probe contracts explicitly.
+probe contracts explicitly. When cpuidle states are present, `idle_state_N_name`
+maps each visible `LPI-N` field to the corresponding Linux `stateN/name` value.
 
 ### Plotting
 
 Helper plotting scripts are covered in the
-[reference](docs/REFERENCE.md#plotting-exports).
+[reference](docs/REFERENCE.md#plotting-exports). Field listings and axes carry
+the canonical units; smoothing preserves unavailable samples as visible gaps.
+CPUs or groups with no primary-field data anywhere in the selected window are
+reported and skipped instead of producing empty legend entries. In a two-axis
+CPU plot, an entity with primary data but no secondary data remains visible;
+only its empty secondary line is reported and skipped.
 
 ### Export Contract
 

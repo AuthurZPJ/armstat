@@ -65,23 +65,18 @@ static int ignore_sigpipe(void)
 
 static int open_output_stream(const char *output_file)
 {
+	int saved_errno;
+
 	if (!output_file)
 		return 0;
 
-	FILE *outfp = fopen(output_file, "w");
-	if (!outfp) {
+	if (!freopen(output_file, "w", stdout)) {
+		saved_errno = errno;
 		fprintf(stderr, "Error: cannot open output file %s: %s\n",
-			output_file, strerror(errno));
+			output_file, strerror(saved_errno));
 		return -1;
 	}
 
-	if (dup2(fileno(outfp), fileno(stdout)) < 0) {
-		fprintf(stderr, "Error: cannot redirect stdout to %s: %s\n",
-			output_file, strerror(errno));
-		fclose(outfp);
-		return -1;
-	}
-	fclose(outfp);
 	return 0;
 }
 
@@ -140,6 +135,22 @@ static const char *probe_idle_backend_name(void)
 	return "busy:procstat/schedstat";
 }
 
+static void print_probe_idle_state_names(void)
+{
+	int state_count = get_global_idle_state_count();
+
+	if (state_count > MAX_VISIBLE_IDLE_STATES)
+		state_count = MAX_VISIBLE_IDLE_STATES;
+	for (int state = 0; state < state_count; state++) {
+		const char *name = get_idle_state_name(state);
+
+		if (name && *name)
+			printf("  idle_state_%d_name: %s\n", state, name);
+		else
+			printf("  idle_state_%d_name: LPI-%d\n", state, state);
+	}
+}
+
 static int run_probe(struct armstat_options *opts)
 {
 	int pmu_available = 0;
@@ -179,6 +190,7 @@ static int run_probe(struct armstat_options *opts)
 	printf("  busy_source_effective: %s\n", get_busy_source_effective_name());
 	printf("  nohz_full_cpus: %d\n", get_nohz_full_cpu_count());
 	printf("  idle_states: %d\n", get_global_idle_state_count());
+	print_probe_idle_state_names();
 	printf("  uncore_freq_supported: %s\n",
 	       probe_yes_no(has_uncore_freq_support()));
 	if (has_uncore_freq_support()) {
@@ -326,8 +338,9 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 		return -1;
 	}
 
-	/* Setup formatter pool after we know the CPU count */
-	setup_formatter_pool(sys_snapshot_get_effective_cpu_count(snapshot));
+	/* Allocate per-CPU record storage only when this mode can emit CPU rows. */
+	setup_formatter_pool(!section_is_summary_mode() && section_emit_cpu() ?
+			     sys_snapshot_get_effective_cpu_count(snapshot) : 0);
 
 	/*
 	 * Phase 1b: Warm up aggregator with baseline for correct first interval delta

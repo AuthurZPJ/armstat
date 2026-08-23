@@ -9,7 +9,7 @@
  *    - State paths
  *
  * 2. DYNAMIC LAYER (per-interval):
- *    - State time counters
+ *    - Selected state time and usage counters
  *
  * DEFAULT POLICY:
  *    Use /proc/stat for authoritative Idle%/Busy% so short-interval scheduler
@@ -39,8 +39,8 @@
 #include "sysfs_util.h"
 
 /*
- * Idle state tracking
- * Stores cumulative time in each idle state
+ * Idle state tracking stores cumulative time and entry counts for selected
+ * states, then derives interval residency and entry rates.
  */
 
 /*
@@ -252,7 +252,8 @@ struct idle_state **get_idle_states_array(void)
 	return idle_states;
 }
 
-static int read_idle_state(int tracked_idx, int state, struct idle_state *info)
+static int read_idle_state(int tracked_idx, int state, struct idle_state *info,
+			   int read_time, int read_usage)
 {
 	char path[256];
 	char sub[64];
@@ -280,40 +281,35 @@ static int read_idle_state(int tracked_idx, int state, struct idle_state *info)
 
 	info->available = 1;
 
-	/* STATIC LAYER: Use cached name (read once at init) */
-	if (idle_state_names && state < max_idle_states && idle_state_names[state][0]) {
-		strncpy(info->name, idle_state_names[state], sizeof(info->name) - 1);
-		info->name[sizeof(info->name) - 1] = 0;
-	} else {
-		/* Should never happen if init succeeded - use fallback */
-		info->name[0] = '\0';
-	}
+	/* DYNAMIC LAYER: Read only counters required by selected output fields. */
+	if (read_time) {
+		fd = get_state_time_fd(tracked_idx, state);
+		if (fd >= 0) {
+			if (fd_read_ull_checked(fd, &info->time) == 0) {
+				info->time_valid = 1;
+			} else {
+				int idx = state_fd_index(tracked_idx, state);
 
-	/* DYNAMIC LAYER: Read time and usage every interval */
-	fd = get_state_time_fd(tracked_idx, state);
-	if (fd >= 0) {
-		if (fd_read_ull_checked(fd, &info->time) == 0) {
-			info->time_valid = 1;
-		} else {
-			int idx = state_fd_index(tracked_idx, state);
-
-			close(fd);
-			state_time_fds[idx] = -1;
-			state_time_fd_open_count--;
+				close(fd);
+				state_time_fds[idx] = -1;
+				state_time_fd_open_count--;
+			}
+		}
+		if (!info->time_valid) {
+			snprintf(sub, sizeof(sub), "cpuidle/state%d/time", state);
+			if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0 &&
+			    sysfs_read_ull_checked(path, &info->time) == 0)
+				info->time_valid = 1;
 		}
 	}
-	if (!info->time_valid) {
-		snprintf(sub, sizeof(sub), "cpuidle/state%d/time", state);
-		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0 &&
-		    sysfs_read_ull_checked(path, &info->time) == 0)
-			info->time_valid = 1;
-	}
 
-	/* usage is in a separate file and is not part of the cached-fd budget. */
-	snprintf(sub, sizeof(sub), "cpuidle/state%d/usage", state);
-	if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0 &&
-	    sysfs_read_ull_checked(path, &info->usage) == 0)
-		info->usage_valid = 1;
+	if (read_usage) {
+		/* usage is separate and is not part of the cached-fd budget. */
+		snprintf(sub, sizeof(sub), "cpuidle/state%d/usage", state);
+		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0 &&
+		    sysfs_read_ull_checked(path, &info->usage) == 0)
+			info->usage_valid = 1;
+	}
 
 	if (cpu_idle_state_disabled)
 		info->disabled = cpu_idle_state_disabled[tracked_idx * max_idle_states + state];
@@ -491,7 +487,7 @@ int init_cpuidle(void)
 	/* STATIC LAYER: Cache idle state names (read once, never changes) */
 	idle_state_names = calloc(max_idle_states, sizeof(char[32]));
 	if (!idle_state_names) {
-		/* Continue without cached names - will read each time */
+		/* Continue with stable generic LPI-N labels. */
 	} else {
 		/*
 		 * Read state names once at init.
@@ -539,12 +535,47 @@ int init_cpuidle(void)
 	return 0;
 }
 
-void update_idle_states(unsigned long long elapsed_us)
+static double cpuidle_delta_rate(unsigned long long current, int current_valid,
+				  unsigned long long previous, int previous_valid,
+				  unsigned long long elapsed_us, double scale)
+{
+	if (!current_valid || !previous_valid || elapsed_us == 0 ||
+	    current < previous)
+		return NAN;
+
+	return (double)(current - previous) * scale / (double)elapsed_us;
+}
+
+double cpuidle_residency_percent(unsigned long long current, int current_valid,
+				 unsigned long long previous, int previous_valid,
+				 unsigned long long elapsed_us)
+{
+	double percentage = cpuidle_delta_rate(current, current_valid,
+						 previous, previous_valid,
+						 elapsed_us, 100.0);
+
+	if (percentage > 100.0)
+		percentage = 100.0;
+	return percentage;
+}
+
+double cpuidle_usage_per_sec(unsigned long long current, int current_valid,
+			     unsigned long long previous, int previous_valid,
+			     unsigned long long elapsed_us)
+{
+	return cpuidle_delta_rate(current, current_valid, previous, previous_valid,
+				   elapsed_us, 1000000.0);
+}
+
+void update_idle_states(unsigned long long elapsed_us,
+			unsigned int residency_mask,
+			unsigned int usage_mask)
 {
 	int tracked;
 
 	/* Fast path: if cpuidle is not enabled, skip all sysfs reads */
-	if (!cpuidle_enabled)
+	if (!cpuidle_enabled || !cpuidle_initialized || !idle_states ||
+	    !(residency_mask | usage_mask))
 		return;
 
 	tracked = effective_cpu_count > 0 ? effective_cpu_count : get_cached_cpu_count();
@@ -557,7 +588,20 @@ void update_idle_states(unsigned long long elapsed_us)
 			continue;
 
 		for (state = 0; state < max_idle_states; state++) {
-			read_idle_state(tracked_idx, state, &idle_states[tracked_idx][state]);
+			unsigned int bit = 1U << state;
+			int read_time = (residency_mask & bit) != 0;
+			int read_usage = (usage_mask & bit) != 0;
+
+			if (read_time || read_usage) {
+				read_idle_state(tracked_idx, state,
+						&idle_states[tracked_idx][state],
+						read_time, read_usage);
+			} else {
+				memset(&idle_states[tracked_idx][state], 0,
+				       sizeof(idle_states[tracked_idx][state]));
+				idle_states[tracked_idx][state].percentage = NAN;
+				idle_states[tracked_idx][state].usage_per_sec = NAN;
+			}
 		}
 	}
 
@@ -570,37 +614,28 @@ void update_idle_states(unsigned long long elapsed_us)
 
 		/*
 		 * Calculate per-state residency against the sampled
-		 * wall-clock interval. Idle%/Busy% comes from /proc/stat,
-		 * while split LPI-* columns come from cpuidle residency.
+		 * wall-clock interval. Idle%/Busy% comes from the selected
+		 * procstat/schedstat policy, while split LPI-* columns come from
+		 * cpuidle residency.
 		 * Keeping the denominator as wall-clock time makes the
 		 * split state columns interpretable on their own.
 		 */
 		for (state = 0; state < max_idle_states; state++) {
 			int idx = tracked_idx * max_idle_states + state;
-			unsigned long long state_delta;
-			unsigned long long usage_delta;
-
-			if (idle_states[tracked_idx][state].time_valid &&
-			    prev_state_time_valid[idx] && elapsed_us > 0 &&
-			    idle_states[tracked_idx][state].time >= prev_state_times[idx]) {
-				state_delta = idle_states[tracked_idx][state].time -
-					prev_state_times[idx];
-				idle_states[tracked_idx][state].percentage =
-					(double)state_delta * 100.0 / (double)elapsed_us;
-				if (idle_states[tracked_idx][state].percentage > 100.0)
-					idle_states[tracked_idx][state].percentage = 100.0;
-			}
+			idle_states[tracked_idx][state].percentage =
+				cpuidle_residency_percent(
+					idle_states[tracked_idx][state].time,
+					idle_states[tracked_idx][state].time_valid,
+					prev_state_times[idx],
+					prev_state_time_valid[idx], elapsed_us);
 
 			/* Usage rate = stateN/usage delta / interval_seconds. */
-			if (idle_states[tracked_idx][state].usage_valid &&
-			    prev_state_usage_valid[idx] && elapsed_us > 0 &&
-			    idle_states[tracked_idx][state].usage >= prev_state_usages[idx]) {
-				usage_delta = idle_states[tracked_idx][state].usage -
-					prev_state_usages[idx];
-				idle_states[tracked_idx][state].usage_per_sec =
-					(double)usage_delta * 1000000.0 /
-					(double)elapsed_us;
-			}
+			idle_states[tracked_idx][state].usage_per_sec =
+				cpuidle_usage_per_sec(
+					idle_states[tracked_idx][state].usage,
+					idle_states[tracked_idx][state].usage_valid,
+					prev_state_usages[idx],
+					prev_state_usage_valid[idx], elapsed_us);
 		}
 	}
 
@@ -697,52 +732,7 @@ int is_cpuidle_enabled(void)
  */
 void close_cpuidle(void)
 {
-	int i;
-
-	/* Free idle states arrays */
-	if (idle_states) {
-		for (i = 0; i < cached_cpu_count && idle_states[i]; i++) {
-			free(idle_states[i]);
-			idle_states[i] = NULL;
-		}
-		free(idle_states);
-		idle_states = NULL;
-	}
-
-	/* Free previous state times and usage counters */
-	if (prev_state_times) {
-		free(prev_state_times);
-		prev_state_times = NULL;
-	}
-	if (prev_state_usages) {
-		free(prev_state_usages);
-		prev_state_usages = NULL;
-	}
-	if (prev_state_time_valid) {
-		free(prev_state_time_valid);
-		prev_state_time_valid = NULL;
-	}
-	if (prev_state_usage_valid) {
-		free(prev_state_usage_valid);
-		prev_state_usage_valid = NULL;
-	}
-
-	if (cpu_idle_state_counts) {
-		free(cpu_idle_state_counts);
-		cpu_idle_state_counts = NULL;
-	}
-	if (cpu_idle_state_disabled) {
-		free(cpu_idle_state_disabled);
-		cpu_idle_state_disabled = NULL;
-	}
-	if (state_time_fds) {
-		for (i = 0; i < cached_cpu_count * max_idle_states; i++) {
-			if (state_time_fds[i] >= 0)
-				close(state_time_fds[i]);
-		}
-		free(state_time_fds);
-		state_time_fds = NULL;
-	}
+	cleanup_cpuidle_runtime_allocations(cached_cpu_count);
 
 	/* Reset counters */
 	max_idle_states = 0;

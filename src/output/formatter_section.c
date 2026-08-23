@@ -95,6 +95,29 @@ int section_has_output(void)
 	       section_emit_default_summary();
 }
 
+void section_get_idle_collection_masks(unsigned int *residency_mask,
+				       unsigned int *usage_mask)
+{
+	unsigned int residency = 0;
+	unsigned int usage = 0;
+
+	if (summary_mode || section_emit_default_summary())
+		residency |= get_enabled_series_mask(
+			FIELD_SCOPE_SYSTEM, FIELD_SERIES_IDLE_STATE_RESIDENCY);
+
+	if (!summary_mode && section_emit_cpu()) {
+		residency |= get_enabled_series_mask(
+			FIELD_SCOPE_CPU, FIELD_SERIES_IDLE_STATE_RESIDENCY);
+		usage |= get_enabled_series_mask(
+			FIELD_SCOPE_CPU, FIELD_SERIES_IDLE_STATE_USAGE);
+	}
+
+	if (residency_mask)
+		*residency_mask = residency;
+	if (usage_mask)
+		*usage_mask = usage;
+}
+
 void set_section_summary_mode(int summary)
 {
 	summary_mode = summary;

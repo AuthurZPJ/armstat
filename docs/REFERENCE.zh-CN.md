@@ -71,11 +71,16 @@ aggregator，并在恢复输出前重新消费一次 baseline。重建区间不�
 
 - Static/rebuild：CPU membership、拓扑、传感器路径、cpuidle 状态身份、PMU 元数据。
 - Slow-changing：频率上下限、governor、boost、cpuidle enable 状态，使用滚动预算刷新。
-- Per-interval：读取当前频率与 Busy/Idle 输入；split cpuidle 计数器、package
-  功耗、温度、内存带宽和 PMU 则按列需求采集。
+- Per-interval 按需采集：当前频率、Busy/Idle 输入、split cpuidle 计数器、
+  package 功耗、温度、内存带宽和 PMU 都只在所选字段需要时读取；
+  `/proc/stat` 由被选中的 Busy/Idle、LPI residency 与系统计数消费者共享。
+  cpuidle 还会按输出 scope、state index 和 counter 类型精确选择：summary
+  residency 不读取 `stateN/usage`；只导出 CPU `LPI-N_usage` 时不读取
+  `stateN/time` 或 `/proc/stat`。
 
 `src/core/sample_cache.c` 管理复用存储与缓存描述符。`src/core/collector.c` 为多个
 下游消费者共同使用的快照字段提供 accessor；当前快照结构还没有完全 opaque。
+记录构造器同样会跳过当前输出策略不可能发出的 per-CPU 与 package scope 物化。
 
 ## 指标不变量与来源
 
@@ -87,6 +92,8 @@ README 保存完整的用户字段说明。实现与序列化必须维持以下�
   的 CPU 在输入有效时使用 `/proc/schedstat` runtime。
 - `LPI-*` 是 authoritative idle time 的显示分解。最深的可见可用状态吸收残差，
   使显示状态之和接近 `Idle%`；原始 cpuidle 计数器不是第二套 Busy/Idle 权威值。
+- per-CPU `LPI-N_usage` 是有限、非负的 `stateN/usage` 区间 delta 除以实测
+  interval 秒数；读取失败或计数器回退时当前样本不可用，恢复后重新建 baseline。
 - `SUM` 百分比与频率是有效 tracked CPU 的平均；系统计数器与 PMU 是区间 delta
   或聚合值。
 - Package 行按 topology 提供的 physical package ID 聚合 tracked CPU。
@@ -163,10 +170,11 @@ Header 只打印一次。稳定元数据之后有四种布局：
 - mixed-scope：身份列为 `Scope,CPU,Package`，每个 interval 内按 `SUM`、`PKG`、
   `CPU` 顺序输出。
 
-Mixed header 使用 `summary.<field>`、`package.<field>`、`cpu.<field>` 限定字段；
-PMU 使用 `summary.pmu.<event>` 与 `cpu.pmu.<event>`。不属于当前行 scope 的单元格和
-unavailable 值为空；有效零保持为零。含逗号、双引号、换行或回车的字段按 CSV
-规则加引号，并把内部双引号写成两个双引号。
+Compact header 使用 JSON 的标准字段 key。Mixed header 额外使用
+`summary.<field>`、`package.<field>`、`cpu.<field>` 限定字段；compact PMU 字段为
+`pmu.<event>`，mixed PMU 字段为 `summary.pmu.<event>` 与 `cpu.pmu.<event>`。
+不属于当前行 scope 的单元格和 unavailable 值为空；有效零保持为零。含逗号、
+双引号、换行或回车的字段按 CSV 规则加引号，并把内部双引号写成两个双引号。
 
 不要手工按逗号切分 CSV；应使用标准 CSV parser，并通过身份列筛选行。
 
@@ -195,20 +203,32 @@ armstat -a -f json -O cpus.json
 armstat -a -f csv -O cpus.csv
 ```
 
-`scripts/plot_sum.py` 处理 summary 序列；`scripts/plot_cpu.py` 处理 per-CPU 与分组
-序列。两者共同使用 `scripts/armstat_loader.py` 进行 schema 校验、字段别名、缺失值
-和时间戳处理。
+安装后使用 `armstat-plot-summary` 处理 summary 序列，使用
+`armstat-plot-cpu` 处理 per-CPU 与分组序列；源码树中的等价入口分别是
+`scripts/plot_sum.py` 与 `scripts/plot_cpu.py`。两者共同使用共享 loader 进行
+schema 校验、字段别名、缺失值和时间戳处理。输入必须含脚本支持的整数
+`schema_version`；缺失或小数版本会被明确拒绝，不做猜测。
 
 ```bash
-python3 scripts/plot_sum.py summary.json --preset freq
-python3 scripts/plot_sum.py summary.json --y power --y2 temp0
-python3 scripts/plot_cpu.py cpus.json --preset busy --top 8
-python3 scripts/plot_cpu.py cpus.csv --group-by node --y busy
+armstat-plot-summary summary.json --preset freq
+armstat-plot-summary summary.json --y power --y2 temp0
+armstat-plot-cpu cpus.json --preset busy --top 8
+armstat-plot-cpu cpus.csv --group-by node --y busy
+armstat-plot-cpu cpus.csv --y lpi0_usage --top 8
 ```
 
 用 `--list-fields` 查询可画字段。大型服务器上的 CPU 图通常应使用
 `--cpu-filter`、`--top` 或 `--group-by`。JSON 会完整载入内存；CSV 配合
-`--sample-range` 时只保留请求的样本窗口。缺失值转换为 `NaN`，图中表现为断点。
+`--sample-range` 时只保留请求的样本窗口。缺失值转换为 `NaN`，图中表现为断点；
+preset 所需数据全部不可用时会明确报错，不生成空图。只有所选样本的时间戳全部有效
+时才使用真实时间；否则整个横轴统一回退为样本号，避免混用两种坐标类型。
+字段列表和坐标轴会显示已知字段的标准输出单位。平滑按样本计算，并在当前样本
+不可用时保留断点，因此采集失败或 CPU 下线不会被画成沿用旧值。在所选时间窗内
+完全没有主字段数据的 CPU 或分组会被报告并跳过；间歇缺失仍然显示为断点。
+对于双轴 CPU 图，只缺次字段的实体仍保留主线，其空的次轴线会被报告并跳过。
+`--group-by core` 使用
+`(package, core)` 身份，不会把不同 package 中编号相同的 core 合并。
+`--rank-by avg` 是可见样本的算术平均，不是按采样时长加权的时间平均。
 
 ## 构建与验证
 
@@ -221,10 +241,13 @@ make debug-test
 make analyze
 ```
 
-`make test` 覆盖 C 计算与策略、CLI/错误路径、text/JSON/CSV 契约、streaming 与
-plot loader，以及构建/安装切换。`make debug-test` 使用 AddressSanitizer 与
-UndefinedBehaviorSanitizer 重建并运行完整测试。在 Linux + GCC 上，`make analyze`
-把 path-sensitive static analyzer 结果写入 `.armstat-analysis/`。
+`make test` 覆盖 C 计算与策略、CLI/错误路径、text/JSON/CSV 契约、streaming、
+plot loader、安装 matplotlib 时的真实渲染，以及构建/安装切换。设置
+`ARMSTAT_REQUIRE_PLOT_RENDER=1` 后，缺少 matplotlib 会使测试失败；CI 安装该依赖
+并启用此门槛。`make debug-test`
+使用 AddressSanitizer 与 UndefinedBehaviorSanitizer 重建并运行完整测试。在
+Linux + GCC 上，`make analyze` 把 path-sensitive static analyzer 结果写入
+`.armstat-analysis/`。
 
 Out-of-tree 构建通过 `O` 指定，所有生成文件都应留在该目录：
 
@@ -260,6 +283,11 @@ make target-test
 `ARMSTAT_SOAK_INTERVAL`；资源上限可通过 `ARMSTAT_MAX_RSS_KIB`、
 `ARMSTAT_MAX_OPEN_FDS` 和 `ARMSTAT_MAX_DIAGNOSTIC_LINES` 配置。
 
+启用 `ARMSTAT_REQUIRE_CPUIDLE=1` 后，目标门槛会验证每个可见的
+`idle_state_N_name` probe 映射、汇总驻留率，以及至少一个有限且非负的 per-CPU
+`lpi0_usage` 样本。该样本还会通过 CPU 画图加载器，因此验收链路覆盖采集、导出和
+画图输入，而不是只停留在文本显示。
+
 发布前必须通过所有主机门槛、符合平台能力的 target test，检查默认 text、`-S`、
 JSON、CSV 样本，并在真实服务器持续运行。容器或虚拟 ARM64 可以证明可移植性与输出
 契约，但不能证明真实 PMU、cpuidle、功耗、温度或内存带宽语义。
@@ -268,11 +296,11 @@ JSON、CSV 样本，并在真实服务器持续运行。容器或虚拟 ARM64 �
 
 `make install` 安装：
 
-- `armstat` 到 `PREFIX/bin`；
+- `armstat`、`armstat-plot-summary` 与 `armstat-plot-cpu` 到 `PREFIX/bin`；
 - `man/armstat.8` 到 `PREFIX/share/man/man8`；
 - README 中英文到 `PREFIX/share/doc/armstat`，本参考中英文到
   `PREFIX/share/doc/armstat/docs`；
-- plot 与 loader 脚本到 `PREFIX/share/doc/armstat/scripts`。
+- 共享画图模块到 `PREFIX/share/armstat`。
 
 默认 `PREFIX` 为 `/usr`，支持用 `DESTDIR` staging。
 

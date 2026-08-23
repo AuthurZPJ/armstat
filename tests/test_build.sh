@@ -45,13 +45,13 @@ release_test_cksum=$(cksum "$build_dir/tests/test_runtime_smoke")
 
 release_binary_cksum=$(cksum "$build_dir/armstat")
 MAKEFLAGS= MFLAGS= MAKEOVERRIDES= make -s -j4 -C "$src_dir" O="$build_dir" \
-	CFLAGS="-O0 -Wall -Wextra -I../../../include -D_FILE_OFFSET_BITS=64 -MMD -MP" \
+	CFLAGS="-O0 -Wall -Wextra -D_FILE_OFFSET_BITS=64 -MMD -MP" \
 	LDFLAGS= \
 	all
 debug_binary_cksum=$(cksum "$build_dir/armstat")
 test "$release_binary_cksum" != "$debug_binary_cksum"
 MAKEFLAGS= MFLAGS= MAKEOVERRIDES= make -s -j4 -C "$src_dir" O="$build_dir" \
-	CFLAGS="-O0 -Wall -Wextra -I../../../include -D_FILE_OFFSET_BITS=64 -MMD -MP" \
+	CFLAGS="-O0 -Wall -Wextra -D_FILE_OFFSET_BITS=64 -MMD -MP" \
 	LDFLAGS= \
 	tests/test_runtime_smoke
 debug_test_cksum=$(cksum "$build_dir/tests/test_runtime_smoke")
@@ -69,6 +69,10 @@ MAKEFLAGS= MFLAGS= MAKEOVERRIDES= make -s -j4 -C "$src_dir" O="$build_dir" \
 	DESTDIR="$stage_dir" PREFIX=/usr install
 
 test -x "$stage_dir/usr/bin/armstat"
+test -x "$stage_dir/usr/bin/armstat-plot-summary"
+test -x "$stage_dir/usr/bin/armstat-plot-cpu"
+test -r "$stage_dir/usr/share/armstat/plot_utils.py"
+test -r "$stage_dir/usr/share/armstat/armstat_loader.py"
 test -r "$stage_dir/usr/share/man/man8/armstat.8"
 test -r "$stage_dir/usr/share/doc/armstat/COPYING"
 test -r "$stage_dir/usr/share/doc/armstat/VERSION"
@@ -76,13 +80,16 @@ test -r "$stage_dir/usr/share/doc/armstat/README.md"
 test -r "$stage_dir/usr/share/doc/armstat/README.zh-CN.md"
 test -r "$stage_dir/usr/share/doc/armstat/docs/REFERENCE.md"
 test -r "$stage_dir/usr/share/doc/armstat/docs/REFERENCE.zh-CN.md"
-test -x "$stage_dir/usr/share/doc/armstat/scripts/plot_sum.py"
-test -x "$stage_dir/usr/share/doc/armstat/scripts/armstat_loader.py"
+"$stage_dir/usr/bin/armstat-plot-summary" --help >/dev/null
+"$stage_dir/usr/bin/armstat-plot-cpu" --help >/dev/null
 
 MAKEFLAGS= MFLAGS= MAKEOVERRIDES= make -s -j4 -C "$src_dir" O="$build_dir" \
 	DESTDIR="$stage_dir" PREFIX=/usr uninstall
 
 test ! -e "$stage_dir/usr/bin/armstat"
+test ! -e "$stage_dir/usr/bin/armstat-plot-summary"
+test ! -e "$stage_dir/usr/bin/armstat-plot-cpu"
+test ! -e "$stage_dir/usr/share/armstat"
 test ! -e "$stage_dir/usr/share/man/man8/armstat.8"
 test ! -e "$stage_dir/usr/share/doc/armstat"
 

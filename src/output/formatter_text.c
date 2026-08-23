@@ -409,7 +409,7 @@ void serialize_text(const struct interval_record *rec)
 
 	print_header = (!quiet_mode && iteration == 1);
 	if (!quiet_mode && header_interval > 0 &&
-	    iteration > 1 && iteration % header_interval == 0)
+	    iteration > 1 && (iteration - 1) % header_interval == 0)
 		print_header = 1;
 
 	if (section_is_summary_mode()) {

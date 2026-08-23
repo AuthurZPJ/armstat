@@ -43,11 +43,14 @@ static void print_csv_cell(const char *value)
 
 static void print_pmu_csv_headers(void)
 {
+	char header[128];
+
 	for (int i = 0; i < get_pmu_event_count(); i++) {
 		const char *name = get_pmu_event_name(i);
 
 		putchar(',');
-		print_csv_cell(name ? name : "pmu");
+		snprintf(header, sizeof(header), "pmu.%s", name ? name : "event");
+		print_csv_cell(header);
 	}
 }
 
@@ -190,7 +193,7 @@ static void serialize_csv_header(void)
 		printf("Scope");
 		for (int i = 0; i < system_count; i++) {
 			putchar(',');
-			print_csv_cell(system_fields[i]->label);
+			print_csv_cell(system_fields[i]->json_label);
 		}
 	} else if (package_section) {
 		machine_get_serialized_fields(FIELD_SCOPE_PACKAGE, package_fields,
@@ -198,7 +201,7 @@ static void serialize_csv_header(void)
 		printf("Package");
 		for (int i = 0; i < package_count; i++) {
 			putchar(',');
-			print_csv_cell(package_fields[i]->label);
+			print_csv_cell(package_fields[i]->json_label);
 		}
 	} else if (cpu_section && section_emit_cpu_identity()) {
 		machine_get_serialized_fields(FIELD_SCOPE_CPU, cpu_fields,
@@ -206,7 +209,7 @@ static void serialize_csv_header(void)
 		printf("CPU");
 		for (int i = 0; i < cpu_count; i++) {
 			putchar(',');
-			print_csv_cell(cpu_fields[i]->label);
+			print_csv_cell(cpu_fields[i]->json_label);
 		}
 	}
 

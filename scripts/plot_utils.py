@@ -8,13 +8,35 @@ functions that are common to both summary and per-CPU plotting workflows.
 from __future__ import annotations
 
 import math
-import sys
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
 SUPPORTED_SCHEMA_VERSION = 8
 SUPPORTED_SCHEMA_VERSIONS = {SUPPORTED_SCHEMA_VERSION}
+
+FIELD_UNITS = {
+    "freq": "MHz",
+    "uncore_freq": "MHz",
+    "min": "MHz",
+    "max": "MHz",
+    "idle_percent": "%",
+    "iowait_percent": "%",
+    "busy_percent": "%",
+    "power": "mW",
+    "energy": "J",
+    "mem_bw": "MiB/s",
+    "ctx_switches": "count/interval",
+    "interrupts": "count/interval",
+    "soft_interrupts": "count/interval",
+    "ipc": "instructions/cycle",
+    "temp": "degC",
+    "temp0": "degC",
+    "temp1": "degC",
+    "temp2": "degC",
+    "temp3": "degC",
+}
 
 
 def load_plotting_modules():
@@ -58,22 +80,71 @@ def is_number(value: object) -> bool:
         return False
 
 
+def is_finite_number(value: object) -> bool:
+    return is_number(value) and math.isfinite(to_float(value))
+
+
 def to_float(value: object) -> float:
     if value is None or value == "":
         return math.nan
-    if isinstance(value, (int, float)):
-        return float(value)
-    return float(str(value))
+    try:
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+        else:
+            numeric = float(str(value))
+    except (TypeError, ValueError):
+        return math.nan
+    return numeric if math.isfinite(numeric) else math.nan
+
+
+def field_unit(field: str) -> Optional[str]:
+    if field in FIELD_UNITS:
+        return FIELD_UNITS[field]
+    if re.fullmatch(r"lpi\d+", field):
+        return "%"
+    if re.fullmatch(r"lpi\d+_usage", field):
+        return "/s"
+    if field.startswith("pmu."):
+        return "count/interval"
+    return None
+
+
+def field_axis_label(fields: Sequence[str]) -> str:
+    resolved_units = [field_unit(field) for field in fields]
+    names = ", ".join(fields)
+    if resolved_units and resolved_units[0] is not None and all(
+        unit == resolved_units[0] for unit in resolved_units
+    ):
+        return f"{names} ({resolved_units[0]})"
+    if not any(resolved_units):
+        return names
+
+    labels: List[str] = []
+    for field, unit in zip(fields, resolved_units):
+        labels.append(f"{field} ({unit})" if unit else field)
+    return ", ".join(labels)
+
+
+def field_list_label(field: str) -> str:
+    unit = field_unit(field)
+    return f"{field} [{unit}]" if unit else field
 
 
 def validate_schema_version(value: object, source: Path) -> None:
     if value in (None, ""):
-        return
+        raise SystemExit(f"{source} is missing the required schema_version field.")
 
     if not is_number(value):
         raise SystemExit(f"{source} has a non-numeric schema_version field.")
 
-    version = int(to_float(value))
+    numeric_version = to_float(value)
+    if not math.isfinite(numeric_version) or not numeric_version.is_integer():
+        raise SystemExit(
+            f"{source} has an invalid schema_version={value!r}; "
+            "expected an integer."
+        )
+
+    version = int(numeric_version)
     if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise SystemExit(
             f"{source} uses schema_version={version}, "
@@ -90,27 +161,46 @@ def parse_sample_range(expr: Optional[str], total: int) -> Optional[Tuple[int, i
         raise SystemExit("Use --sample-range START:END, for example 10:100.")
 
     start_str, end_str = expr.split(sep, 1)
-    start = int(start_str) if start_str else 1
-    end = int(end_str) if end_str else total
+    try:
+        start = int(start_str) if start_str else 1
+        end = int(end_str) if end_str else total
+    except ValueError as exc:
+        raise SystemExit(
+            "Invalid --sample-range. Expected one-based START:END."
+        ) from exc
 
     if start < 1 or end < start:
         raise SystemExit("Invalid --sample-range. Expected one-based START:END.")
     if total <= 0:
         raise SystemExit("No samples available in the selected input.")
+    if start > total:
+        raise SystemExit(
+            f"--sample-range starts at {start}, but the input contains only "
+            f"{total} samples."
+        )
 
-    start = min(start, total)
     end = min(end, total)
     return start, end
 
 
 def smooth_series(values: Sequence[float], window: int) -> List[float]:
+    finite_values = [
+        value if math.isfinite(value) else math.nan
+        for value in values
+    ]
     if window <= 1:
-        return list(values)
+        return finite_values
 
     smoothed: List[float] = []
-    for end in range(len(values)):
+    for end in range(len(finite_values)):
+        if not math.isfinite(finite_values[end]):
+            smoothed.append(math.nan)
+            continue
         start = max(0, end - window + 1)
-        bucket = [value for value in values[start:end + 1] if not math.isnan(value)]
+        bucket = [
+            value for value in finite_values[start:end + 1]
+            if math.isfinite(value)
+        ]
         if not bucket:
             smoothed.append(math.nan)
         else:

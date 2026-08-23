@@ -21,6 +21,7 @@
 #include "formatter.h"
 #include "cpu_inventory.h"
 #include "idle_backend.h"
+#include "cpuidle.h"
 #include "power.h"
 #include "pmu.h"
 #include "sysstat.h"
@@ -125,6 +126,21 @@ static void test_incomplete_idle_state_data_stays_unavailable(void)
 	compute_idle_state_display(out, matrix, 0, 2, 80.0, visible, 1);
 	assert(isnan(out[0]));
 	assert(isnan(out[1]));
+}
+
+static void test_cpuidle_interval_delta_helpers(void)
+{
+	assert(isnan(cpuidle_residency_percent(120, 1, 100, 0, 1000000)));
+	assert(isnan(cpuidle_residency_percent(90, 1, 100, 1, 1000000)));
+	assert(isnan(cpuidle_residency_percent(120, 1, 100, 1, 0)));
+	assert(cpuidle_residency_percent(600000, 1, 100000, 1,
+					 1000000) == 50.0);
+	assert(cpuidle_residency_percent(2100000, 1, 100000, 1,
+					 1000000) == 100.0);
+
+	assert(isnan(cpuidle_usage_per_sec(12, 0, 10, 1, 1000000)));
+	assert(isnan(cpuidle_usage_per_sec(8, 1, 10, 1, 1000000)));
+	assert(cpuidle_usage_per_sec(15, 1, 10, 1, 500000) == 10.0);
 }
 
 static double jiffies_percent(unsigned long long jiffies,
@@ -793,6 +809,7 @@ int main(void)
 {
 	test_checked_numeric_readers_reject_malformed_values();
 	test_incomplete_idle_state_data_stays_unavailable();
+	test_cpuidle_interval_delta_helpers();
 	test_frequency_sample_handles_max_value();
 	test_aggregator_idle_100_pct();
 	test_aggregator_busy_50_pct();
