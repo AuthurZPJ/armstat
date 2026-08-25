@@ -25,6 +25,11 @@ default mode: one \fBSUM\fR row plus per-package aggregation rows
 .IP \(bu 2
 summary mode (\fB-S\fR): one \fBSUM\fR row per interval
 .IP \(bu 2
+normal multi-row text output prefixes every sample block with
+\fB--- interval N ---\fR and leaves a blank line between consecutive blocks;
+summary-only mode remains one row per interval, while quiet mode suppresses the
+block marker together with the banner and headers
+.IP \(bu 2
 explicit \fB-s\fR selection emits only scopes requested by the selected groups
 or exact fields; use \fBcpu\fR to request CPU rows and \fBpkg\fR to request
 package rows
@@ -131,7 +136,7 @@ export contract is documented in \fBREFERENCE.md\fR and
 \fBREFERENCE.zh-CN.md\fR
 .TP
 .B \-q, \-\-quiet
-Suppress the interval banner and text headers
+Suppress the text banner, headers, and interval markers
 .TP
 .B \-D, \-\-dump
 Wait for, collect, and print one complete interval, then exit. Text output
@@ -600,7 +605,11 @@ axis labels. Sample-based smoothing preserves unavailable samples as gaps;
 CPUs or groups with no primary-field data in the selected window are reported
 and skipped rather than producing empty legend entries. In a two-axis CPU
 plot, an entity with no secondary-field data keeps its primary line while its
-empty secondary line is reported and skipped.
+empty secondary line is reported and skipped. Time axes retain the RFC 3339
+offset from the export rather than using the plotting host's local timezone.
+Summary plots use ten distinct colors for the complete idle/LPI preset.
+Rendering uses a headless backend, and a completed image atomically replaces
+the destination so a rendering failure does not damage an existing plot.
 
 .SH SEE ALSO
 .BR turbostat (8),

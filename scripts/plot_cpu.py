@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -37,12 +36,14 @@ from armstat_loader import (  # noqa: E402
     slice_cpu_series,
 )
 from plot_utils import (  # noqa: E402
+    configure_time_axis,
     field_axis_label,
     field_list_label,
     is_finite_number,
     is_number,
     finalize_figure_layout,
     load_plotting_modules,
+    save_figure,
     smooth_series,
     to_float,
 )
@@ -487,15 +488,13 @@ def plot_cpu_series(series: CpuSeriesData,
             labels.append(f"cpu{cpu_id}:{right_field}")
         ax2.set_ylabel(field_axis_label([right_field]))
 
-    if series.x_values and isinstance(series.x_values[0], datetime):
-        locator = mdates.AutoDateLocator()
-        formatter = mdates.ConciseDateFormatter(locator)
-        ax1.xaxis.set_major_locator(locator)
-        ax1.xaxis.set_major_formatter(formatter)
+    configure_time_axis(ax1, series.x_values, mdates)
 
     finalize_figure_layout(fig, handles, labels, title or "armstat CPUs")
-    fig.savefig(output_path, dpi=160, bbox_inches="tight")
-    plt.close(fig)
+    try:
+        save_figure(fig, output_path)
+    finally:
+        plt.close(fig)
 
 
 def plot_group_series(series: CpuSeriesData,
@@ -564,11 +563,7 @@ def plot_group_series(series: CpuSeriesData,
             labels.append(label)
         ax2.set_ylabel(field_axis_label([right_field]))
 
-    if series.x_values and isinstance(series.x_values[0], datetime):
-        locator = mdates.AutoDateLocator()
-        formatter = mdates.ConciseDateFormatter(locator)
-        ax1.xaxis.set_major_locator(locator)
-        ax1.xaxis.set_major_formatter(formatter)
+    configure_time_axis(ax1, series.x_values, mdates)
 
     finalize_figure_layout(
         fig,
@@ -576,8 +571,10 @@ def plot_group_series(series: CpuSeriesData,
         labels,
         title or f"armstat CPUs grouped by {group_label}",
     )
-    fig.savefig(output_path, dpi=160, bbox_inches="tight")
-    plt.close(fig)
+    try:
+        save_figure(fig, output_path)
+    finally:
+        plt.close(fig)
 
 
 def parse_args() -> argparse.Namespace:

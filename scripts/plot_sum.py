@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -36,10 +35,12 @@ from armstat_loader import (  # noqa: E402
     slice_summary_series,
 )
 from plot_utils import (  # noqa: E402
+    configure_time_axis,
     field_axis_label,
     field_list_label,
     finalize_figure_layout,
     load_plotting_modules,
+    save_figure,
     smooth_series,
     to_float,
 )
@@ -159,8 +160,7 @@ def plot_summary(
     plt, mdates = load_plotting_modules()
 
     fig, ax1 = plt.subplots(figsize=(12, 6))
-    left_colors = ("#1f77b4", "#2ca02c", "#9467bd", "#8c564b")
-    right_colors = ("#d62728", "#ff7f0e", "#17becf", "#bcbd22")
+    color_map = plt.get_cmap("tab10")
 
     ax1.set_xlabel(series.x_label)
     ax1.grid(True, linestyle="--", alpha=0.35)
@@ -175,13 +175,14 @@ def plot_summary(
             values,
             linewidth=2,
             label=field,
-            color=left_colors[index % len(left_colors)],
+            color=color_map(index % color_map.N),
         )[0]
         handles.append(line)
         labels.append(field)
 
-    ax1.set_ylabel(field_axis_label(left_fields), color=left_colors[0])
-    ax1.tick_params(axis="y", labelcolor=left_colors[0])
+    left_axis_color = color_map(0)
+    ax1.set_ylabel(field_axis_label(left_fields), color=left_axis_color)
+    ax1.tick_params(axis="y", labelcolor=left_axis_color)
 
     if right_fields:
         ax2 = ax1.twinx()
@@ -192,23 +193,22 @@ def plot_summary(
                 values,
                 linewidth=2,
                 label=field,
-                color=right_colors[index % len(right_colors)],
+                color=color_map((len(left_fields) + index) % color_map.N),
             )[0]
             handles.append(line)
             labels.append(field)
 
-        ax2.set_ylabel(field_axis_label(right_fields), color=right_colors[0])
-        ax2.tick_params(axis="y", labelcolor=right_colors[0])
+        right_axis_color = color_map(len(left_fields) % color_map.N)
+        ax2.set_ylabel(field_axis_label(right_fields), color=right_axis_color)
+        ax2.tick_params(axis="y", labelcolor=right_axis_color)
 
-    if series.x_values and isinstance(series.x_values[0], datetime):
-        locator = mdates.AutoDateLocator()
-        formatter = mdates.ConciseDateFormatter(locator)
-        ax1.xaxis.set_major_locator(locator)
-        ax1.xaxis.set_major_formatter(formatter)
+    configure_time_axis(ax1, series.x_values, mdates)
 
     finalize_figure_layout(fig, handles, labels, title)
-    fig.savefig(output_path, dpi=160, bbox_inches="tight")
-    plt.close(fig)
+    try:
+        save_figure(fig, output_path)
+    finally:
+        plt.close(fig)
 
 
 def parse_args() -> argparse.Namespace:

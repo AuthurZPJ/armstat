@@ -22,7 +22,7 @@ import csv
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -150,13 +150,34 @@ class CpuSeriesData:
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+def parse_timestamp_timezone(timestamp_iso: object):
+    if not isinstance(timestamp_iso, str) or not timestamp_iso.strip():
+        return timezone.utc
+
+    value = timestamp_iso.strip()
+    if value.endswith(("Z", "z")):
+        value = f"{value[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return timezone.utc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return timezone.utc
+    return parsed.tzinfo
+
+
 def sample_x_value(timestamp: object, sample_index: int,
-                   timestamp_ns: object = None) -> object:
+                   timestamp_ns: object = None,
+                   timestamp_iso: object = None) -> object:
+    sample_timezone = parse_timestamp_timezone(timestamp_iso)
     try:
         if timestamp_ns not in (None, "") and is_finite_number(timestamp_ns):
-            return datetime.fromtimestamp(to_float(timestamp_ns) / 1_000_000_000.0)
+            return datetime.fromtimestamp(
+                to_float(timestamp_ns) / 1_000_000_000.0,
+                tz=sample_timezone,
+            )
         if is_finite_number(timestamp):
-            return datetime.fromtimestamp(to_float(timestamp))
+            return datetime.fromtimestamp(to_float(timestamp), tz=sample_timezone)
     except (OverflowError, OSError, ValueError):
         pass
     return sample_index
@@ -165,7 +186,24 @@ def sample_x_value(timestamp: object, sample_index: int,
 def finalize_x_axis(x_values: List[object],
                     sample_values: List[int]) -> Tuple[List[object], str]:
     if x_values and all(isinstance(value, datetime) for value in x_values):
-        return x_values, "time"
+        if all(left < right for left, right in zip(x_values, x_values[1:])):
+            offsets = {value.utcoffset() for value in x_values}
+            if len(offsets) == 1:
+                offset = next(iter(offsets)) or timedelta(0)
+                total_minutes = int(offset.total_seconds() // 60)
+                if total_minutes == 0:
+                    zone_label = "UTC"
+                else:
+                    sign = "+" if total_minutes >= 0 else "-"
+                    absolute_minutes = abs(total_minutes)
+                    zone_label = (
+                        f"UTC{sign}{absolute_minutes // 60:02d}:"
+                        f"{absolute_minutes % 60:02d}"
+                    )
+                return x_values, f"time ({zone_label})"
+
+            utc_values = [value.astimezone(timezone.utc) for value in x_values]
+            return utc_values, "time (UTC)"
 
     return list(sample_values), "sample"
 
@@ -314,7 +352,8 @@ def load_json_summary(path: Path) -> SeriesData:
         rows.append(row)
 
         x_values.append(sample_x_value(
-            item.get("timestamp"), sample_index, item.get("timestamp_ns")
+            item.get("timestamp"), sample_index, item.get("timestamp_ns"),
+            item.get("timestamp_iso")
         ))
         sample_values.append(sample_index)
 
@@ -391,7 +430,8 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
             rows.append(row)
 
             x_values.append(sample_x_value(
-                item.get("timestamp"), sample_index, item.get("timestamp_ns")
+                item.get("timestamp"), sample_index, item.get("timestamp_ns"),
+                item.get("timestamp_iso")
             ))
             sample_values.append(sample_index)
 
@@ -480,7 +520,8 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
 
         samples.append(sample)
         x_values.append(sample_x_value(
-            item.get("timestamp"), len(samples), item.get("timestamp_ns")
+            item.get("timestamp"), len(samples), item.get("timestamp_ns"),
+            item.get("timestamp_iso")
         ))
         sample_values.append(len(samples))
 
@@ -543,7 +584,7 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
             if sample_index >= start_sample and (end_sample is None or sample_index <= end_sample):
                 samples.append(current_sample)
                 x_values.append(sample_x_value(
-                    current_key[1], sample_index, current_key[2]
+                    current_key[1], sample_index, current_key[2], current_key[3]
                 ))
                 sample_values.append(sample_index)
             current_sample = {}

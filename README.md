@@ -74,6 +74,11 @@ production rollout, run the capability-enforced target procedure in
 - CSV writes summary-only, package-only, CPU-only, or explicitly scoped mixed
   rows, depending on the selected fields
 
+In normal text mode, every multi-row sample starts with an explicit
+`--- interval N ---` marker and consecutive sample blocks are separated by a
+blank line. Summary-only `-S` remains one row per interval, while `-q` suppresses
+the marker together with the banner and headers for compact text pipelines.
+
 This is intentionally `turbostat`-like, but it is not a byte-for-byte clone of
 the x86 tool. In particular, ARM platforms often do not expose a uniform
 hardware power/thermal/idle model comparable to x86 MSR/RAPL/TSC.
@@ -492,7 +497,7 @@ precision instead of rounding a valid short interval to zero.
 
 - `-N, --header-iterations N` — reprint the text header after every N data rows
 - `-J, --joules` — show interval energy in Joules
-- `-q, --quiet` — suppress interval banner and text headers
+- `-q, --quiet` — suppress the text banner, headers, and interval markers
 - `-h, --help` — show the complete command-line summary and exit
 - `-v, --version` — show version and exit
 
@@ -668,7 +673,12 @@ maps each visible `LPI-N` field to the corresponding Linux `stateN/name` value.
 
 Helper plotting scripts are covered in the
 [reference](docs/REFERENCE.md#plotting-exports). Field listings and axes carry
-the canonical units; smoothing preserves unavailable samples as visible gaps.
+the canonical units; time axes retain the export's RFC 3339 offset instead of
+silently adopting the plotting host's timezone, and smoothing preserves
+unavailable samples as visible gaps. Summary plots use a ten-color palette so
+the complete `idle-lpi` preset does not reuse four ambiguous colors. Images are
+rendered through a headless backend and atomically replace their destination
+only after rendering succeeds.
 CPUs or groups with no primary-field data anywhere in the selected window are
 reported and skipped instead of producing empty legend entries. In a two-axis
 CPU plot, an entity with primary data but no secondary data remains visible;

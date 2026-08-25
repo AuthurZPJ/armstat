@@ -54,6 +54,22 @@ class PlotLoaderTests(unittest.TestCase):
         self.assertTrue(math.isnan(values[2]))
         self.assertEqual(values[3], 30.0)
 
+    def test_failed_plot_write_preserves_existing_destination(self):
+        class FailingFigure:
+            def savefig(self, path, **_kwargs):
+                Path(path).write_bytes(b"partial")
+                raise RuntimeError("render failed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "plot.png"
+            output.write_bytes(b"previous complete image")
+
+            with self.assertRaisesRegex(SystemExit, "Could not write plot"):
+                plot_sum.save_figure(FailingFigure(), output)
+
+            self.assertEqual(output.read_bytes(), b"previous complete image")
+            self.assertEqual(list(output.parent.glob(".plot.*.png")), [])
+
     def test_non_finite_values_are_not_exposed_as_fields(self):
         fields = armstat_loader.collect_numeric_fields([
             {"power": float("inf"), "temp0": 45.0}
@@ -211,7 +227,7 @@ class PlotLoaderTests(unittest.TestCase):
             path.write_text(json.dumps(data), encoding="utf-8")
             series = plot_sum.load_summary_series(path)
 
-        self.assertEqual(series.x_label, "time")
+        self.assertEqual(series.x_label, "time (UTC)")
         self.assertIn("freq", series.numeric_fields)
         self.assertIn("uncore_freq", series.numeric_fields)
         self.assertNotIn("duration_us", series.numeric_fields)
@@ -315,7 +331,7 @@ class PlotLoaderTests(unittest.TestCase):
             path.write_text(content, encoding="utf-8")
             series = plot_sum.load_summary_series(path)
 
-        self.assertEqual(series.x_label, "time")
+        self.assertEqual(series.x_label, "time (UTC+08:00)")
         self.assertEqual(len(series.rows), 1)
         self.assertIn("freq", series.numeric_fields)
 
@@ -413,7 +429,7 @@ class PlotLoaderTests(unittest.TestCase):
             series = plot_cpu.load_cpu_series(path)
 
         self.assertEqual(series.cpu_ids, [0])
-        self.assertEqual(series.x_label, "time")
+        self.assertEqual(series.x_label, "time (UTC)")
         self.assertIn("freq", series.numeric_fields)
         self.assertEqual(
             plot_cpu.resolve_field_name("freq", series.numeric_fields), "freq"
@@ -431,7 +447,7 @@ class PlotLoaderTests(unittest.TestCase):
             series = plot_cpu.load_cpu_series(path)
 
         self.assertEqual(series.cpu_ids, [0])
-        self.assertEqual(series.x_label, "time")
+        self.assertEqual(series.x_label, "time (UTC+08:00)")
         self.assertIn("temp", series.numeric_fields)
 
     def test_cpu_csv_loader_accepts_high_lpi_usage_columns(self):

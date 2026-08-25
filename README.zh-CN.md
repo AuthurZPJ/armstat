@@ -69,6 +69,10 @@ sudo make install
 - CSV 根据所选字段输出 summary-only、package-only、CPU-only，或带明确
   scope 的混合行
 
+普通文本模式会在每个多行采样块前输出明确的 `--- interval N ---` 标记，并在
+相邻采样块之间留一个空行。Summary-only `-S` 仍保持每个 interval 一行；`-q`
+会连同启动 banner 和表头一起抑制该标记，便于紧凑的文本管道处理。
+
 它是“ARM 上的 turbostat 风格工具”，但不是 x86 `turbostat` 的
 逐列等价实现。
 
@@ -431,7 +435,7 @@ armstat --busy-source task-clock
 
 - `-N, --header-iterations N` — 每输出 N 行数据后重印一次 text 表头
 - `-J, --joules` — 显示区间能量（焦耳）
-- `-q, --quiet` — 抑制 interval banner 和 text 表头
+- `-q, --quiet` — 抑制 text banner、表头和 interval 标记
 - `-h, --help` — 显示完整命令行摘要并退出
 - `-v, --version` — 显示版本并退出
 
@@ -591,8 +595,11 @@ package 功耗与内存带宽 sysfs 路径、候选数量与歧义说明，以�
 
 ### 画图
 
-附带的画图脚本会在字段列表和坐标轴显示标准单位；平滑不会抹掉不可用样本的
-断点。在所选时间窗内完全没有主字段数据的 CPU 或分组会被明确报告并跳过，
+附带的画图脚本会在字段列表和坐标轴显示标准单位；时间轴保留导出记录中的
+RFC 3339 时区偏移，不会悄悄改用画图机器的本地时区。summary 图使用 10 色
+调色板，完整 `idle-lpi` preset 不会复用 4 种颜色；脚本使用无界面渲染后端，
+只有图片完整生成后才原子替换目标文件。平滑不会抹掉不可用样本的断点。
+在所选时间窗内完全没有主字段数据的 CPU 或分组会被明确报告并跳过，
 不会生成只有图例的空线。在双轴 CPU 图中，只有主字段数据的实体仍会保留，
 但其空的次轴线会被报告并跳过。完整说明见[综合参考](docs/REFERENCE.zh-CN.md#导出画图)。
 

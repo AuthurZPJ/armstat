@@ -287,6 +287,17 @@ static void emit_text_record(void *arg)
 	serialize_text(ctx->rec);
 }
 
+static void emit_two_text_records(void *arg)
+{
+	const struct serializer_args *ctx = arg;
+	struct interval_record rec = *ctx->rec;
+
+	rec.interval = 1;
+	serialize_text(&rec);
+	rec.interval = 2;
+	serialize_text(&rec);
+}
+
 static void emit_close_machine_json(void *arg)
 {
 	(void)arg;
@@ -946,6 +957,40 @@ static void test_default_text_emits_summary_and_package_rows(void)
 	free(output);
 }
 
+static void test_text_sample_blocks_have_visible_interval_boundaries(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[1];
+	struct cpu_freq_info freqs[1];
+	struct serializer_args args;
+	char *output;
+
+	reset_test_state();
+	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	rec.package_count = 1;
+	rec.packages[0].package_id = 0;
+	rec.packages[0].cpu_count = 1;
+	args.rec = &rec;
+
+	output = capture_stdout(emit_two_text_records, &args);
+	assert(strstr(output, "--- interval 1 ---\n") != NULL);
+	assert(strstr(output, "\n\n--- interval 2 ---\n") != NULL);
+	free(output);
+
+	set_text_quiet(1);
+	output = capture_stdout(emit_two_text_records, &args);
+	assert(strstr(output, "--- interval") == NULL);
+	free(output);
+
+	set_text_quiet(0);
+	set_section_summary_mode(1);
+	output = capture_stdout(emit_two_text_records, &args);
+	assert(strstr(output, "--- interval") == NULL);
+	free(output);
+}
+
 /* ============================================================================
  * TEST COVERAGE: Multi-CPU CSV serializer
  * ============================================================================ */
@@ -1351,6 +1396,7 @@ int main(void)
 	test_text_serializer_emits_column_headers_and_values();
 	test_text_header_interval_counts_complete_data_rows();
 	test_default_text_emits_summary_and_package_rows();
+	test_text_sample_blocks_have_visible_interval_boundaries();
 	test_multi_cpu_csv_serializer_emits_all_cpu_rows();
 	test_package_csv_serializer_emits_package_rows();
 	test_all_scope_csv_serializer_emits_package_rows();

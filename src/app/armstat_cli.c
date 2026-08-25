@@ -102,7 +102,7 @@ static void print_help(void)
 	printf("  -B, --busy-source <src> Busy/Idle source hint: auto, procstat, schedstat, task-clock\n");
 	printf("  -o, --output <file>    Write output to file\n");
 	printf("  -O, --export <file>    Alias for --output\n");
-	printf("  -q, --quiet            Suppress text banner and headers\n");
+	printf("  -q, --quiet            Suppress text banner, headers, and interval markers\n");
 	printf("  -D, --dump             Collect one complete interval and exit\n");
 	printf("  -S, --summary          Summary mode (SUM only)\n");
 	printf("  -a, --all              Enable all supported base column groups (use -I for IPC, -p for PMU)\n");

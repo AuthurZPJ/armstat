@@ -8,13 +8,17 @@ functions that are common to both summary and per-CPU plotting workflows.
 from __future__ import annotations
 
 import math
+import os
 import re
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
 SUPPORTED_SCHEMA_VERSION = 8
 SUPPORTED_SCHEMA_VERSIONS = {SUPPORTED_SCHEMA_VERSION}
+SUPPORTED_PLOT_SUFFIXES = {".pdf", ".png", ".svg"}
 
 FIELD_UNITS = {
     "freq": "MHz",
@@ -41,9 +45,14 @@ FIELD_UNITS = {
 
 def load_plotting_modules():
     try:
+        import matplotlib
+
+        # These helpers always render to a file.  A non-interactive backend
+        # keeps them usable on headless servers regardless of DISPLAY state.
+        matplotlib.use("Agg")
         import matplotlib.dates as mdates
         import matplotlib.pyplot as plt
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
         raise SystemExit(
             "matplotlib is required for plotting. Install it with:\n"
             "  python3 -m pip install matplotlib"
@@ -206,6 +215,53 @@ def smooth_series(values: Sequence[float], window: int) -> List[float]:
         else:
             smoothed.append(sum(bucket) / len(bucket))
     return smoothed
+
+
+def configure_time_axis(axis, x_values: Sequence[object], mdates) -> None:
+    if not x_values or not isinstance(x_values[0], datetime):
+        return
+
+    timezone = x_values[0].tzinfo
+    locator = mdates.AutoDateLocator(tz=timezone)
+    formatter = mdates.ConciseDateFormatter(locator, tz=timezone)
+    axis.xaxis.set_major_locator(locator)
+    axis.xaxis.set_major_formatter(formatter)
+
+
+def save_figure(fig, output_path: Path) -> None:
+    suffix = output_path.suffix.lower()
+    if suffix not in SUPPORTED_PLOT_SUFFIXES:
+        supported = ", ".join(sorted(item[1:] for item in SUPPORTED_PLOT_SUFFIXES))
+        raise SystemExit(
+            f"Unsupported plot output format '{output_path.suffix or '(none)'}'. "
+            f"Use one of: {supported}."
+        )
+
+    temporary_path: Optional[Path] = None
+    try:
+        fd, name = tempfile.mkstemp(
+            prefix=f".{output_path.stem}.",
+            suffix=suffix,
+            dir=output_path.parent,
+        )
+        os.close(fd)
+        temporary_path = Path(name)
+        fig.savefig(
+            temporary_path,
+            dpi=160,
+            bbox_inches="tight",
+            format=suffix[1:],
+        )
+        os.replace(temporary_path, output_path)
+        temporary_path = None
+    except Exception as exc:
+        raise SystemExit(f"Could not write plot {output_path}: {exc}") from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def compute_legend_columns(label_count: int) -> int:

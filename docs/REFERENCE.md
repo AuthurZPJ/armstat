@@ -186,6 +186,11 @@ Section presence follows the selected level. The default emits `summary` and
 `packages`; `-S` emits only `summary`; `-a` expands the output with `cpus`.
 Explicit selection can emit any valid combination.
 
+Human-readable multi-row output marks every sample block as
+`--- interval N ---` and separates consecutive blocks with a blank line. The
+marker is not part of JSON or CSV. Summary-only text remains one data row per
+interval, and quiet text omits the marker with the other human-facing headers.
+
 Unavailable numbers and strings are JSON `null`. Available `boost` values are
 JSON booleans. Non-finite internal floating-point values are normalized to
 `null`, so the output never depends on non-standard `NaN` or infinity tokens.
@@ -263,6 +268,11 @@ sample window is retained. Missing values become `NaN` and appear as gaps;
 presets fail clearly when all required source fields are unavailable. Real
 time is used only when every selected sample has a valid timestamp; otherwise
 the entire x-axis falls back to sample numbers instead of mixing axis types.
+The RFC 3339 offset carried by the export is retained and included in the axis
+label, so moving an export to a host in another timezone does not change the
+displayed clock. If offsets change inside one selected window, the axis is
+normalized to UTC. Non-increasing wall-clock timestamps also fall back to
+sample numbers so lines never run backward across the x-axis.
 Known fields show their canonical output units in field listings and axis
 labels. Smoothing is sample-based and preserves a gap when the current sample
 is unavailable, so a failed read or offline CPU is not drawn as stale data.
@@ -273,6 +283,11 @@ primary line; its empty secondary line is reported and skipped.
 `--group-by core` uses `(package, core)` identity so equal core IDs from
 different packages never merge. `--rank-by avg` is the arithmetic mean of the
 visible samples, not a duration-weighted time average.
+Summary rendering uses ten distinct colors, which covers every line in the
+complete `idle-lpi` preset without palette reuse. Both commands force a
+headless rendering backend and write through a temporary file in the output
+directory; the destination is atomically replaced only after a complete PNG,
+SVG, or PDF has been produced.
 
 ## Build and validation
 

@@ -47,6 +47,7 @@ def main() -> int:
         summary_path = output_dir / "summary.json"
         cpu_path = output_dir / "cpus.json"
         summary_output = output_dir / "plots" / "summary.png"
+        idle_output = output_dir / "plots" / "idle.svg"
         cpu_output = output_dir / "plots" / "cpus.svg"
 
         summary_path.write_text(json.dumps([
@@ -59,6 +60,10 @@ def main() -> int:
                 "summary": {
                     "power": 120_000 + interval * 100,
                     "temp0": 45.0 + interval,
+                    "busy_percent": 40.0 + interval,
+                    "idle_percent": 60.0 - interval,
+                    **{f"lpi{state}": 5.0 + state + interval
+                       for state in range(8)},
                 },
             }
             for interval in range(1, 4)
@@ -88,6 +93,10 @@ def main() -> int:
             "scripts/plot_sum.py", str(summary_path),
             "--preset", "power-temp", "-o", str(summary_output),
         ])
+        run_plot([
+            "scripts/plot_sum.py", str(summary_path),
+            "--preset", "idle-lpi", "-o", str(idle_output),
+        ])
         cpu_result = run_plot([
             "scripts/plot_cpu.py", str(cpu_path),
             "--y", "freq", "--y2", "temp", "--group-by", "core",
@@ -96,6 +105,12 @@ def main() -> int:
 
         assert summary_output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert summary_output.stat().st_size > 1_000
+        idle_svg = idle_output.read_text(encoding="utf-8")
+        for color in (
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+        ):
+            assert color in idle_svg
         svg = cpu_output.read_text(encoding="utf-8")
         assert "<svg" in svg[:1_000]
         assert "pkg0/core0:freq" in svg

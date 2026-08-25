@@ -412,6 +412,18 @@ void serialize_text(const struct interval_record *rec)
 	    iteration > 1 && (iteration - 1) % header_interval == 0)
 		print_header = 1;
 
+	/*
+	 * Default and expanded text views are multi-row sample blocks. Mark each
+	 * block explicitly so the next interval cannot be mistaken for another
+	 * section of the previous one. Summary-only mode remains one row per
+	 * interval, and quiet mode remains compact for simple text pipelines.
+	 */
+	if (!quiet_mode && !section_is_summary_mode()) {
+		if (iteration > 1)
+			putchar('\n');
+		printf("--- interval %llu ---\n", iteration);
+	}
+
 	if (section_is_summary_mode()) {
 		/* Summary-only mode: one SUM block. */
 		if (print_header)
