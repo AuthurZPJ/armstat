@@ -13,6 +13,7 @@ make              # Build armstat binary (default: -O2 -Wall -Wextra)
 make clean        # Clean build artifacts
 make debug        # Rebuild with AddressSanitizer + UBSan (-g -O0)
 make test         # Run all tests
+make analyze      # Run GCC or Clang path-sensitive static analysis
 make install      # Install to PREFIX (default /usr)
 make uninstall    # Remove installed files
 ```

@@ -42,12 +42,22 @@ static struct {
 static FILE *get_sysstat_fp(const char *path)
 {
 	int i;
+
 	for (i = 0; i < MAX_SYSSTAT_FDS && sysstat_fds[i].path; i++) {
 		if (strcmp(sysstat_fds[i].path, path) == 0) {
 			if (sysstat_fds[i].valid && sysstat_fds[i].fp) {
-				/* Seek to beginning for re-read */
-				rewind(sysstat_fds[i].fp);
-				return sysstat_fds[i].fp;
+				/*
+				 * A cached procfs stream can become unusable after a
+				 * transient read or seek error.  Reuse it only when the
+				 * seek succeeds; otherwise close and reopen the path below.
+				 */
+				if (fseek(sysstat_fds[i].fp, 0, SEEK_SET) == 0) {
+					clearerr(sysstat_fds[i].fp);
+					return sysstat_fds[i].fp;
+				}
+				fclose(sysstat_fds[i].fp);
+				sysstat_fds[i].fp = NULL;
+				sysstat_fds[i].valid = 0;
 			}
 			/* Open and cache */
 			sysstat_fds[i].fp = fopen(path, "r");
@@ -58,6 +68,7 @@ static FILE *get_sysstat_fp(const char *path)
 			return NULL;
 		}
 	}
+
 	/* Callers use only the fixed cached paths above. */
 	return NULL;
 }
@@ -276,7 +287,8 @@ static void refresh_proc_stat(void)
 		}
 	}
 
-	if (!saw_data)
+	/* Never publish a partial procfs snapshot after an I/O error. */
+	if (ferror(fp) || !saw_data)
 		return;
 
 	cached_ctxt = next_ctxt;
@@ -408,7 +420,9 @@ static void refresh_schedstat(void)
 		}
 	}
 
-	if (!saw_data || version < SCHEDSTAT_MIN_SUPPORTED_VERSION ||
+	/* Never publish a partial procfs snapshot after an I/O error. */
+	if (ferror(fp) || !saw_data ||
+	    version < SCHEDSTAT_MIN_SUPPORTED_VERSION ||
 	    version > SCHEDSTAT_MAX_SUPPORTED_VERSION)
 		return;
 

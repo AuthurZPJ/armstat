@@ -304,8 +304,6 @@ def main() -> int:
             args.format,
         )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
     plot_summary(
         series,
         left_fields,

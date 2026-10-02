@@ -65,7 +65,8 @@ CPU 不会占用 per-CPU PMU 或 sysfs 资源。当前编译表示范围为 CPU 
 `0..1023`；更多 CPU 或更高编号会明确报告为截断。
 
 在线 CPU membership 改变时，运行时重建所有 CPU 相关缓存与拓扑、重置
-aggregator，并在恢复输出前重新消费一次 baseline。重建区间不伪装成正常测量行。
+aggregator，并在恢复输出前重新消费一次 baseline。重建区间不伪装成正常测量行；
+重建完成后会重新采集两套时钟，避免其耗时进入下一条可见 interval 的比率分母。
 
 ### 三层采样
 
@@ -88,8 +89,16 @@ README 保存完整的用户字段说明。实现与序列化必须维持以下�
 
 - 每个有效 CPU 区间满足 `Idle% + Busy% = 100%`。
 - `IOWait%` 是独立的 `/proc/stat` 视角，不从 `Busy%` 中扣除。
-- `--busy-source=auto` 下，普通 CPU 使用 `/proc/stat`；识别为 `nohz_full`
-  的 CPU 在输入有效时使用 `/proc/schedstat` runtime。
+- `--busy-source=auto` 下，所有 tracked CPU（包括 `nohz_full` CPU）使用
+  `/proc/stat`。显式启用的 schedstat 仅用于诊断：运行时间在任务切换时结算，
+  可能遗漏仍在执行的任务。
+- 原始 PMU 事件要求 `0x`/`0X` 后跟不超过 64 位的十六进制数字，不接受符号
+  或内部空白。
+- PMU summary 累加 per-CPU 区间增量，不对累计总数求差；要求全部 tracked CPU
+  有效，区间和本身超过 64 位时显示不可用。
+- per-CPU PMU 复用缩放使用精确整数乘除并四舍五入。时间增量不合法、区间缩放
+  结果或累计值溢出时，该 CPU 整组事件在当前区间显示不可用，并重建累计基线，
+  后续有效区间可恢复，不会对永久饱和的计数求差而输出伪零。
 - `LPI-*` 是 authoritative idle time 的显示分解。最深的可见可用状态吸收残差，
   使显示状态之和接近 `Idle%`；原始 cpuidle 计数器不是第二套 Busy/Idle 权威值。
 - per-CPU `LPI-N_usage` 是有限、非负的 `stateN/usage` 区间 delta 除以实测
@@ -156,9 +165,15 @@ JSON 是顶层数组，每个可见区间对应一个对象。对象始终含上
 Section 是否存在由层级选择决定。默认输出 `summary` 和 `packages`；`-S` 只输出
 `summary`；`-a` 再展开 `cpus`。显式选择可以输出任意有效组合。
 
-人类可读的多行文本会用 `--- interval N ---` 标记每个采样块，并在连续采样块
-之间留一个空行。该标记不进入 JSON 或 CSV；summary-only 文本仍是每个 interval
-一行，quiet 文本则和其他人类可读表头一起省略该标记。
+多行文本在每个采样块前显示区间编号、带时区的采样时间和实际区间秒数，连续
+采样块之间留一个空行。Summary-only 每区间一行，行首显示时间。表头标明单位，
+`/int` 表示每区间计数。Quiet 模式省略时间、标记和表头。这些展示标签不改变
+机器字段名或 CLI 精确选择 token。
+文本会按当前 package 集合中最长的行标识确定列宽，稀疏的大 package 编号也能
+与表头、其他行保持对齐。文本标签、列选择或列宽变化时重印表头。
+CSV 校验各输出 scope 和有序列集合
+是否与首次表头一致；运行中能力变化导致布局改变时，在写入该区间前返回错误，
+进程以非零状态退出。仅 CPU 成员变化且列布局不变时仍可继续。
 
 不可用的数字和字符串输出 JSON `null`。可用 Boost 输出 JSON boolean。内部非有限
 浮点数会被归一化成 `null`，不会生成非标准 `NaN` 或 infinity token。字符串经过
@@ -181,6 +196,10 @@ Compact header 使用 JSON 的标准字段 key。Mixed header 额外使用
 双引号、换行或回车的字段按 CSV 规则加引号，并把内部双引号写成两个双引号。
 
 不要手工按逗号切分 CSV；应使用标准 CSV parser，并通过身份列筛选行。
+
+输出目标只会在 collector 初始化、baseline 采样和 formatter pool 分配全部成功后
+打开，因此这些启动失败不会截断已有导出。启动成功后采用 streaming 输出；后续
+采集或写入失败会保留已经完整生成的前缀，并返回非零状态。
 
 ### 单位与兼容性
 
@@ -211,7 +230,15 @@ armstat -a -f csv -O cpus.csv
 `armstat-plot-cpu` 处理 per-CPU 与分组序列；源码树中的等价入口分别是
 `scripts/plot_sum.py` 与 `scripts/plot_cpu.py`。两者共同使用共享 loader 进行
 schema 校验、字段别名、缺失值和时间戳处理。输入必须含脚本支持的整数
-`schema_version`；缺失或小数版本会被明确拒绝，不做猜测。
+`schema_version`；缺失或小数版本会被明确拒绝，不做猜测。缺失或类型错误的 JSON
+样本/section、非标准 JSON 数字常量、同一样本中的重复 JSON key 或 CPU ID、
+一基 interval 编号重复或不连续、重复 CSV 列名以及字段数量与表头不一致的数据行会被
+视为损坏输入并拒绝，避免静默丢弃或覆盖数值。
+超出浮点绘图范围的数值作为缺失值处理，过大的 JSON 整数不会触发未捕获的转换
+异常。输出目录由原子写入器创建，创建失败时给出简短错误。
+解析时区时会在临时副本中规范化小数秒，使 Python 3.10 也能解析导出的九位
+小数；原始时间戳和纳秒元数据仍予以保留。
+`+0800` 等紧凑 ISO 偏移也在该副本中转为 `+08:00`，使 Python 3.10 保留时区。
 
 ```bash
 armstat-plot-summary summary.json --preset freq
@@ -229,7 +256,9 @@ preset 所需数据全部不可用时会明确报错，不生成空图。只有�
 横轴保留导出记录携带的 RFC 3339 时区偏移，并把偏移写入轴标签，因此把导出文件
 移动到另一个时区的机器上画图不会改变显示时钟。如果一个时间窗内的偏移发生变化，
 横轴统一转为 UTC；wall-clock 时间不递增时则回退为样本号，避免折线在横轴上倒退。
-字段列表和坐标轴会显示已知字段的标准输出单位。平滑按样本计算，并在当前样本
+字段列表和坐标轴会显示已知字段的标准输出单位。同单位多字段的长纵轴标签缩为
+`Value (单位)`，图例保留全部字段名；绘图区顶部留白由渲染后的图例尺寸决定，
+避免按行数粗估而浪费空间。平滑按样本计算，并在当前样本
 不可用时保留断点，因此采集失败或 CPU 下线不会被画成沿用旧值。在所选时间窗内
 完全没有主字段数据的 CPU 或分组会被报告并跳过；间歇缺失仍然显示为断点。
 对于双轴 CPU 图，只缺次字段的实体仍保留主线，其空的次轴线会被报告并跳过。
@@ -238,7 +267,8 @@ preset 所需数据全部不可用时会明确报错，不生成空图。只有�
 `--rank-by avg` 是可见样本的算术平均，不是按采样时长加权的时间平均。
 summary 图使用 10 种不同颜色，足以覆盖完整 `idle-lpi` preset 的全部曲线而不复用
 颜色。两个命令都强制使用无界面渲染后端，并先在输出目录写临时文件；只有完整的
-PNG、SVG 或 PDF 生成成功后才原子替换目标文件。
+PNG、SVG 或 PDF 生成成功后才原子替换目标文件。覆盖时保留已有图片的权限位；
+新建图片使用正常的 `0666 & ~umask` 文件模式。
 
 ## 构建与验证
 
@@ -247,6 +277,7 @@ PNG、SVG 或 PDF 生成成功后才原子替换目标文件。
 ```bash
 make clean
 make
+make test
 make debug-test
 make analyze
 ```
@@ -255,9 +286,9 @@ make analyze
 plot loader、安装 matplotlib 时的真实渲染，以及构建/安装切换。设置
 `ARMSTAT_REQUIRE_PLOT_RENDER=1` 后，缺少 matplotlib 会使测试失败；CI 安装该依赖
 并启用此门槛。`make debug-test`
-使用 AddressSanitizer 与 UndefinedBehaviorSanitizer 重建并运行完整测试。在
-Linux + GCC 上，`make analyze` 把 path-sensitive static analyzer 结果写入
-`.armstat-analysis/`。
+使用 AddressSanitizer 与 UndefinedBehaviorSanitizer 重建并运行完整测试。
+`make analyze` 会根据当前编译器选择 GCC `-fanalyzer` 或 Clang `--analyze`。
+GCC 分析 object 隔离在 `.armstat-analysis/`，Clang 分析不发布 object。
 
 Out-of-tree 构建通过 `O` 指定，所有生成文件都应留在该目录：
 
@@ -265,6 +296,11 @@ Out-of-tree 构建通过 `O` 指定，所有生成文件都应留在该目录：
 make O=/tmp/armstat-build
 /tmp/armstat-build/armstat --version
 ```
+
+测试会关闭 Python 字节码缓存写入，画图子进程也继承该设置。`make O=... clean`
+保留源码目录的缓存，只清理选定的输出目录。因此只要 `O` 目录可写，构建、测试、
+debug 与静态分析都可以使用只读源码检出。源码树内的 `make clean` 仍会清理源码
+目录的 Python 缓存。
 
 ### ARM64 目标机验收
 
@@ -280,6 +316,7 @@ make target-test
 缺失值、进程资源，以及显式要求的 optional telemetry。能力门槛可这样启用：
 
 ```bash
+ARMSTAT_REQUIRE_FREQ=1 \
 ARMSTAT_REQUIRE_PMU=1 \
 ARMSTAT_REQUIRE_CPUIDLE=1 \
 ARMSTAT_REQUIRE_POWER=1 \
@@ -289,9 +326,17 @@ ARMSTAT_REQUIRE_UNCORE=1 \
 make target-test
 ```
 
-只启用部署平台明确承诺的能力。稳定性运行使用 `ARMSTAT_SOAK_ITERATIONS` 与
-`ARMSTAT_SOAK_INTERVAL`；资源上限可通过 `ARMSTAT_MAX_RSS_KIB`、
-`ARMSTAT_MAX_OPEN_FDS` 和 `ARMSTAT_MAX_DIAGNOSTIC_LINES` 配置。
+Busy/Idle 一致性是强制基础门槛。每个声明部署支持的鲲鹏型号都应启用
+`ARMSTAT_REQUIRE_FREQ=1`：它要求 summary 频率为有限正数，并要求每个 tracked
+CPU 至少取得一个有限正数的 `cpuinfo_cur_freq` 样本。其它强制项只在该部署平台
+明确承诺相应能力时启用。
+
+稳定性运行使用 `ARMSTAT_SOAK_ITERATIONS` 与 `ARMSTAT_SOAK_INTERVAL`，会在完整
+capture 中检查 Busy/Idle 以及所有显式强制能力。默认要求至少 95% 样本有效，可用
+`ARMSTAT_MIN_VALID_PERCENT` 调整。资源上限可通过 `ARMSTAT_MAX_RSS_KIB`、
+`ARMSTAT_MAX_OPEN_FDS` 和 `ARMSTAT_MAX_DIAGNOSTIC_LINES` 配置。要求 PMU 且未显式
+指定 fd 上限时，测试会把默认上限提高到每个 tracked CPU 至少两个 fd，再加少量
+进程余量，以匹配 IPC 的双事件 group。
 
 启用 `ARMSTAT_REQUIRE_CPUIDLE=1` 后，目标门槛会验证每个可见的
 `idle_state_N_name` probe 映射、汇总驻留率，以及至少一个有限且非负的 per-CPU

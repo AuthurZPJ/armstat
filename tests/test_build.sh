@@ -20,6 +20,10 @@ cleanup()
 }
 trap cleanup EXIT HUP INT TERM
 
+for script in "$src_dir"/tests/*.sh; do
+	sh -n "$script"
+done
+
 MAKEFLAGS= MFLAGS= MAKEOVERRIDES= make -s -j4 -C "$src_dir" O="$build_dir" all
 
 test -x "$build_dir/armstat"
@@ -100,3 +104,18 @@ test ! -e "$stage_dir/usr/share/doc/armstat"
 MAKEFLAGS= MFLAGS= MAKEOVERRIDES= make -s -C "$src_dir" O="$build_dir" clean
 test ! -e "$build_dir/coverage.gcda"
 test ! -e "$build_dir/tests/coverage.gcno"
+
+# Out-of-tree clean must not remove files from the source checkout, including
+# Python caches produced by another in-tree build or interactive plot run.
+clean_src_dir="$tmp_dir/clean-source"
+mkdir -p "$clean_src_dir/scripts/__pycache__" "$clean_src_dir/tests/__pycache__"
+cp "$src_dir/Makefile" "$src_dir/VERSION" "$clean_src_dir/"
+: >"$clean_src_dir/scripts/__pycache__/keep.pyc"
+: >"$clean_src_dir/tests/__pycache__/keep.pyc"
+MAKEFLAGS= MFLAGS= MAKEOVERRIDES= make -s -C "$clean_src_dir" \
+	O="$build_dir" clean
+test -f "$clean_src_dir/scripts/__pycache__/keep.pyc"
+test -f "$clean_src_dir/tests/__pycache__/keep.pyc"
+MAKEFLAGS= MFLAGS= MAKEOVERRIDES= make -s -C "$clean_src_dir" clean
+test ! -e "$clean_src_dir/scripts/__pycache__"
+test ! -e "$clean_src_dir/tests/__pycache__"

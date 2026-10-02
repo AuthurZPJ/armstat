@@ -62,7 +62,7 @@ def main() -> int:
                     "temp0": 45.0 + interval,
                     "busy_percent": 40.0 + interval,
                     "idle_percent": 60.0 - interval,
-                    **{f"lpi{state}": 5.0 + state + interval
+                    **{f"lpi{state}": (60.0 - interval) * (state + 1) / 36.0
                        for state in range(8)},
                 },
             }
@@ -106,6 +106,7 @@ def main() -> int:
         assert summary_output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert summary_output.stat().st_size > 1_000
         idle_svg = idle_output.read_text(encoding="utf-8")
+        assert "Value (%)" in idle_svg
         for color in (
             "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
             "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
@@ -121,6 +122,40 @@ def main() -> int:
         assert "pkg0/core2:freq" not in svg
         assert "skipping groups" in cpu_result.stderr
         assert "skipping secondary 'temp' lines" in cpu_result.stderr
+
+        # Inspect the same ten-line chart before savefig expands/crops its
+        # canvas. A clipped label or a legend over the axes is a layout failure
+        # even when the PNG/SVG can be written successfully.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import plot_sum
+
+        series = plot_sum.load_summary_series(summary_path)
+        left_fields, right_fields, title = plot_sum.resolve_preset(series, "idle-lpi")
+        original_save = plot_sum.save_figure
+
+        def inspect_layout(fig, path):
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            axis = fig.axes[0]
+            figure_box = fig.bbox
+            label_box = axis.yaxis.label.get_window_extent(renderer)
+            legend_box = fig.legends[0].get_window_extent(renderer)
+            axes_box = axis.get_window_extent(renderer)
+            assert figure_box.contains(label_box.x0, label_box.y0)
+            assert figure_box.contains(label_box.x1, label_box.y1)
+            assert legend_box.y0 > axes_box.y1
+            assert axes_box.height > figure_box.height * 0.55
+            assert [text.get_text() for text in fig.legends[0].get_texts()] == left_fields
+            original_save(fig, path)
+
+        plot_sum.save_figure = inspect_layout
+        try:
+            plot_sum.plot_summary(
+                series, left_fields, right_fields,
+                output_dir / "plots" / "idle-layout.png", title, 1,
+            )
+        finally:
+            plot_sum.save_figure = original_save
 
     print("plot render tests: PASS")
     return 0

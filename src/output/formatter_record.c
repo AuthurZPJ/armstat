@@ -7,7 +7,6 @@
  * Typed field getters live separately in formatter_values.c.
  */
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -37,24 +36,25 @@ static double clamp_percent(double pct)
 }
 
 static const struct idle_state *get_raw_idle_state(const struct sys_snapshot *raw,
-						   int cpu_idx, int state_idx)
+						   int tracked_idx,
+						   int state_idx)
 {
-	if (!raw || !raw->idle || cpu_idx < 0)
+	if (!raw || !raw->idle || tracked_idx < 0)
 		return NULL;
 	if (state_idx < 0 || state_idx >= raw->idle_state_count)
 		return NULL;
-	if (!raw->idle[cpu_idx])
+	if (!raw->idle[tracked_idx])
 		return NULL;
 
-	return &raw->idle[cpu_idx][state_idx];
+	return &raw->idle[tracked_idx][state_idx];
 }
 
 static const struct idle_state *get_usable_raw_idle_state(
 	const struct sys_snapshot *raw,
-	int cpu_idx, int state_idx)
+	int tracked_idx, int state_idx)
 {
 	const struct idle_state *state =
-		get_raw_idle_state(raw, cpu_idx, state_idx);
+		get_raw_idle_state(raw, tracked_idx, state_idx);
 
 	if (!state || !state->available || state->disabled)
 		return NULL;
@@ -164,25 +164,26 @@ static void fill_record_summary(struct interval_record *rec,
 
 static void materialize_cpu_idle_usage(struct cpu_row *row,
 				       const struct sys_snapshot *raw,
-				       int cpu_idx)
+				       int tracked_idx)
 {
 	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++) {
 		const struct idle_state *state =
-			get_usable_raw_idle_state(raw, cpu_idx, s);
+			get_usable_raw_idle_state(raw, tracked_idx, s);
 
 		row->idle_state_usage[s] = state ? state->usage_per_sec : NAN;
 	}
 }
 
-static double compute_cpu_temp_c(const struct sys_snapshot *raw, int cpu_idx)
+static double compute_cpu_temp_c(const struct sys_snapshot *raw,
+				 int tracked_idx)
 {
 	int cpu_id;
 	int numa;
 
-	if (!raw || cpu_idx < 0)
+	if (!raw || tracked_idx < 0)
 		return NAN;
 
-	cpu_id = get_cpu_id_by_tracked_idx(cpu_idx);
+	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
 	if (cpu_id < 0)
 		return NAN;
 
@@ -210,7 +211,7 @@ static void materialize_cpu_rows(struct interval_record *rec,
 		double idle_pct;
 
 		memset(row, 0, sizeof(*row));
-		row->cpu_idx = i;
+		row->tracked_idx = i;
 
 		if (freqs)
 			row->freq = freqs[i];
@@ -360,34 +361,32 @@ void free_interval_record(struct interval_record *rec)
 
 /* Reusable pool lifecycle ------------------------------------------------ */
 
-void setup_formatter_pool(int max_cpus)
+int setup_formatter_pool(int max_cpus)
 {
-	if (rec_pool) {
-		free(rec_pool);
-		rec_pool = NULL;
-	}
-	if (cpu_rows_pool) {
-		free(cpu_rows_pool);
-		cpu_rows_pool = NULL;
+	struct interval_record *new_rec_pool;
+	struct cpu_row *new_cpu_rows_pool = NULL;
+
+	if (max_cpus < 0 || max_cpus > MAX_CPUS)
+		return -1;
+
+	new_rec_pool = calloc(1, sizeof(struct interval_record));
+	if (max_cpus > 0)
+		new_cpu_rows_pool = calloc(max_cpus, sizeof(struct cpu_row));
+
+	if (!new_rec_pool || (max_cpus > 0 && !new_cpu_rows_pool)) {
+		free(new_rec_pool);
+		free(new_cpu_rows_pool);
+		return -1;
 	}
 
-	rec_pool = calloc(1, sizeof(struct interval_record));
-	cpu_rows_pool = max_cpus > 0 ?
-		calloc(max_cpus, sizeof(struct cpu_row)) : NULL;
-
-	if (!rec_pool || (max_cpus > 0 && !cpu_rows_pool)) {
-		fprintf(stderr, "Error: failed to allocate formatter pool\n");
-		free(rec_pool);
-		free(cpu_rows_pool);
-		rec_pool = NULL;
-		cpu_rows_pool = NULL;
-		cpu_rows_pool_size = 0;
-		pool_initialized = 0;
-		return;
-	}
+	free(rec_pool);
+	free(cpu_rows_pool);
+	rec_pool = new_rec_pool;
+	cpu_rows_pool = new_cpu_rows_pool;
 
 	cpu_rows_pool_size = max_cpus;
 	pool_initialized = 1;
+	return 0;
 }
 
 void cleanup_formatter_pool(void)

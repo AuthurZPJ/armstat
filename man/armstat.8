@@ -26,9 +26,15 @@ default mode: one \fBSUM\fR row plus per-package aggregation rows
 summary mode (\fB-S\fR): one \fBSUM\fR row per interval
 .IP \(bu 2
 normal multi-row text output prefixes every sample block with
-\fB--- interval N ---\fR and leaves a blank line between consecutive blocks;
-summary-only mode remains one row per interval, while quiet mode suppresses the
-block marker together with the banner and headers
+an interval number, a timezone-qualified sample timestamp, and measured duration
+in seconds, with a blank line between blocks. Summary-only rows start with a
+timestamp. Headers include units such as Freq[MHz] and CtxSw[/int] (count per
+interval). Quiet mode suppresses timestamps, markers, the banner, and headers
+Text columns remain aligned with large, sparse package IDs. Headers also repeat
+when column layout changes. CSV stops with an error
+before emitting a row whose columns differ from its original header; the
+complete prefix is preserved. Restart CSV capture or use JSON for changing
+column sets.
 .IP \(bu 2
 explicit \fB-s\fR selection emits only scopes requested by the selected groups
 or exact fields; use \fBcpu\fR to request CPU rows and \fBpkg\fR to request
@@ -51,7 +57,9 @@ deadlines are skipped rather than followed by burst catch-up samples; metric
 calculations continue to use the measured interval delta.
 .PP
 If armstat rebuilds runtime state after CPU topology change, that sample
-becomes a new baseline and is not printed as a normal interval row.
+becomes a new baseline and is not printed as a normal interval row. Clocks are
+captured again after rebuild work completes, so rebuild latency is excluded
+from the following visible interval's rate denominator.
 
 .SH SUPPORTED PLATFORM
 The initial supported hardware family is Huawei Kunpeng running ARM64 Linux.
@@ -94,9 +102,8 @@ before normal interval sampling, armstat makes a best-effort attempt to lower
 its own nice value, matching turbostat's intent to reduce monitor-induced
 scheduling jitter; failure is non-fatal
 .IP \(bu 2
-the default Busy/Idle policy is \fBauto\fR: use \fB/proc/stat\fR on ordinary
-CPUs and prefer \fB/proc/schedstat\fR runtime accounting on CPUs listed in
-\fB/sys/devices/system/cpu/nohz_full\fR. The \fBtask-clock\fR mode is retained
+the default Busy/Idle policy is \fBauto\fR: use \fB/proc/stat\fR on all
+tracked CPUs, including \fBnohz_full\fR CPUs. The \fBtask-clock\fR mode is retained
 as a compatibility alias and currently resolves to the same implementation as
 \fBschedstat\fR
 
@@ -111,7 +118,8 @@ subsecond precision
 Number of completed samples to print. Zero means unlimited and is the default
 .TP
 .BI \-N ", " \-\-header-iterations " n"
-Reprint the text header after every N data rows
+Reprint text headers every N complete samples. Zero prints them on startup
+and whenever the layout changes
 .TP
 .BI \-c ", " \-\-cpu " cpu-list"
 Monitor only the specified real CPU IDs. Accepts comma-separated values and
@@ -133,10 +141,12 @@ Export text, JSON, or CSV output to file. This is an explicit alias of
 \fB-o\fR / \fB--output\fR and is especially convenient for machine-readable
 formats. Current JSON/CSV exports carry \fBschema_version=8\fR. The detailed
 export contract is documented in \fBREFERENCE.md\fR and
-\fBREFERENCE.zh-CN.md\fR
+\fBREFERENCE.zh-CN.md\fR. An existing target is not truncated until collector
+initialization, the baseline sample, and formatter-buffer allocation have
+succeeded; interval data is streamed after startup
 .TP
 .B \-q, \-\-quiet
-Suppress the text banner, headers, and interval markers
+Suppress the text banner, headers, timestamps, and interval markers
 .TP
 .B \-D, \-\-dump
 Wait for, collect, and print one complete interval, then exit. Text output
@@ -293,11 +303,19 @@ armstat best-effort raises its soft \fBRLIMIT_NOFILE\fR within the existing
 hard limit and warns if the resulting budget may still be insufficient.
 
 Raw ARM PMU event configs can also be requested as hexadecimal values such as
-\fB0x11\fR.
+\fB0x11\fR. Only hexadecimal digits may follow the 0x/0X prefix;
+signs, embedded whitespace, and values exceeding 64 bits are rejected.
 
 Short reads, read errors, counter resets, and intervals with no PMU running
 time make that CPU unavailable for the interval and establish a new baseline.
 Summary PMU data is available only when every tracked CPU has a valid interval.
+Summary counts sum per-CPU interval deltas; saturation of an accumulated
+lifetime sum does not turn subsequent intervals into zeroes. An interval sum
+that itself exceeds 64 bits is unavailable.
+Multiplex scaling uses exact integer arithmetic rounded to nearest. An
+unrepresentable scaled interval, overflowing per-CPU cumulative total, or
+invalid enabled/running time delta invalidates that CPU's whole group for the
+interval and resets its cumulative baseline, allowing later intervals to recover.
 IPC is available only when the active list contains both named events
 \fBcycles\fR and \fBinstructions\fR and the interval cycle count is nonzero.
 
@@ -309,6 +327,10 @@ to choose between \fB/proc/stat\fR and \fB/proc/schedstat\fR per CPU.
 The schedstat reader accepts known versions 10 through 17, requires all nine
 CPU fields, and reads task runtime from field 7. Unknown versions or invalid
 records fall back to procstat through the per-CPU busy-source policy.
+Schedstat is a diagnostic opt-in: runtime is settled when tasks switch out,
+so continuously running tasks may appear idle until a later switch.
+Use the default auto policy for utilization monitoring. Very short procstat
+intervals can show USER_HZ tick quantization; try a one-second interval.
 
 .SH OUTPUT MODEL
 Machine-readable output uses schema version 8. Unavailable numeric and string
@@ -597,6 +619,14 @@ Probe the current platform:
 .PP
 Architecture, machine-readable exports, plotting, and release validation are
 documented together in \fBREFERENCE.md\fR and \fBREFERENCE.zh-CN.md\fR.
+The ARM64 target gate always checks coherent summary and per-CPU Busy/Idle
+samples. Production Kunpeng acceptance should additionally set
+\fBARMSTAT_REQUIRE_FREQ=1\fR, and soak runs enforce a configurable valid-sample
+ratio through \fBARMSTAT_MIN_VALID_PERCENT\fR (95 by default) for basic and
+explicitly required telemetry.
+Out-of-tree builds and tests support a read-only source checkout through
+\fBmake O=/path/to/output\fR. Tests do not write Python caches into the source
+directory, and \fBmake O=... clean\fR only cleans the selected output directory.
 When installed with \fBmake install\fR, plotting is exposed through
 \fBarmstat-plot-summary\fR and \fBarmstat-plot-cpu\fR; their shared modules
 are installed under \fBshare/armstat/\fR and reference documentation under
@@ -608,8 +638,21 @@ plot, an entity with no secondary-field data keeps its primary line while its
 empty secondary line is reported and skipped. Time axes retain the RFC 3339
 offset from the export rather than using the plotting host's local timezone.
 Summary plots use ten distinct colors for the complete idle/LPI preset.
+Long axis labels for fields sharing one unit use "Value (unit)" while the
+legend retains every field name. Plot spacing follows the rendered legend size.
 Rendering uses a headless backend, and a completed image atomically replaces
 the destination so a rendering failure does not damage an existing plot.
+Replacement preserves existing permission bits; a new image follows the
+process umask.
+Output-directory failures produce a concise error. Numeric values outside
+plotting range, including oversized JSON integers, become gaps.
+Nanosecond RFC 3339 timestamps retain their exported UTC offset when read
+with Python 3.10 as well as newer Python releases.
+Compact ISO timezone offsets such as +0800 are also accepted consistently.
+The shared plot loader rejects malformed JSON samples or sections, non-standard
+JSON numeric constants, duplicate JSON keys or CPU IDs, non-contiguous
+one-based interval numbers, duplicate CSV columns, and rows whose cell count
+differs from their header rather than silently dropping or replacing values.
 
 .SH SEE ALSO
 .BR turbostat (8),

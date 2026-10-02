@@ -106,6 +106,27 @@ static void test_checked_numeric_readers_reject_malformed_values(void)
 	assert(unlink(path) == 0);
 }
 
+static void test_checked_string_reader_rejects_truncation(void)
+{
+	char path[] = "/tmp/armstat-string.XXXXXX";
+	char buf[16];
+	int fd = mkstemp(path);
+
+	assert(fd >= 0);
+	replace_test_file_contents(fd, "performance\n");
+	assert(strcmp(sysfs_read_str(path, buf, sizeof(buf)), "performance") == 0);
+
+	replace_test_file_contents(fd, "powersave");
+	assert(strcmp(sysfs_read_str(path, buf, sizeof(buf)), "powersave") == 0);
+
+	replace_test_file_contents(fd, "governor-name-too-long\n");
+	assert(sysfs_read_str(path, buf, sizeof(buf))[0] == '\0');
+	assert(sysfs_read_str(path, buf, 1)[0] == '\0');
+
+	assert(close(fd) == 0);
+	assert(unlink(path) == 0);
+}
+
 static void test_incomplete_idle_state_data_stays_unavailable(void)
 {
 	struct idle_state states[2];
@@ -607,9 +628,15 @@ static void test_membw_failure_is_unavailable_and_rebaselines(void)
 	assert(isnan(get_interval_mem_bw()));
 }
 
-static void test_absolute_sampling_deadline_arithmetic(void)
+static void test_sampling_time_arithmetic(void)
 {
 	unsigned long long deadline;
+
+	assert(sampling_interval_delta_us(0, 1000, 0) == 0);
+	assert(sampling_interval_delta_us(1000, 1250, 0) == 250);
+	assert(sampling_interval_delta_us(1000, 1000, 0) == 0);
+	assert(sampling_interval_delta_us(1000, 900, 0) == 0);
+	assert(sampling_interval_delta_us(1000, 1250, 1) == 0);
 
 	assert(sampling_deadline_init(1000, 100, &deadline) == 0);
 	assert(deadline == 1100);
@@ -734,6 +761,119 @@ static void test_pmu_failure_and_counter_reset_are_unavailable(void)
 	cleanup_aggregator();
 }
 
+static void test_pmu_scaling_is_exact_and_overflow_recovers(void)
+{
+	uint64_t totals[2] = {0, 0};
+	uint64_t deltas[2] = {9007199254740993ULL, 7};
+	struct sys_snapshot snap = {0};
+	struct interval_stats stats;
+	uint64_t per_cpu[1][MAX_PMU_EVENTS] = {{0}};
+	unsigned char valid[1] = {1};
+
+	/* Above double's exact-integer range, including a half-integer result. */
+	assert(pmu_accumulate_interval_counts(totals, deltas, 2, 3, 2) == 0);
+	assert(totals[0] == 13510798882111490ULL);
+	assert(totals[1] == 11);
+
+	/* Even an unscaled UINT64_MAX fits exactly. */
+	totals[0] = 0;
+	deltas[0] = UINT64_MAX;
+	assert(pmu_accumulate_interval_counts(totals, deltas, 1, 1, 1) == 0);
+	assert(totals[0] == UINT64_MAX);
+
+	/* Scaling overflow clears the entire group, not a clipped/partial value. */
+	totals[1] = 123;
+	assert(pmu_accumulate_interval_counts(totals, deltas, 2, 2, 1) < 0);
+	assert(totals[0] == 0 && totals[1] == 0);
+
+	/* The second event overflows after the first event would have succeeded. */
+	totals[0] = 10;
+	totals[1] = UINT64_MAX - 6;
+	deltas[0] = 5;
+	deltas[1] = 7;
+	assert(pmu_accumulate_interval_counts(totals, deltas, 2, 1, 1) < 0);
+	assert(totals[0] == 0 && totals[1] == 0);
+
+	assert(pmu_accumulate_interval_counts(totals, deltas, 2, 1, 2) < 0);
+	assert(pmu_accumulate_interval_counts(totals, deltas, 2, 1, 0) < 0);
+	assert(pmu_accumulate_interval_counts(totals, deltas, 0, 1, 1) < 0);
+	assert(pmu_accumulate_interval_counts(totals, deltas,
+		MAX_PMU_EVENTS + 1, 1, 1) < 0);
+
+	/* Verify an epoch reset reaches the aggregator as a gap, then recovers. */
+	seed_one_cpu();
+	init_aggregator();
+	snap.cpu_count = 1;
+	snap.effective_cpu_count = 1;
+	snap.interval_delta_us = 1000000;
+	snap.counters.pmu_count = 2;
+	snap.counters.pmu_per_cpu = per_cpu;
+	snap.counters.pmu_per_cpu_valid = valid;
+	snap.counters.pmu_valid = 1;
+	per_cpu[0][0] = UINT64_MAX - 1;
+	per_cpu[0][1] = 100;
+	calculate_interval_stats(&snap, &stats);
+
+	valid[0] = pmu_accumulate_interval_counts(per_cpu[0], deltas, 2, 1, 1) == 0;
+	snap.counters.pmu_valid = valid[0];
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.pmu_valid == 0 && stats.per_cpu_pmu_valid[0] == 0);
+	assert(per_cpu[0][0] == 0 && per_cpu[0][1] == 0);
+
+	valid[0] = pmu_accumulate_interval_counts(per_cpu[0], deltas, 2, 1, 1) == 0;
+	snap.counters.pmu_valid = valid[0];
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.pmu_valid == 1 && stats.per_cpu_pmu_valid[0] == 1);
+	assert(stats.pmu_delta[0] == 5 && stats.pmu_delta[1] == 7);
+	assert(stats.per_cpu_pmu[0][0] == 5 && stats.per_cpu_pmu[0][1] == 7);
+	cleanup_aggregator();
+}
+
+static void test_summary_pmu_survives_lifetime_sum_overflow(void)
+{
+	struct sys_snapshot snap = {0};
+	struct interval_stats stats;
+	uint64_t per_cpu[2][MAX_PMU_EVENTS] = {{0}};
+	unsigned char valid[2] = {1, 1};
+
+	seed_one_cpu();
+	init_aggregator();
+	snap.cpu_count = 2;
+	snap.effective_cpu_count = 2;
+	snap.interval_delta_us = 1000000ULL;
+	snap.counters.pmu_count = 1;
+	snap.counters.pmu_per_cpu = per_cpu;
+	snap.counters.pmu_per_cpu_valid = valid;
+	snap.counters.pmu_valid = 1;
+	snap.counters.pmu[0] = ULLONG_MAX;
+	per_cpu[0][0] = ULLONG_MAX / 2 + 1;
+	per_cpu[1][0] = ULLONG_MAX / 2 + 1;
+	calculate_interval_stats(&snap, &stats);
+	/* The interval itself overflows: never publish a partial summary. */
+	assert(!stats.pmu_valid);
+
+	per_cpu[0][0] += 75;
+	per_cpu[1][0] += 25;
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.pmu_valid);
+	assert(stats.pmu_delta[0] == 100);
+
+	/* A single reset must invalidate the whole summary even if its sum rose. */
+	per_cpu[0][0] = 1;
+	per_cpu[1][0] += 200;
+	calculate_interval_stats(&snap, &stats);
+	assert(!stats.pmu_valid);
+	assert(!stats.per_cpu_pmu_valid[0]);
+	assert(stats.per_cpu_pmu_valid[1]);
+
+	per_cpu[0][0] += 30;
+	per_cpu[1][0] += 40;
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.pmu_valid);
+	assert(stats.pmu_delta[0] == 70);
+	cleanup_aggregator();
+}
+
 static void test_ipc_requires_cycles_and_instructions(void)
 {
 	struct sys_snapshot snap;
@@ -808,6 +948,7 @@ static void test_pmu_raises_soft_fd_limit_for_large_tracked_set(void)
 int main(void)
 {
 	test_checked_numeric_readers_reject_malformed_values();
+	test_checked_string_reader_rejects_truncation();
 	test_incomplete_idle_state_data_stays_unavailable();
 	test_cpuidle_interval_delta_helpers();
 	test_frequency_sample_handles_max_value();
@@ -824,9 +965,11 @@ int main(void)
 	test_sysstat_reader_rejects_invalid_arguments();
 	test_power_failure_is_unavailable_and_rebaselines();
 	test_membw_failure_is_unavailable_and_rebaselines();
-	test_absolute_sampling_deadline_arithmetic();
+	test_sampling_time_arithmetic();
 	test_sysstat_failure_is_unavailable_and_rebaselines();
 	test_pmu_failure_and_counter_reset_are_unavailable();
+	test_pmu_scaling_is_exact_and_overflow_recovers();
+	test_summary_pmu_survives_lifetime_sum_overflow();
 	test_ipc_requires_cycles_and_instructions();
 	test_pmu_raises_soft_fd_limit_for_large_tracked_set();
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import stat
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -101,7 +102,7 @@ def to_float(value: object) -> float:
             numeric = float(value)
         else:
             numeric = float(str(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return math.nan
     return numeric if math.isfinite(numeric) else math.nan
 
@@ -124,6 +125,10 @@ def field_axis_label(fields: Sequence[str]) -> str:
     if resolved_units and resolved_units[0] is not None and all(
         unit == resolved_units[0] for unit in resolved_units
     ):
+        # Each field is already named in the legend. A long list on the
+        # rotated axis can extend outside the figure, especially for idle-lpi.
+        if len(names) > 48:
+            return f"Value ({resolved_units[0]})"
         return f"{names} ({resolved_units[0]})"
     if not any(resolved_units):
         return names
@@ -239,6 +244,14 @@ def save_figure(fig, output_path: Path) -> None:
 
     temporary_path: Optional[Path] = None
     try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            output_mode = stat.S_IMODE(output_path.stat().st_mode)
+        except FileNotFoundError:
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            output_mode = 0o666 & ~current_umask
+
         fd, name = tempfile.mkstemp(
             prefix=f".{output_path.stem}.",
             suffix=suffix,
@@ -252,6 +265,7 @@ def save_figure(fig, output_path: Path) -> None:
             bbox_inches="tight",
             format=suffix[1:],
         )
+        os.chmod(temporary_path, output_mode)
         os.replace(temporary_path, output_path)
         temporary_path = None
     except Exception as exc:
@@ -307,8 +321,7 @@ def finalize_figure_layout(fig,
             return
 
         legend_cols = compute_legend_columns(len(labels))
-        legend_rows = math.ceil(len(labels) / legend_cols)
-        fig.legend(
+        legend = fig.legend(
             handles,
             labels,
             loc="upper center",
@@ -321,8 +334,11 @@ def finalize_figure_layout(fig,
             labelspacing=0.6,
             borderaxespad=0.0,
         )
-        top_reserved = 0.90 - (0.065 * legend_rows)
-        fig.tight_layout(rect=(0, 0, 1, max(0.56, top_reserved)))
+        fig.canvas.draw()
+        legend_box = legend.get_window_extent().transformed(
+            fig.transFigure.inverted()
+        )
+        fig.tight_layout(rect=(0, 0, 1, max(0.50, legend_box.y0 - 0.025)))
         return
 
     fig.tight_layout(rect=(0, 0, 1, 0.94))

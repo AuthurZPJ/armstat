@@ -19,11 +19,6 @@
  * LOOKUP HELPERS
  * ============================================================================ */
 
-static int get_tracked_cpu_id(int tracked_idx)
-{
-	return get_cpu_id_by_tracked_idx(tracked_idx);
-}
-
 static const struct cpu_row *get_cpu_row(const struct interval_record *rec,
 					 int row_idx)
 {
@@ -40,7 +35,7 @@ int get_cpu_row_id(const struct interval_record *rec, int row_idx)
 	if (!row)
 		return -1;
 
-	return get_cpu_id_by_tracked_idx(row->cpu_idx);
+	return get_cpu_id_by_tracked_idx(row->tracked_idx);
 }
 
 /* ============================================================================
@@ -52,11 +47,7 @@ int get_cpu_row_id(const struct interval_record *rec, int row_idx)
  */
 int get_cpu_package(const struct interval_record *rec, int row_idx)
 {
-	int cpu_id;
-
-	(void)rec;
-	cpu_id = get_tracked_cpu_id(row_idx);
-	return get_package_id(cpu_id);
+	return get_package_id(get_cpu_row_id(rec, row_idx));
 }
 
 /*
@@ -64,11 +55,7 @@ int get_cpu_package(const struct interval_record *rec, int row_idx)
  */
 int get_cpu_core(const struct interval_record *rec, int row_idx)
 {
-	int cpu_id;
-
-	(void)rec;
-	cpu_id = get_tracked_cpu_id(row_idx);
-	return get_core_id(cpu_id);
+	return get_core_id(get_cpu_row_id(rec, row_idx));
 }
 
 /*
@@ -76,11 +63,7 @@ int get_cpu_core(const struct interval_record *rec, int row_idx)
  */
 int get_cpu_numa_node(const struct interval_record *rec, int row_idx)
 {
-	int cpu_id;
-
-	(void)rec;
-	cpu_id = get_tracked_cpu_id(row_idx);
-	return get_numa_node(cpu_id);
+	return get_numa_node(get_cpu_row_id(rec, row_idx));
 }
 
 /* --- Frequency getters --- */

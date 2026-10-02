@@ -132,14 +132,15 @@ char *sysfs_read_str(const char *path, char *buf, size_t len)
 		return buf;
 	buf[0] = '\0';
 
-	if (!path)
+	if (!path || len < 2 || len > INT_MAX)
 		return buf;
 
 	fp = fopen(path, "r");
 	if (!fp)
 		return buf;
 
-	if (fgets(buf, (int)len, fp))
+	if (fgets(buf, (int)len, fp) && input_line_complete(fp, buf) &&
+	    !ferror(fp))
 		buf[strcspn(buf, "\n")] = '\0';
 	else
 		buf[0] = '\0';

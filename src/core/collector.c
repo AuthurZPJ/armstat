@@ -23,11 +23,59 @@
 #include "topology.h"
 #include "cpu_inventory.h"
 #include "sample_cache.h"
+#include "sampling_deadline.h"
 #include "aggregator.h"
 #include "formatter.h"
 #include "sysstat.h"
 
 static unsigned long long prev_collector_time_us;
+
+struct collector_time {
+	unsigned long long monotonic_us;
+	unsigned long long monotonic_ns;
+	time_t realtime_seconds;
+	unsigned long long realtime_ns;
+};
+
+static int capture_collector_time(struct collector_time *sample_time)
+{
+	struct timespec monotonic;
+	struct timespec realtime;
+	time_t fallback;
+
+	if (!sample_time)
+		return -1;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &monotonic) < 0) {
+		fprintf(stderr, "Error: clock_gettime(CLOCK_MONOTONIC) failed: %s\n",
+			strerror(errno));
+		return -1;
+	}
+	sample_time->monotonic_us =
+		(unsigned long long)monotonic.tv_sec * 1000000ULL +
+		(unsigned long long)monotonic.tv_nsec / 1000ULL;
+	sample_time->monotonic_ns =
+		(unsigned long long)monotonic.tv_sec * 1000000000ULL +
+		(unsigned long long)monotonic.tv_nsec;
+
+	if (clock_gettime(CLOCK_REALTIME, &realtime) == 0) {
+		sample_time->realtime_seconds = realtime.tv_sec;
+		sample_time->realtime_ns =
+			(unsigned long long)realtime.tv_sec * 1000000000ULL +
+			(unsigned long long)realtime.tv_nsec;
+		return 0;
+	}
+
+	fallback = time(NULL);
+	if (fallback == (time_t)-1) {
+		fprintf(stderr, "Error: time() failed while reading realtime clock\n");
+		return -1;
+	}
+	sample_time->realtime_seconds = fallback;
+	sample_time->realtime_ns =
+		(unsigned long long)fallback * 1000000000ULL;
+	return 0;
+}
 
 static void disable_cpuidle_with_warning(const char *reason)
 {
@@ -147,41 +195,19 @@ int init_collector(void)
 
 int collect_snapshot(struct sys_snapshot *snapshot)
 {
-	struct timespec ts;
-	struct timespec realtime_ts;
-	time_t sample_timestamp;
-	unsigned long long sample_timestamp_ns;
-	unsigned long long now_us, delta_us;
+	struct collector_time sample_time;
+	unsigned long long delta_us;
 
 	if (!snapshot)
 		return -1;
 
-	/* Get current time and calculate delta */
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
-		fprintf(stderr, "Error: clock_gettime(CLOCK_MONOTONIC) failed: %s\n",
-			strerror(errno));
+	/* Get current time and calculate delta. */
+	if (capture_collector_time(&sample_time) < 0) {
 		memset(snapshot, 0, sizeof(*snapshot));
 		return -1;
 	}
-	now_us = (unsigned long long)ts.tv_sec * 1000000ULL +
-		 (unsigned long long)ts.tv_nsec / 1000ULL;
-	if (clock_gettime(CLOCK_REALTIME, &realtime_ts) == 0) {
-		sample_timestamp = realtime_ts.tv_sec;
-		sample_timestamp_ns =
-			(unsigned long long)realtime_ts.tv_sec * 1000000000ULL +
-			(unsigned long long)realtime_ts.tv_nsec;
-	} else {
-		sample_timestamp = time(NULL);
-		sample_timestamp_ns =
-			(unsigned long long)sample_timestamp * 1000000000ULL;
-	}
-
-	if (prev_collector_time_us > 0 && now_us > prev_collector_time_us) {
-		delta_us = now_us - prev_collector_time_us;
-	} else {
-		delta_us = 0;
-	}
-	prev_collector_time_us = now_us;
+	delta_us = sampling_interval_delta_us(prev_collector_time_us,
+					       sample_time.monotonic_us, 0);
 
 	/*
 	 * Skip hotplug detection for the baseline sample. Until we have a valid
@@ -201,11 +227,20 @@ int collect_snapshot(struct sys_snapshot *snapshot)
 		}
 		/*
 		 * A rebuilt runtime state has no meaningful "previous sample".
-		 * Force the current collection to become the new baseline so
-		 * interval deltas do not mix pre/post-hotplug counters.
+		 * Re-capture both clocks after rebuild work, then force the current
+		 * collection to become the new baseline. This keeps rebuild latency
+		 * out of the next visible interval's rate denominator and prevents
+		 * pre/post-hotplug counters from being mixed.
 		 */
-		delta_us = 0;
+		if (capture_collector_time(&sample_time) < 0) {
+			memset(snapshot, 0, sizeof(*snapshot));
+			prev_collector_time_us = 0;
+			return -1;
+		}
+		delta_us = sampling_interval_delta_us(prev_collector_time_us,
+						       sample_time.monotonic_us, 1);
 	}
+	prev_collector_time_us = sample_time.monotonic_us;
 
 	/* Clear snapshot */
 	memset(snapshot, 0, sizeof(*snapshot));
@@ -219,11 +254,9 @@ int collect_snapshot(struct sys_snapshot *snapshot)
 
 	/* Store unified time delta */
 	snapshot->interval_delta_us = delta_us;
-	snapshot->sample_monotonic_ns =
-		(unsigned long long)ts.tv_sec * 1000000000ULL +
-		(unsigned long long)ts.tv_nsec;
-	snapshot->sample_timestamp = sample_timestamp;
-	snapshot->sample_timestamp_ns = sample_timestamp_ns;
+	snapshot->sample_monotonic_ns = sample_time.monotonic_ns;
+	snapshot->sample_timestamp = sample_time.realtime_seconds;
+	snapshot->sample_timestamp_ns = sample_time.realtime_ns;
 
 	/*
 	 * Sampling pools may have been torn down by a failed hotplug rebuild.

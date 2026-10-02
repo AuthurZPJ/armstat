@@ -69,9 +69,15 @@ sudo make install
 - CSV 根据所选字段输出 summary-only、package-only、CPU-only，或带明确
   scope 的混合行
 
-普通文本模式会在每个多行采样块前输出明确的 `--- interval N ---` 标记，并在
-相邻采样块之间留一个空行。Summary-only `-S` 仍保持每个 interval 一行；`-q`
-会连同启动 banner 和表头一起抑制该标记，便于紧凑的文本管道处理。
+普通文本模式在每个多行采样块前显示区间编号、带时区的采样时间和实际区间秒数，
+相邻采样块之间留一个空行。Summary-only `-S` 每个 interval 一行，行首为采样时间。
+表头标明单位，例如 `Freq[MHz]`、`Power[mW]`、`CtxSw[/int]`（每区间计数）。
+`-q` 抑制时间、区间标记、启动 banner 和表头，便于紧凑的文本管道处理。
+JSON/CSV 的字段名与单位遵循机器输出契约。
+文本列会按最长的 package 编号对齐，支持稀疏的大编号；列或列宽变化时会重印
+表头。CSV 要求列布局固定；运行中能力变化导致列布局
+改变时，会在写入不匹配的数据行前报错停止，保留已完成的数据。此时可重新开始
+CSV 采集，或使用允许列集合变化的 JSON。
 
 它是“ARM 上的 turbostat 风格工具”，但不是 x86 `turbostat` 的
 逐列等价实现。
@@ -93,7 +99,8 @@ sudo make install
 armstat 会跳过错过的 deadline，而不是突发追赶采样。指标公式始终使用实测 delta。
 
 如果运行中发生 CPU 拓扑变化并触发 runtime state 重建，那么这次重建样本会被
-当作新的 baseline，不会再被打印成一条普通 interval 输出。
+当作新的 baseline，不会再被打印成一条普通 interval 输出。重建完成后会重新采集
+时钟，因此重建耗时不会被计入下一条可见 interval 的比率公式。
 
 理解输出时可以把它拆成三类问题：
 
@@ -120,15 +127,15 @@ armstat 会跳过错过的 deadline，而不是突发追赶采样。指标公式
 - `Idle%` / `Busy%` 由 busy-source 策略决定
 - 默认策略是 `auto`：
   - 普通 CPU 使用 `/proc/stat`
-  - 出现在 `/sys/devices/system/cpu/nohz_full` 里的 CPU 若支持，会优先使用
-    `/proc/schedstat` 的运行时间记账
+  - `nohz_full` CPU 同样使用 `/proc/stat`
 - `--busy-source procstat` 会强制所有 CPU 使用 `/proc/stat`
 - `--busy-source schedstat` 会在可用时使用 `/proc/schedstat` 的 per-CPU
-  运行时间记账；某个 CPU 不可用时会按 CPU 粒度回退到 `/proc/stat`
+  运行时间记账；某个 CPU 不可用时会按 CPU 粒度回退到 `/proc/stat`。
+  该选项仅用于诊断，任务切出时才结算的运行时间可能遗漏正在执行的任务
 - `--busy-source task-clock` 保留为兼容别名，当前等价于 `schedstat`
-- `IOWait%` 也来自 `/proc/stat`，表示本采样区间内处于 iowait 记账的
-  时间占比；Linux 的 iowait 属于 idle 计数，因此已包含在 `Idle%` 中，
-  不会算作 busy
+- `IOWait%` 也来自 `/proc/stat`。Linux 分别导出 idle 和 iowait 计数；
+  armstat 将两者相加作为 procstat 路径的 `Idle%`，所以该路径将 iowait
+  包含在 idle 中，不计入 busy
 - 分 idle state 驻留列和 usage rate 列使用 cpuidle `stateN/name`，例如
   `LPI-0`、`LPI-1`……以及 `LPI-0_usage`（`usage` 区间增量/秒）
 - cpuidle 只用于拆分 `LPI-*` 驻留，不作为 Busy/Idle 的权威来源
@@ -169,10 +176,14 @@ armstat 会跳过错过的 deadline，而不是突发追赶采样。指标公式
 
 ### nohz_full 与 Busy/Idle
 
-`nohz_full` CPU 在短 interval 下更容易让 `/proc/stat` 的 Busy/Idle
-看起来抖动。因此默认的 `auto` busy-source 会在
-`/sys/devices/system/cpu/nohz_full` 指定的 CPU 上优先使用
-`/proc/schedstat` 的运行时间记账，而在其它 CPU 上继续沿用 `/proc/stat`。
+默认 `auto` 对所有 tracked CPU 使用 `/proc/stat`。CPU 时间以 `USER_HZ`
+tick 为单位导出，短区间容易受量化影响；观察利用率时可使用一秒等较长区间。
+
+`--busy-source schedstat` 是显式启用的诊断选项。运行时间计数在任务切出时
+才更新，持续运行的任务可能先被显示为空闲，再在后续切换时集中计入运行时间。
+这一问题在 `nohz_full` CPU 上尤其明显，不能将其视为准确的区间利用率替代来源。
+内核实现见
+[`sched_info_depart()` 和 `sched_info_switch()`](https://github.com/torvalds/linux/blob/bd5f485f3f026225b86573e559af0b7254ef4184/kernel/sched/stats.h)。
 
 schedstat 读取器按内核文档解析 9 个 CPU 字段，并使用第 7 字段（任务运行
 总纳秒数）。仅接受已知的 schedstat 版本 10–17；未知版本会安全回退到
@@ -209,6 +220,9 @@ summary 温度策略现在是显式的，而不是隐含假设：
 第一个来源。
 
 ### PMU
+
+Summary PMU 计数由有效的 per-CPU 区间增量相加得到，避免长期运行后累计总数
+饱和导致后续区间被错误显示为零。
 
 PMU 通过 `perf_event_open()` 实现：
 
@@ -336,9 +350,9 @@ slow layer 不是定时整批全量刷新，而是带游标、按预算渐进刷
 
 默认的 busy-source 策略是 `auto`：
 
-- 普通 CPU 使用 `/proc/stat`
-- `nohz_full` CPU 在可用时优先使用 `/proc/schedstat`
-- 如果某个 CPU 上 schedstat 不可用，则该 CPU 自动回退到 `/proc/stat`
+- 所有 tracked CPU（包括 `nohz_full` CPU）使用 `/proc/stat`
+- 仅显式指定时使用 schedstat 进行诊断
+- 显式选用的 schedstat 不可用时，该 CPU 回退到 `/proc/stat`
 
 `task-clock` 仍然保留为用户可见兼容选项，但当前等价于 `schedstat`，
 因为 CPU 范围 perf `task-clock` 在目标 ARM 服务器上并不能可靠表达
@@ -393,11 +407,19 @@ make O=/path/to/output
 本地构建可不安装画图库。如果发布门槛要求缺少 matplotlib 时测试必须失败，使用
 `ARMSTAT_REQUIRE_PLOT_RENDER=1 make test`；CI 会安装 matplotlib 并启用该门槛。
 
+`make target-test` 始终要求 summary 与每个 CPU 至少得到一组相互一致的
+Busy/Idle 样本。在声明支持的鲲鹏部署机上还应设置 `ARMSTAT_REQUIRE_FREQ=1`，确保
+每个 tracked CPU 的 `cpuinfo_cur_freq` 确实可用。启用 soak 后，测试会检查基础
+指标以及所有显式强制能力的有效样本比例；默认门槛为 95%，可通过
+`ARMSTAT_MIN_VALID_PERCENT` 调整。
+
 armstat 可以从本仓库独立构建，也可以放入 Linux 源码树
 `tools/power/armstat` 后用同样的 `make` 命令构建。交叉编译通过
 `CROSS_COMPILE` 支持（例如 `CROSS_COMPILE=aarch64-linux-gnu-`），
 外部构建通过 `make O=/path/to/output` 支持。binary、object、依赖文件和测试
-binary 都会留在 `O` 下；release、sanitizer、自定义编译参数、compiler version
+binary 都会留在 `O` 下。测试不会在源码目录生成 Python 缓存，`make O=... clean`
+只清理选定的输出目录，因此构建与测试可以使用只读源码检出。
+release、sanitizer、自定义编译参数、compiler version
 或 compiler target architecture 切换时，不兼容的旧 object 会自动失效。
 object 和链接后的 binary 按构建配置指纹隔离，因此并行执行构建目标或快速执行
 release/debug/release 切换也不会复用陈旧 object；选中的 binary 会原子发布到
@@ -433,9 +455,10 @@ armstat --busy-source task-clock
 
 ### 其他选项
 
-- `-N, --header-iterations N` — 每输出 N 行数据后重印一次 text 表头
+- `-N, --header-iterations N` — 每输出 N 个完整样本重印表头；`0` 表示仅在
+  启动和布局变化时打印
 - `-J, --joules` — 显示区间能量（焦耳）
-- `-q, --quiet` — 抑制 text banner、表头和 interval 标记
+- `-q, --quiet` — 抑制 text banner、表头、时间和 interval 标记
 - `-h, --help` — 显示完整命令行摘要并退出
 - `-v, --version` — 显示版本并退出
 
@@ -452,8 +475,9 @@ armstat -f csv -O armstat.csv
 `-O` / `--export` 是 `-o` / `--output` 的导出别名。它尤其适合
 JSON / CSV 这类机器可读输出，但 text 模式也同样可用。
 
-collector 初始化和 baseline 采样成功前，已有输出文件不会被截断。运行态输出
-仍保持 streaming，因此长时间采集成功启动后，下游可以边生成边读取。
+collector 初始化、baseline 采样和 formatter buffer 分配全部成功前，已有输出
+文件不会被截断。运行态输出仍保持 streaming，因此长时间采集成功启动后，
+下游可以边生成边读取。
 所有成功路径（包括 `--help`、`--version`、`--list` 和 `--probe`）都会在返回
 0 前 flush 并检查 stdout；文件系统已满、导出目标损坏或其他可检测写入失败会
 返回非零状态。下游管道提前关闭时，`SIGPIPE` 会被转成可检查的 `EPIPE`，使
@@ -570,7 +594,8 @@ armstat -I
 - `l2d-cache-refill`、`l2d-cache`
 - `l3d-cache-refill`、`l3d-cache`
 
-原始 ARM PMU 事件配置也可以用十六进制值指定，例如 `0x11`。未知事件名和超过
+原始 ARM PMU 事件配置也可以用十六进制值指定，例如 `0x11`。`0x`/`0X` 后只能
+跟十六进制数字；符号、内部空白和超过 64 位的数值会被拒绝。未知事件名和超过
 `MAX_PMU_EVENTS` 的列表在采样开始前失败。如果事件已知但当前机器上 perf
 不可用，请求的 PMU 列保留可见并渲染为不可用，而非报告假零。
 
@@ -596,9 +621,17 @@ package 功耗与内存带宽 sysfs 路径、候选数量与歧义说明，以�
 ### 画图
 
 附带的画图脚本会在字段列表和坐标轴显示标准单位；时间轴保留导出记录中的
-RFC 3339 时区偏移，不会悄悄改用画图机器的本地时区。summary 图使用 10 色
-调色板，完整 `idle-lpi` preset 不会复用 4 种颜色；脚本使用无界面渲染后端，
-只有图片完整生成后才原子替换目标文件。平滑不会抹掉不可用样本的断点。
+RFC 3339 时区偏移，包括 Python 3.10 读取纳秒时间戳的情况，不会悄悄改用画图
+机器的本地时区。`+0800` 等紧凑 ISO 偏移在不同 Python 版本上也一致接受。summary 图使用 10 色
+调色板，完整 `idle-lpi` preset 不会复用 4 种颜色。同单位多字段的长纵轴标签缩为
+`Value (单位)`，图例保留全部字段名；绘图区根据实际渲染的图例尺寸留出空间。
+脚本使用无界面渲染后端，
+只有图片完整生成后才原子替换目标文件；覆盖时保留已有图片的权限位，新建图片遵循
+进程 umask。输出目录失败会给出简短错误；超出绘图数值范围的值（包括过大的 JSON
+整数）显示为断点。共享 loader 会拒绝缺失或类型错误的 JSON 样本/section、非标准 JSON
+数字常量、重复 JSON key 或 CPU ID、不连续的 interval
+编号、重复 CSV 列名以及字段数量与表头不一致的数据行，不会静默丢弃或覆盖数据。
+平滑不会抹掉不可用样本的断点。
 在所选时间窗内完全没有主字段数据的 CPU 或分组会被明确报告并跳过，
 不会生成只有图例的空线。在双轴 CPU 图中，只有主字段数据的实体仍会保留，
 但其空的次轴线会被报告并跳过。完整说明见[综合参考](docs/REFERENCE.zh-CN.md#导出画图)。
@@ -887,9 +920,14 @@ RFC 3339 时区偏移，不会悄悄改用画图机器的本地时区。summary 
 
 - **Summary PMU**
   - 公式：
-    对 tracked CPU 的 per-CPU scaled PMU 计数求和，再导出 interval delta
+    对 tracked CPU 的有效 per-CPU scaled 区间增量求和
   - 有效性：
     只有全部 tracked CPU 都提供完整 group read 时才可用
+
+PMU 复用缩放采用精确整数乘除并四舍五入。区间缩放结果或某 CPU 的累计值超过
+64 位时，该 CPU 整组事件在当前区间显示不可用，并重建累计基线；后续有效区间
+可以恢复，不会一直停在饱和值并输出伪零。enabled/running 时间增量不合法时也
+采用相同处理。
 
 - **IPC**
   - 公式：
@@ -924,8 +962,8 @@ RFC 3339 时区偏移，不会悄悄改用画图机器的本地时区。summary 
   - inventory、sample cache、cpuidle 运行态、PMU、topology 会一起重建
   - 下一条样本会作为新的 baseline，避免跨 hotplug 边界混算 delta
 - 如果 `nohz_full` 让短 interval 的 `/proc/stat` 抖动：
-  - 默认 `auto` 会优先对这些 CPU 使用 `/proc/schedstat`
-  - 拉长 interval 往往仍然更容易解释
+  - 保持默认 `auto`，尝试一秒等较长区间
+  - schedstat 可能遗漏持续运行且尚未切出的任务
 
 ## 平台说明
 

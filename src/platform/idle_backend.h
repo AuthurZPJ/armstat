@@ -23,7 +23,8 @@
  *
  * SCHEDSTAT:
  *   Use /proc/schedstat per-CPU runtime as the Busy% authority and derive
- *   Idle% from the remaining wall-clock interval.
+ *   Idle% from the remaining wall-clock interval. Diagnostic opt-in only:
+ *   runtime is settled at context switches and can miss in-flight execution.
  *
  * TASK_CLOCK:
  *   Legacy compatibility alias. Current releases resolve this to the same
@@ -31,9 +32,7 @@
  *   provide a reliable Busy/Idle split on the target ARM servers.
  *
  * AUTO:
- *   Default policy. Use /proc/stat on ordinary CPUs and prefer schedstat on
- *   CPUs listed in /sys/devices/system/cpu/nohz_full when schedstat is
- *   available.
+ *   Default policy. Use /proc/stat for all CPUs, including nohz_full CPUs.
  */
 enum busy_source_mode {
 	BUSY_SOURCE_AUTO = 0,

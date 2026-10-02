@@ -12,7 +12,7 @@ Public interface:
     - load_cpu_series(path, sample_range) -> CpuSeriesData
     - resolve_field_name(requested, available_fields) -> str
     - slice_summary_series / slice_cpu_series
-    - count_csv_data_lines / count_csv_summary_samples / count_csv_cpu_samples
+    - count_csv_summary_samples / count_csv_cpu_samples
     - collect_numeric_fields (overloaded for both data shapes)
 """
 
@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from plot_utils import (
-    SUPPORTED_SCHEMA_VERSION,
     flatten_dict,
     is_finite_number,
     normalize_field_name,
@@ -150,6 +149,49 @@ class CpuSeriesData:
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+class DuplicateJsonKeyError(ValueError):
+    def __init__(self, key: str):
+        super().__init__(key)
+        self.key = key
+
+
+class InvalidJsonConstantError(ValueError):
+    def __init__(self, value: str):
+        super().__init__(value)
+        self.value = value
+
+
+def reject_duplicate_json_keys(
+    pairs: Iterable[Tuple[str, object]],
+) -> Dict[str, object]:
+    result: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateJsonKeyError(key)
+        result[key] = value
+    return result
+
+
+def reject_nonstandard_json_constant(value: str):
+    raise InvalidJsonConstantError(value)
+
+
+def load_json_export(path: Path) -> object:
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_json_keys,
+            parse_constant=reject_nonstandard_json_constant,
+        )
+    except DuplicateJsonKeyError as exc:
+        raise SystemExit(
+            f"{path} contains duplicate JSON key {exc.key!r}."
+        ) from exc
+    except InvalidJsonConstantError as exc:
+        raise SystemExit(
+            f"{path} contains non-standard JSON constant {exc.value!r}."
+        ) from exc
+
 def parse_timestamp_timezone(timestamp_iso: object):
     if not isinstance(timestamp_iso, str) or not timestamp_iso.strip():
         return timezone.utc
@@ -157,6 +199,15 @@ def parse_timestamp_timezone(timestamp_iso: object):
     value = timestamp_iso.strip()
     if value.endswith(("Z", "z")):
         value = f"{value[:-1]}+00:00"
+    # Normalize compact ISO offsets accepted by the loaders on newer Python.
+    value = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", value)
+    # Python 3.10 only accepts 3 or 6 fractional digits. The exporter emits
+    # nanoseconds; normalize just this parsing copy to recover its UTC offset.
+    value = re.sub(
+        r"\.(\d+)(?=[+-]\d{2}:\d{2}$)",
+        lambda match: "." + match.group(1)[:6].ljust(6, "0"),
+        value,
+    )
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:
@@ -249,6 +300,17 @@ def parse_cpu_id(value: object, source: Path) -> int:
     return int(numeric)
 
 
+def validate_interval_number(value: object, expected: int, source: Path) -> None:
+    if not is_finite_number(value):
+        raise SystemExit(f"{source} contains an invalid interval: {value!r}.")
+
+    numeric = to_float(value)
+    if not numeric.is_integer() or int(numeric) != expected:
+        raise SystemExit(
+            f"{source} contains interval {value!r}; expected {expected}."
+        )
+
+
 def resolve_field_name(requested: str, available_fields: Iterable[str]) -> str:
     available = list(available_fields)
     if requested in available:
@@ -284,21 +346,23 @@ def resolve_field_name(requested: str, available_fields: Iterable[str]) -> str:
 # CSV row counters
 # ---------------------------------------------------------------------------
 
-def count_csv_data_lines(path: Path) -> int:
-    count = 0
-    with path.open("r", encoding="utf-8") as handle:
-        next(handle, None)
-        for _ in handle:
-            count += 1
-    return count
-
-
 def count_csv_summary_samples(path: Path) -> int:
     count = 0
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
+        fieldnames = validate_csv_structure(reader, path, "summary")
+        require_csv_columns(
+            fieldnames,
+            {"schema_version", "interval", "Scope"},
+            path,
+            "summary",
+            "armstat -S -f csv -O summary.csv",
+        )
         for item in reader:
+            validate_csv_row_shape(item, path, reader.line_num)
             if item.get("Scope") == "SUM":
+                validate_schema_version(item.get("schema_version"), path)
+                validate_interval_number(item.get("interval"), count + 1, path)
                 count += 1
     return count
 
@@ -308,20 +372,81 @@ def count_csv_cpu_samples(path: Path) -> int:
     current_key = None
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
+        fieldnames = validate_csv_structure(reader, path, "per-CPU")
+        require_csv_columns(
+            fieldnames,
+            {"schema_version", "interval", "CPU"},
+            path,
+            "per-CPU",
+            "armstat -a -f csv -O cpus.csv",
+        )
         is_mixed_scope = reader.fieldnames and "Scope" in reader.fieldnames
         for item in reader:
+            validate_csv_row_shape(item, path, reader.line_num)
             if is_mixed_scope and item.get("Scope") != "CPU":
                 continue
-            if not item.get("CPU"):
-                continue
+            if item.get("CPU") in (None, ""):
+                raise SystemExit(
+                    f"{path} contains a per-CPU row without a CPU ID."
+                )
+            validate_schema_version(item.get("schema_version"), path)
             key = (
                 item.get("interval"), item.get("timestamp"),
                 item.get("timestamp_ns"), item.get("timestamp_iso"),
             )
             if key != current_key:
                 count += 1
+                validate_interval_number(item.get("interval"), count, path)
                 current_key = key
     return count
+
+
+def validate_csv_structure(reader: csv.DictReader,
+                           path: Path,
+                           export_name: str) -> List[str]:
+    fieldnames = reader.fieldnames
+    if not fieldnames:
+        raise SystemExit(f"{path} does not contain a CSV header.")
+
+    seen: Set[str] = set()
+    duplicates: Set[str] = set()
+    for field in fieldnames:
+        if field in seen:
+            duplicates.add(field)
+        seen.add(field)
+    if duplicates:
+        names = ", ".join(sorted(duplicates))
+        raise SystemExit(
+            f"{path} contains duplicate {export_name} CSV columns: {names}."
+        )
+
+    return fieldnames
+
+
+def require_csv_columns(fieldnames: Iterable[str], required: Set[str],
+                        path: Path, export_name: str, example: str) -> None:
+    missing_columns = required.difference(fieldnames)
+    if missing_columns:
+        raise SystemExit(
+            f"{path} is missing required {export_name} CSV columns: "
+            f"{', '.join(sorted(missing_columns))}. "
+            f"Use {export_name} CSV export, for example: {example}"
+        )
+
+
+def validate_csv_row_shape(item: Dict[Optional[str], object],
+                           path: Path,
+                           line_number: int) -> None:
+    if None in item:
+        raise SystemExit(
+            f"{path} line {line_number} contains more cells than its CSV header."
+        )
+    missing = [key for key, value in item.items() if value is None]
+    if missing:
+        raise SystemExit(
+            f"{path} line {line_number} contains fewer cells than its CSV header "
+            f"(missing: {', '.join(str(key) for key in missing)})."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +454,7 @@ def count_csv_cpu_samples(path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 def load_json_summary(path: Path) -> SeriesData:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = load_json_export(path)
     if not isinstance(data, list):
         raise SystemExit(f"{path} does not contain a JSON array.")
 
@@ -339,11 +464,16 @@ def load_json_summary(path: Path) -> SeriesData:
 
     for sample_index, item in enumerate(data, start=1):
         if not isinstance(item, dict):
-            continue
+            raise SystemExit(
+                f"{path} sample {sample_index} is not a JSON object."
+            )
         validate_schema_version(item.get("schema_version"), path)
         summary = item.get("summary")
         if not isinstance(summary, dict):
-            continue
+            raise SystemExit(
+                f"{path} sample {sample_index} does not contain a summary object."
+            )
+        validate_interval_number(item.get("interval"), sample_index, path)
 
         row: Dict[str, object] = {}
         flatten_dict("", summary, row)
@@ -388,24 +518,23 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
 
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit(f"{path} does not contain a CSV header.")
-
-        required_columns = {"schema_version", "Scope"}
-        missing_columns = required_columns.difference(reader.fieldnames)
-        if missing_columns:
-            raise SystemExit(
-                f"{path} is missing required summary CSV columns: "
-                f"{', '.join(sorted(missing_columns))}. "
-                "Use summary CSV export, for example: armstat -S -f csv -O summary.csv"
-            )
-        is_mixed_scope = {"CPU", "Package"}.issubset(reader.fieldnames)
+        fieldnames = validate_csv_structure(reader, path, "summary")
+        require_csv_columns(
+            fieldnames,
+            {"schema_version", "interval", "Scope"},
+            path,
+            "summary",
+            "armstat -S -f csv -O summary.csv",
+        )
+        is_mixed_scope = {"CPU", "Package"}.issubset(fieldnames)
 
         sample_index = 0
         for item in reader:
+            validate_csv_row_shape(item, path, reader.line_num)
             if item.get("Scope") != "SUM":
                 continue
             sample_index += 1
+            validate_interval_number(item.get("interval"), sample_index, path)
             if sample_index < start_sample:
                 continue
             if end_sample is not None and sample_index > end_sample:
@@ -484,7 +613,7 @@ def slice_summary_series(series: SeriesData,
 # ---------------------------------------------------------------------------
 
 def load_json_cpu_series(path: Path) -> CpuSeriesData:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = load_json_export(path)
     if not isinstance(data, list):
         raise SystemExit(f"{path} does not contain a JSON array.")
 
@@ -495,17 +624,30 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
 
     for sample_index, item in enumerate(data, start=1):
         if not isinstance(item, dict):
-            continue
+            raise SystemExit(
+                f"{path} sample {sample_index} is not a JSON object."
+            )
         validate_schema_version(item.get("schema_version"), path)
         cpus = item.get("cpus")
         if not isinstance(cpus, list):
-            continue
+            raise SystemExit(
+                f"{path} sample {sample_index} does not contain a cpus array."
+            )
+        validate_interval_number(item.get("interval"), sample_index, path)
 
         sample: Dict[int, Dict[str, object]] = {}
-        for cpu_entry in cpus:
+        for entry_index, cpu_entry in enumerate(cpus, start=1):
             if not isinstance(cpu_entry, dict):
-                continue
+                raise SystemExit(
+                    f"{path} sample {sample_index} CPU entry {entry_index} "
+                    "is not a JSON object."
+                )
             cpu_id = parse_cpu_id(cpu_entry.get("cpu"), path)
+            if cpu_id in sample:
+                raise SystemExit(
+                    f"{path} sample {sample_index} contains duplicate CPU ID "
+                    f"{cpu_id}."
+                )
             row: Dict[str, object] = {}
             for key, value in cpu_entry.items():
                 if key == "cpu":
@@ -516,7 +658,9 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
             cpu_ids.add(cpu_id)
 
         if not sample:
-            continue
+            raise SystemExit(
+                f"{path} sample {sample_index} does not contain any CPU rows."
+            )
 
         samples.append(sample)
         x_values.append(sample_x_value(
@@ -558,19 +702,16 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
 
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit(f"{path} does not contain a CSV header.")
+        fieldnames = validate_csv_structure(reader, path, "per-CPU")
 
-        is_mixed_scope = "Scope" in reader.fieldnames
-
-        required_columns = {"schema_version", "CPU"}
-        missing_columns = required_columns.difference(reader.fieldnames)
-        if missing_columns:
-            raise SystemExit(
-                f"{path} is missing required per-CPU CSV columns: "
-                f"{', '.join(sorted(missing_columns))}. "
-                "Use CPU CSV export, for example: armstat -a -f csv -O cpus.csv"
-            )
+        is_mixed_scope = "Scope" in fieldnames
+        require_csv_columns(
+            fieldnames,
+            {"schema_version", "interval", "CPU"},
+            path,
+            "per-CPU",
+            "armstat -a -f csv -O cpus.csv",
+        )
 
         current_key: Optional[Tuple[object, object, object, object]] = None
         current_sample: Dict[int, Dict[str, object]] = {}
@@ -590,6 +731,7 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
             current_sample = {}
 
         for item in reader:
+            validate_csv_row_shape(item, path, reader.line_num)
             if is_mixed_scope and item.get("Scope") != "CPU":
                 continue
 
@@ -603,15 +745,24 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
                 item.get("timestamp_ns"), item.get("timestamp_iso"),
             )
             if current_key is None:
+                validate_interval_number(item.get("interval"), 1, path)
                 current_key = key
             elif key != current_key:
                 flush_sample()
                 if end_sample is not None and sample_index >= end_sample:
                     current_key = None
                     break
+                validate_interval_number(
+                    item.get("interval"), sample_index + 1, path
+                )
                 current_key = key
 
             cpu_id = parse_cpu_id(cpu_value, path)
+            if cpu_id in current_sample:
+                raise SystemExit(
+                    f"{path} sample {sample_index + 1} contains duplicate "
+                    f"CPU ID {cpu_id}."
+                )
             row = {}
             for key, value in item.items():
                 if key in {

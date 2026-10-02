@@ -1,9 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Absolute sampling cadence arithmetic, kept independent of clock I/O. */
+/* Sampling cadence and interval arithmetic, kept independent of clock I/O. */
 
 #include <limits.h>
 
 #include "sampling_deadline.h"
+
+unsigned long long sampling_interval_delta_us(unsigned long long previous_us,
+					      unsigned long long current_us,
+					      int reset_baseline)
+{
+	if (reset_baseline || previous_us == 0 || current_us <= previous_us)
+		return 0;
+
+	return current_us - previous_us;
+}
 
 int sampling_deadline_init(unsigned long long sample_ns,
 			   unsigned long long interval_ns,

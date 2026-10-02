@@ -27,6 +27,9 @@ DEBUG_CFLAGS	:= $(COMMON_CFLAGS) -g -O0 \
 DEBUG_LDFLAGS	:= -fsanitize=address,undefined
 ANALYZE_CFLAGS	:= -O0 $(COMMON_CFLAGS) -Werror -fanalyzer \
 		   -Wno-analyzer-file-leak -Wno-analyzer-malloc-leak
+CLANG_ANALYZE_CFLAGS := -O0 -Wall -Wextra -Wformat=2 -Wundef -Wshadow \
+			-Wstrict-prototypes -Wmissing-prototypes \
+			-D_FILE_OFFSET_BITS=64 -Werror
 ANALYZE_OUTPUT	= $(BUILD_OUTPUT)/.armstat-analysis
 
 CC_MACHINE := $(shell $(CC) -dumpmachine 2>/dev/null || uname -srm)
@@ -66,6 +69,7 @@ SRCS = app/armstat.c app/armstat_cli.c \
 	output/formatter_machine.c output/formatter_record.c \
 	output/formatter_section.c output/formatter_text.c \
 	output/formatter_values.c
+ANALYZE_SRCS = $(addprefix $(CODE_DIR)/,$(SRCS))
 OBJ_NAMES = $(SRCS:.c=.o)
 OBJ_DIR = $(BUILD_OUTPUT)/.armstat-obj/$(BUILD_CONFIG_KEY)
 OBJS = $(addprefix $(OBJ_DIR)/,$(OBJ_NAMES))
@@ -131,7 +135,9 @@ clean:
 	@rm -rf $(TARGET).dSYM $(addsuffix .dSYM,$(TEST_BINS))
 	@rm -rf $(BUILD_OUTPUT)/.armstat-obj $(BUILD_OUTPUT)/.armstat-bin
 	@rm -rf $(ANALYZE_OUTPUT)
+ifeq ($(BUILD_OUTPUT),$(SRC_DIR))
 	@rm -rf $(SRC_DIR)/scripts/__pycache__ $(SRC_DIR)/tests/__pycache__
+endif
 
 .PHONY: debug
 debug:
@@ -145,8 +151,22 @@ debug-test:
 
 .PHONY: analyze
 analyze:
-	$(MAKE) O="$(ANALYZE_OUTPUT)" CFLAGS="$(ANALYZE_CFLAGS)" \
-		LDFLAGS= armstat
+	@rm -rf "$(ANALYZE_OUTPUT)"
+	@if printf '%s\n' 'int main(void) { return 0; }' | \
+		$(CC) -x c -fanalyzer -Wno-analyzer-file-leak \
+		-Wno-analyzer-malloc-leak -c -o /dev/null - >/dev/null 2>&1; then \
+		$(MAKE) O="$(ANALYZE_OUTPUT)" CFLAGS="$(ANALYZE_CFLAGS)" \
+			LDFLAGS= armstat; \
+	elif printf '%s\n' 'int main(void) { return 0; }' | \
+		$(CC) -x c --analyze -Xclang -analyzer-output=text \
+			-o /dev/null - >/dev/null 2>&1; then \
+		$(CC) --analyze -Xclang -analyzer-output=text \
+			$(VERSION_CPPFLAGS) $(PROJECT_CPPFLAGS) \
+			$(CPPFLAGS) $(CLANG_ANALYZE_CFLAGS) $(ANALYZE_SRCS); \
+	else \
+		echo "Error: $(CC) supports neither GCC -fanalyzer nor Clang --analyze" >&2; \
+		exit 2; \
+	fi
 
 .PHONY: install
 install: $(TARGET)
@@ -185,9 +205,9 @@ test: $(TARGET) $(TEST_BINS)
 	$(BUILD_OUTPUT)/tests/test_cpu_inventory
 	$(BUILD_OUTPUT)/tests/test_section_policy
 	ARMSTAT_BIN=$(TARGET) sh $(SRC_DIR)/tests/test_cli_smoke.sh
-	python3 $(SRC_DIR)/tests/test_plot_loaders.py
-	python3 $(SRC_DIR)/tests/test_plot_render.py
-	python3 $(SRC_DIR)/tests/test_csv_streaming.py
+	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_loaders.py
+	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_render.py
+	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_csv_streaming.py
 	sh $(SRC_DIR)/tests/test_build.sh
 
 .PHONY: target-test

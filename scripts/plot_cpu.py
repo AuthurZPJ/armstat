@@ -817,7 +817,6 @@ def main() -> int:
             args.format,
         )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if group_label is None:
         plot_cpu_series(

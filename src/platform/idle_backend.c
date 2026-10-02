@@ -60,9 +60,6 @@ static int should_use_schedstat(int cpu_id)
 	if (cpu_id < 0 || cpu_id >= MAX_CPUS)
 		return 0;
 
-	if (!nohz_full_valid)
-		refresh_nohz_full_mask();
-
 	switch (global_busy_source_mode) {
 	case BUSY_SOURCE_SCHEDSTAT:
 	case BUSY_SOURCE_TASK_CLOCK:
@@ -71,7 +68,8 @@ static int should_use_schedstat(int cpu_id)
 		return 0;
 	case BUSY_SOURCE_AUTO:
 	default:
-		return nohz_full_cpus[cpu_id] ? 1 : 0;
+		/* schedstat runtime is settled at context switches, not reads. */
+		return 0;
 	}
 }
 
@@ -111,7 +109,7 @@ const char *get_busy_source_effective_name(void)
 		return "schedstat";
 	case BUSY_SOURCE_AUTO:
 	default:
-		return "auto(procstat+schedstat-on-nohz_full)";
+		return "procstat";
 	}
 }
 

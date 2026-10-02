@@ -74,10 +74,18 @@ production rollout, run the capability-enforced target procedure in
 - CSV writes summary-only, package-only, CPU-only, or explicitly scoped mixed
   rows, depending on the selected fields
 
-In normal text mode, every multi-row sample starts with an explicit
-`--- interval N ---` marker and consecutive sample blocks are separated by a
-blank line. Summary-only `-S` remains one row per interval, while `-q` suppresses
-the marker together with the banner and headers for compact text pipelines.
+In normal text mode, every multi-row sample starts with an interval marker
+containing the sample timestamp (with timezone) and measured duration in seconds.
+Consecutive blocks are separated by a blank line. Summary-only `-S` keeps one
+row per interval with a leading timestamp. Headers show units, such as
+`Freq[MHz]`, `Power[mW]`, and `CtxSw[/int]` (count per interval).
+`-q` suppresses timestamps, markers, the banner, and headers for compact text
+pipelines. JSON/CSV field names and units follow the machine output contract.
+Text columns stay aligned even with sparse, large package IDs; headers repeat
+whenever columns or widths change. CSV requires a fixed
+column layout: if a runtime capability change alters it, capture stops with
+an error before writing a mismatched row, preserving the complete prefix.
+Restart the CSV capture or use JSON when column sets can change.
 
 This is intentionally `turbostat`-like, but it is not a byte-for-byte clone of
 the x86 tool. In particular, ARM platforms often do not expose a uniform
@@ -105,7 +113,8 @@ formulas always use the measured interval delta.
 
 If armstat has to rebuild runtime state (for example after CPU topology change),
 the rebuild sample becomes a new baseline and is not printed as a normal
-interval row.
+interval row. Its clocks are captured again after rebuild work completes, so
+rebuild latency is not charged to the next visible interval's rate formulas.
 
 Three ideas help interpret the output correctly:
 
@@ -136,18 +145,17 @@ Three ideas help interpret the output correctly:
 - `Idle%` / `Busy%` are driven by the selected busy-source policy
 - raw authoritative Busy/Idle inputs are captured once per interval in
   `sample_cache.c`, then converted to percentages in `aggregator.c`
-- the default policy is `auto`:
-  - ordinary CPUs use `/proc/stat`
-  - CPUs listed in `/sys/devices/system/cpu/nohz_full` prefer `/proc/schedstat`
-    runtime accounting when available
+- the default policy is `auto`: all CPUs, including `nohz_full` CPUs, use
+  `/proc/stat`
 - `--busy-source procstat` forces `/proc/stat`
 - `--busy-source schedstat` uses `/proc/schedstat` runtime accounting where
-  available, with per-CPU fallback to `/proc/stat`
+  available, with per-CPU fallback to `/proc/stat`; this is a diagnostic option,
+  because runtime is settled at task switches and can miss ongoing execution
 - `--busy-source task-clock` is accepted as a legacy compatibility alias and
   currently resolves to the same implementation as `schedstat`
-- `IOWait%` is also derived from `/proc/stat` and represents the interval share
-  spent in iowait accounting; Linux reports iowait within the idle counter, so
-  it is included in `Idle%` and is not counted as busy
+- `IOWait%` is also derived from `/proc/stat`. Linux exposes separate idle and
+  iowait counters; armstat adds them for procstat-based `Idle%`, so iowait is
+  included in that idle percentage and is not counted as busy
 - Per-state idle residency and usage-rate columns use cpuidle `stateN/name`
   labels such as `LPI-0`, `LPI-1`, ..., and `LPI-0_usage` (`usage` delta/s)
 - cpuidle is used for split `LPI-*` residency only
@@ -233,6 +241,8 @@ ambiguous and disabled instead of selecting an arbitrary directory entry.
 PMU support uses `perf_event_open()`:
 
 - counters are opened per tracked CPU
+- summary PMU counts sum valid per-CPU interval deltas, so a saturated sum of
+  lifetime counters cannot turn later intervals into false zeroes
 - events are grouped per CPU
 - group reads include `time_enabled` and `time_running`
 - multiplexed counters are scaled before interval deltas are derived
@@ -268,11 +278,16 @@ unavailable on a particular machine.
 
 ### nohz_full and Busy/Idle
 
-`nohz_full` CPUs can make short-interval `/proc/stat` busy/idle percentages
-look erratic. For that reason, the default `auto` busy-source policy prefers
-`/proc/schedstat` runtime accounting on CPUs listed in
-`/sys/devices/system/cpu/nohz_full`, while continuing to use `/proc/stat` on
-ordinary CPUs.
+The default `auto` policy uses `/proc/stat` for all tracked CPUs. CPU time is
+exported in `USER_HZ` ticks, so very short intervals can show quantization;
+use a longer interval such as one second when interpreting utilization.
+
+`--busy-source schedstat` is an explicit diagnostic option. Its runtime counter
+is updated when a task switches out, so a continuously running task can appear
+idle until a later switch charges its runtime. This is especially problematic
+on `nohz_full` CPUs and is not an accurate replacement for interval utilization.
+The kernel implementation is visible in
+[`sched_info_depart()` and `sched_info_switch()`](https://github.com/torvalds/linux/blob/bd5f485f3f026225b86573e559af0b7254ef4184/kernel/sched/stats.h).
 
 The schedstat reader follows the documented nine-field CPU record and uses
 field 7 (task runtime in nanoseconds). Known schedstat versions 10 through 17
@@ -385,9 +400,9 @@ functionality: if the kernel refuses the change, sampling continues normally.
 
 The default busy-source policy is `auto`:
 
-- use `/proc/stat` on ordinary CPUs
-- use `/proc/schedstat` runtime accounting on `nohz_full` CPUs when available
-- fall back per CPU to `/proc/stat` if schedstat is unavailable
+- use `/proc/stat` on all tracked CPUs, including `nohz_full` CPUs
+- use schedstat only when explicitly selected for diagnostics
+- fall back per CPU to `/proc/stat` if explicitly selected schedstat is unavailable
 
 The `task-clock` option remains as a user-visible compatibility alias, but it
 now uses the same implementation as `schedstat` because CPU-wide perf
@@ -450,12 +465,22 @@ Plot rendering is optional for local builds. Set
 `ARMSTAT_REQUIRE_PLOT_RENDER=1 make test` when a missing matplotlib
 dependency must fail the test run; CI installs matplotlib and enables this gate.
 
+`make target-test` always requires coherent summary and per-CPU Busy/Idle
+samples. On a supported Kunpeng deployment, also set
+`ARMSTAT_REQUIRE_FREQ=1` so the gate proves that `cpuinfo_cur_freq` is usable
+for every tracked CPU. A requested soak checks the valid-sample ratio for the
+basic metrics and every explicitly required capability; the default minimum is
+95% and can be changed with `ARMSTAT_MIN_VALID_PERCENT`.
+
 armstat can be built standalone from this repository, or placed inside the
 Linux source tree at `tools/power/armstat` and built there with the same
 `make` invocation. Cross-compilation is supported via `CROSS_COMPILE`
 (for example `CROSS_COMPILE=aarch64-linux-gnu-`), and out-of-tree builds
 via `make O=/path/to/output`. Out-of-tree builds keep the binary, objects,
-dependency files, and test binaries under `O`. Build configuration changes
+dependency files, and test binaries under `O`. Tests do not write Python
+caches into the source directory; `make O=... clean` only cleans the selected
+output directory, so builds and tests can use a read-only source checkout.
+Build configuration changes
 (such as switching between release and sanitizer flags, compiler versions, or
 compiler target architectures) invalidate incompatible objects automatically.
 Objects and linked binaries are isolated by a build configuration fingerprint,
@@ -495,9 +520,10 @@ precision instead of rounding a valid short interval to zero.
 
 ### Other options
 
-- `-N, --header-iterations N` — reprint the text header after every N data rows
+- `-N, --header-iterations N` — reprint headers every N complete samples;
+  `0` prints them on startup and whenever the layout changes
 - `-J, --joules` — show interval energy in Joules
-- `-q, --quiet` — suppress the text banner, headers, and interval markers
+- `-q, --quiet` — suppress the text banner, headers, timestamps, and interval markers
 - `-h, --help` — show the complete command-line summary and exit
 - `-v, --version` — show version and exit
 
@@ -515,9 +541,10 @@ armstat -f csv -O armstat.csv
 especially convenient for machine-readable output such as JSON and CSV, but it
 works with text output as well.
 
-An existing output file is not truncated until collector initialization and
-the baseline sample have succeeded. Runtime output remains streaming, so a
-successful long capture is visible to downstream readers as it is produced.
+An existing output file is not truncated until collector initialization, the
+baseline sample, and formatter-buffer allocation have succeeded. Runtime
+output remains streaming, so a successful long capture is visible to downstream
+readers as it is produced.
 Every successful path, including `--help`, `--version`, `--list`, and
 `--probe`, flushes and checks stdout before returning zero; a full filesystem,
 broken export target, closed downstream pipe, or other detected write failure
@@ -643,7 +670,9 @@ Built-in PMU names:
 - `l3d-cache-refill`, `l3d-cache`
 
 Raw ARM PMU event configs can also be requested as hexadecimal values such as
-`0x11`. Unknown named events and lists longer than `MAX_PMU_EVENTS` fail before
+`0x11`. The `0x`/`0X` prefix must be followed only by hexadecimal digits;
+signs, embedded whitespace, and values above 64 bits are rejected.
+Unknown named events and lists longer than `MAX_PMU_EVENTS` fail before
 sampling starts. If an event is known but perf access is denied or cannot be
 opened on the current machine, requested PMU columns remain visible and render
 as unavailable instead of reporting fake zeros.
@@ -674,11 +703,23 @@ maps each visible `LPI-N` field to the corresponding Linux `stateN/name` value.
 Helper plotting scripts are covered in the
 [reference](docs/REFERENCE.md#plotting-exports). Field listings and axes carry
 the canonical units; time axes retain the export's RFC 3339 offset instead of
-silently adopting the plotting host's timezone, and smoothing preserves
-unavailable samples as visible gaps. Summary plots use a ten-color palette so
-the complete `idle-lpi` preset does not reuse four ambiguous colors. Images are
+silently adopting the plotting host's timezone, including nanosecond exports
+read with Python 3.10. Smoothing preserves unavailable samples as visible gaps.
+Compact ISO offsets such as `+0800` are also accepted consistently across Python
+versions. Summary plots use a ten-color palette so
+the complete `idle-lpi` preset does not reuse four ambiguous colors. Long axis
+labels for fields sharing one unit use `Value (unit)`; the legend keeps every
+field name. The plot reserves space based on the rendered legend. Images are
 rendered through a headless backend and atomically replace their destination
-only after rendering succeeds.
+only after rendering succeeds; replacement preserves an existing image's
+permission bits, while a new image follows the process umask. Output-directory
+failures produce a concise error; numeric values beyond plotting range become
+gaps, including oversized JSON integers. The shared
+loader rejects malformed JSON samples or sections, non-standard JSON numeric
+constants, duplicate JSON keys or CPU IDs, non-contiguous interval numbers,
+duplicate CSV columns, and rows
+whose width differs from their CSV header instead of silently dropping or
+overwriting data.
 CPUs or groups with no primary-field data anywhere in the selected window are
 reported and skipped instead of producing empty legend entries. In a two-axis
 CPU plot, an entity with primary data but no secondary data remains visible;
@@ -999,9 +1040,16 @@ All three are interval counts, not normalized per-second rates.
 
 - **Summary PMU**
   - formula:
-    sum of per-CPU scaled PMU counts across tracked CPUs, then interval delta
+    sum of valid per-CPU scaled interval deltas across tracked CPUs
   - validity:
     unavailable unless every tracked CPU has a complete group read
+
+PMU multiplex scaling uses exact integer arithmetic with nearest-integer
+rounding. If a scaled interval or its per-CPU cumulative total exceeds 64 bits,
+the affected CPU's entire group is unavailable for that interval and starts a
+new cumulative baseline; subsequent valid intervals can recover. It does not
+remain saturated and report false zeroes. Invalid enabled/running time deltas
+are handled the same way.
 
 - **IPC**
   - formula:
@@ -1039,8 +1087,8 @@ All three are interval counts, not normalized per-second rates.
   - the next sample becomes a new baseline, so counters are not mixed across
     the hotplug boundary
 - If `nohz_full` makes `/proc/stat` noisy on short intervals:
-  - the default `auto` busy-source policy prefers `/proc/schedstat` on those CPUs
-  - longer intervals still tend to be easier to interpret
+  - keep the default `auto` policy and try a longer interval, such as one second
+  - schedstat can omit continuously running tasks until they switch out
 
 ## Platform Notes
 

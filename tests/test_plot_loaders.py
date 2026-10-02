@@ -11,6 +11,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -37,6 +39,40 @@ armstat_loader = sys.modules["armstat_loader"]
 
 
 class PlotLoaderTests(unittest.TestCase):
+    def test_nanosecond_timestamp_offset_is_preserved(self):
+        for fraction in ("", ".1", ".123", ".123456", ".123456789"):
+            for offset, seconds in (
+                ("+08:00", 28800), ("+0800", 28800),
+                ("-03:30", -12600), ("-0330", -12600), ("Z", 0),
+            ):
+                with self.subTest(fraction=fraction, offset=offset):
+                    zone = armstat_loader.parse_timestamp_timezone(
+                        f"2026-03-28T12:00:00{fraction}{offset}"
+                    )
+                    self.assertEqual(zone.utcoffset(None).total_seconds(), seconds)
+
+    def test_oversized_json_integers_become_gaps(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "oversized.json"
+            path.write_text(json.dumps([
+                {"schema_version": 8, "interval": 1,
+                 "summary": {"power": 10 ** 400}},
+                {"schema_version": 8, "interval": 2,
+                 "summary": {"power": 1000}},
+            ]), encoding="utf-8")
+            series = armstat_loader.load_summary_series(path)
+            values = plot_sum.extract_series(series.rows, "power")
+            self.assertTrue(math.isnan(values[0]))
+            self.assertEqual(values[1], 1000)
+
+    def test_plot_parent_failure_has_clean_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parent = Path(tmpdir) / "not-a-directory"
+            parent.write_text("keep me", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "Could not write plot"):
+                plot_sum.save_figure(None, parent / "plot.png")
+            self.assertEqual(parent.read_text(encoding="utf-8"), "keep me")
+
     def test_field_units_cover_power_and_lpi_usage(self):
         self.assertEqual(plot_sum.field_axis_label(["power"]), "power (mW)")
         self.assertEqual(
@@ -69,6 +105,30 @@ class PlotLoaderTests(unittest.TestCase):
 
             self.assertEqual(output.read_bytes(), b"previous complete image")
             self.assertEqual(list(output.parent.glob(".plot.*.png")), [])
+
+    def test_atomic_plot_write_preserves_destination_permissions(self):
+        class SuccessfulFigure:
+            def savefig(self, path, **_kwargs):
+                Path(path).write_bytes(b"complete image")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "plot.png"
+            output.write_bytes(b"previous image")
+            os.chmod(output, 0o640)
+
+            plot_sum.save_figure(SuccessfulFigure(), output)
+
+            self.assertEqual(output.read_bytes(), b"complete image")
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o640)
+
+            new_output = Path(tmpdir) / "new-plot.png"
+            previous_umask = os.umask(0o027)
+            try:
+                plot_sum.save_figure(SuccessfulFigure(), new_output)
+            finally:
+                os.umask(previous_umask)
+
+            self.assertEqual(stat.S_IMODE(new_output.stat().st_mode), 0o640)
 
     def test_non_finite_values_are_not_exposed_as_fields(self):
         fields = armstat_loader.collect_numeric_fields([
@@ -162,6 +222,141 @@ class PlotLoaderTests(unittest.TestCase):
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaisesRegex(SystemExit, "invalid CPU ID"):
                 plot_cpu.load_cpu_series(path)
+
+    def test_duplicate_cpu_ids_are_rejected(self):
+        json_data = [{
+            "schema_version": 8,
+            "interval": 1,
+            "cpus": [
+                {"cpu": 4, "freq": 2100.0},
+                {"cpu": 4, "freq": 2200.0},
+            ],
+        }]
+        csv_data = (
+            "schema_version,interval,timestamp,CPU,freq\n"
+            "8,1,1774665600,4,2100\n"
+            "8,1,1774665600,4,2200\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = Path(tmpdir) / "duplicate.json"
+            csv_path = Path(tmpdir) / "duplicate.csv"
+            json_path.write_text(json.dumps(json_data), encoding="utf-8")
+            csv_path.write_text(csv_data, encoding="utf-8")
+
+            with self.assertRaisesRegex(SystemExit, "duplicate CPU ID 4"):
+                plot_cpu.load_cpu_series(json_path)
+            with self.assertRaisesRegex(SystemExit, "duplicate CPU ID 4"):
+                plot_cpu.load_cpu_series(csv_path)
+
+    def test_malformed_csv_structure_is_rejected_cleanly(self):
+        malformed_inputs = {
+            "duplicate column": (
+                "schema_version,interval,Scope,freq,freq\n"
+                "8,1,SUM,2100,2200\n",
+                "duplicate summary CSV columns: freq",
+            ),
+            "extra cell": (
+                "schema_version,interval,Scope,freq\n"
+                "8,1,SUM,2100,unexpected\n",
+                "contains more cells than its CSV header",
+            ),
+            "missing cell": (
+                "schema_version,interval,Scope,freq\n"
+                "8,1,SUM\n",
+                "contains fewer cells than its CSV header",
+            ),
+        }
+
+        for name, (content, message) in malformed_inputs.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "summary.csv"
+                path.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(SystemExit, message):
+                    plot_sum.load_summary_series(path)
+
+    def test_csv_range_still_rejects_damage_outside_selected_window(self):
+        content = (
+            "schema_version,interval,Scope,freq\n"
+            "8,1,SUM,2100\n"
+            "8,2,SUM\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "summary.csv"
+            path.write_text(content, encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "contains fewer cells"):
+                plot_sum.load_summary_series(path, "1:1")
+
+    def test_noncontiguous_intervals_are_rejected(self):
+        json_data = [
+            {"schema_version": 8, "interval": 1, "summary": {"freq": 2100}},
+            {"schema_version": 8, "interval": 3, "summary": {"freq": 2200}},
+        ]
+        csv_data = (
+            "schema_version,interval,Scope,freq\n"
+            "8,1,SUM,2100\n"
+            "8,3,SUM,2200\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = Path(tmpdir) / "summary.json"
+            csv_path = Path(tmpdir) / "summary.csv"
+            json_path.write_text(json.dumps(json_data), encoding="utf-8")
+            csv_path.write_text(csv_data, encoding="utf-8")
+
+            with self.assertRaisesRegex(SystemExit, "expected 2"):
+                plot_sum.load_summary_series(json_path)
+            with self.assertRaisesRegex(SystemExit, "expected 2"):
+                plot_sum.load_summary_series(csv_path)
+
+    def test_malformed_json_structure_is_rejected_cleanly(self):
+        malformed_inputs = {
+            "non-object sample": (
+                '[{"schema_version": 8, "interval": 1, '
+                '"summary": {"freq": 2100}}, 7]',
+                plot_sum.load_summary_series,
+                "sample 2 is not a JSON object",
+            ),
+            "missing summary": (
+                '[{"schema_version": 8, "interval": 1, "cpus": []}]',
+                plot_sum.load_summary_series,
+                "does not contain a summary object",
+            ),
+            "missing cpus": (
+                '[{"schema_version": 8, "interval": 1, "summary": {}}]',
+                plot_cpu.load_cpu_series,
+                "does not contain a cpus array",
+            ),
+            "non-object CPU row": (
+                '[{"schema_version": 8, "interval": 1, "cpus": [4]}]',
+                plot_cpu.load_cpu_series,
+                "CPU entry 1 is not a JSON object",
+            ),
+            "empty CPU rows": (
+                '[{"schema_version": 8, "interval": 1, "cpus": []}]',
+                plot_cpu.load_cpu_series,
+                "does not contain any CPU rows",
+            ),
+            "duplicate JSON key": (
+                '[{"schema_version": 8, "summary": '
+                '{"freq": 2100, "freq": 2200}}]',
+                plot_sum.load_summary_series,
+                "duplicate JSON key 'freq'",
+            ),
+            "non-standard JSON number": (
+                '[{"schema_version": 8, "summary": {"freq": NaN}}]',
+                plot_sum.load_summary_series,
+                "non-standard JSON constant 'NaN'",
+            ),
+        }
+
+        for name, (content, loader, message) in malformed_inputs.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "input.json"
+                path.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(SystemExit, message):
+                    loader(path)
 
     def test_schema_version_is_required_and_integral(self):
         invalid_versions = (None, 8.9, "8.5", float("inf"))

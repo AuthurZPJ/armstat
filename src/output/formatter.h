@@ -36,7 +36,8 @@
  * topology caches via the tracked CPU id.
  */
 struct cpu_row {
-	int cpu_idx;  /* tracked index; cpu_rows[i].cpu_idx == i */
+	/* Index in the collector's tracked-CPU arrays, not a Linux CPU ID. */
+	int tracked_idx;
 
 	/* Owned per-interval frequency snapshot (cur/min/max, governor, boost) */
 	struct cpu_freq_info freq;
@@ -159,13 +160,15 @@ void serialize_json(const struct interval_record *rec);
 /*
  * CSV serializer
  */
-void serialize_csv(const struct interval_record *rec);
+/* Returns -1 before writing a row if the CSV column layout has changed. */
+int serialize_csv(const struct interval_record *rec);
 
 /*
  * Setup memory pool for interval_record
  * Called by main to pre-allocate the CPU rows the selected mode can emit.
+ * Returns 0 on success or -1 without replacing an existing pool on failure.
  */
-void setup_formatter_pool(int max_cpus);
+int setup_formatter_pool(int max_cpus);
 
 /*
  * Text serializer configuration

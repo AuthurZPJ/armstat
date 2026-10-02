@@ -17,6 +17,7 @@
 #include <sys/syscall.h>
 #include <errno.h>
 #include <limits.h>
+#include <ctype.h>
 #include <sys/resource.h>
 
 #include "pmu.h"
@@ -244,6 +245,10 @@ int resolve_pmu_event(const char *event, int *type,
 	if (event[0] != '0' || (event[1] != 'x' && event[1] != 'X') ||
 	    event[2] == '\0')
 		return -1;
+	for (const char *p = event + 2; *p; p++) {
+		if (!isxdigit((unsigned char)*p))
+			return -1;
+	}
 
 	errno = 0;
 	raw = strtoull(event + 2, &end, 16);
@@ -479,24 +484,54 @@ int probe_pmu_event(const char *event_name)
 	return 0;
 }
 
-static uint64_t scale_pmu_value(uint64_t raw, uint64_t time_enabled,
-				uint64_t time_running)
+static int scale_pmu_value(uint64_t raw, uint64_t time_enabled,
+			   uint64_t time_running, uint64_t *value)
 {
-	long double scaled;
+	unsigned __int128 scaled;
 
-	if (!time_running)
+	if (!time_running || time_running > time_enabled)
+		return -1;
+
+	if (time_running == time_enabled) {
+		*value = raw;
 		return 0;
+	}
 
-	if (time_running >= time_enabled || time_enabled == 0)
-		return raw;
+	/* Exact multiply/divide, rounded to nearest; no floating-point truncation. */
+	scaled = (unsigned __int128)raw * time_enabled + time_running / 2;
+	scaled /= time_running;
 
-	scaled = (long double)raw * (long double)time_enabled;
-	scaled /= (long double)time_running;
+	if (scaled > UINT64_MAX)
+		return -1;
 
-	if (scaled >= (long double)ULLONG_MAX)
-		return ULLONG_MAX;
+	*value = (uint64_t)scaled;
+	return 0;
+}
 
-	return (uint64_t)(scaled + 0.5L);
+int pmu_accumulate_interval_counts(uint64_t *totals, const uint64_t *deltas,
+				   int count, uint64_t time_enabled,
+				   uint64_t time_running)
+{
+	uint64_t updated[MAX_PMU_EVENTS];
+
+	if (!totals || !deltas || count <= 0 || count > MAX_PMU_EVENTS)
+		return -1;
+
+	for (int event = 0; event < count; event++) {
+		uint64_t scaled;
+
+		if (scale_pmu_value(deltas[event], time_enabled, time_running,
+				    &scaled) < 0 ||
+		    scaled > UINT64_MAX - totals[event]) {
+			/* A new cumulative epoch lets the next valid interval recover. */
+			memset(totals, 0, count * sizeof(*totals));
+			return -1;
+		}
+		updated[event] = totals[event] + scaled;
+	}
+
+	memcpy(totals, updated, count * sizeof(*totals));
+	return 0;
 }
 
 static void set_pmu_read_baseline(int cpu,
@@ -657,6 +692,8 @@ int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS],
 
 	for (int cpu = 0; cpu < pmu_cpu_count && cpu < max_cpus; cpu++) {
 		struct perf_group_read_data group_data;
+		uint64_t deltas[MAX_PMU_EVENTS];
+		int accumulated;
 		int counter_reset = 0;
 		ssize_t ret;
 
@@ -706,36 +743,18 @@ int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS],
 			continue;
 		}
 
-		for (int event = 0; event < pmu_event_count &&
-				     event < (int)group_data.nr; event++) {
-			uint64_t current_raw = group_data.values[event];
-			uint64_t previous_raw = pmu_prev_raw[cpu][event];
-			uint64_t delta_raw = 0;
-			uint64_t delta_enabled = 0;
-			uint64_t delta_running = 0;
-
-			if (current_raw >= previous_raw)
-				delta_raw = current_raw - previous_raw;
-			if (group_data.time_enabled >= pmu_prev_time_enabled[cpu])
-				delta_enabled = group_data.time_enabled -
-						pmu_prev_time_enabled[cpu];
-			if (group_data.time_running >= pmu_prev_time_running[cpu])
-				delta_running = group_data.time_running -
-						pmu_prev_time_running[cpu];
-
-			uint64_t scaled = scale_pmu_value(delta_raw, delta_enabled,
-						  delta_running);
-
-			if (ULLONG_MAX - pmu_scaled_totals[cpu][event] < scaled)
-				pmu_scaled_totals[cpu][event] = ULLONG_MAX;
-			else
-				pmu_scaled_totals[cpu][event] += scaled;
+		for (int event = 0; event < pmu_event_count; event++)
+			deltas[event] = group_data.values[event] - pmu_prev_raw[cpu][event];
+		accumulated = pmu_accumulate_interval_counts(pmu_scaled_totals[cpu],
+			deltas, pmu_event_count,
+			group_data.time_enabled - pmu_prev_time_enabled[cpu],
+			group_data.time_running - pmu_prev_time_running[cpu]);
+		set_pmu_read_baseline(cpu, &group_data);
+		for (int event = 0; event < pmu_event_count; event++)
 			values[cpu][event] = pmu_scaled_totals[cpu][event];
-			pmu_prev_raw[cpu][event] = current_raw;
-		}
+		if (accumulated < 0)
+			continue;
 
-		pmu_prev_time_enabled[cpu] = group_data.time_enabled;
-		pmu_prev_time_running[cpu] = group_data.time_running;
 		valid[cpu] = 1;
 		valid_cpus++;
 	}

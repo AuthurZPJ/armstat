@@ -264,10 +264,16 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 		fprintf(stderr,
 			"Warning: --busy-source task-clock now uses /proc/schedstat runtime\n"
 			"  as a compatibility replacement for unreliable CPU-wide perf task-clock\n");
+	}
+	if (get_busy_source_mode() == BUSY_SOURCE_SCHEDSTAT ||
+	    get_busy_source_mode() == BUSY_SOURCE_TASK_CLOCK) {
+		fprintf(stderr,
+			"Warning: schedstat runtime is settled at task switches; "
+			"Busy/Idle may miss continuously running tasks.\n"
+			"  Use --busy-source auto for normal CPU utilization monitoring.\n");
 	} else if (opts->debug && get_busy_source_mode() == BUSY_SOURCE_AUTO) {
 		fprintf(stderr,
-			"Debug: auto busy-source uses /proc/stat on ordinary CPUs\n"
-			"  and /proc/schedstat on nohz_full CPUs when available\n");
+			"Debug: auto busy-source uses /proc/stat on all tracked CPUs\n");
 	}
 
 	if (opts->debug) fprintf(stderr, "Initializing topology...\n");
@@ -339,8 +345,11 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	}
 
 	/* Allocate per-CPU record storage only when this mode can emit CPU rows. */
-	setup_formatter_pool(!section_is_summary_mode() && section_emit_cpu() ?
-			     sys_snapshot_get_effective_cpu_count(snapshot) : 0);
+	if (setup_formatter_pool(!section_is_summary_mode() && section_emit_cpu() ?
+				 sys_snapshot_get_effective_cpu_count(snapshot) : 0) < 0) {
+		fprintf(stderr, "Error: failed to allocate formatter pool\n");
+		return -1;
+	}
 
 	/*
 	 * Phase 1b: Warm up aggregator with baseline for correct first interval delta
@@ -516,13 +525,16 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 			serialize_json(rec);
 			break;
 		case FORMAT_CSV:
-			serialize_csv(rec);
+			if (serialize_csv(rec) < 0)
+				status = -1;
 			break;
 		default:
 			serialize_text(rec);
 			break;
 		}
 		free_interval_record(rec);
+		if (status < 0)
+			break;
 
 		if (fflush(stdout) == EOF || ferror(stdout)) {
 			status = -1;

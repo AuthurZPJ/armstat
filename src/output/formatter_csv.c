@@ -4,12 +4,45 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 
 #include "formatter_machine.h"
 #include "formatter_section.h"
 #include "pmu.h"
 
 static int csv_header_printed;
+
+struct csv_layout {
+	struct field_desc *fields[3][MACHINE_FIELD_CAPACITY];
+	int counts[3];
+	int sections[3];
+	int cpu_identity;
+	int pmu_count;
+	int mixed;
+};
+
+static struct csv_layout initial_csv_layout;
+
+static void get_csv_layout(struct csv_layout *layout)
+{
+	const enum field_scope scopes[] = {
+		FIELD_SCOPE_SYSTEM, FIELD_SCOPE_PACKAGE, FIELD_SCOPE_CPU
+	};
+
+	memset(layout, 0, sizeof(*layout));
+	layout->sections[0] = section_is_summary_mode() ||
+		section_emit_default_summary();
+	layout->sections[1] = !section_is_summary_mode() && section_emit_package();
+	layout->sections[2] = !section_is_summary_mode() && section_emit_cpu();
+	layout->cpu_identity = layout->sections[2] && section_emit_cpu_identity();
+	layout->pmu_count = is_pmu_enabled() ? get_pmu_event_count() : 0;
+	layout->mixed = section_emit_mixed_csv();
+	for (int i = 0; i < 3; i++) {
+		if (layout->sections[i])
+			machine_get_serialized_fields(scopes[i], layout->fields[i],
+						      &layout->counts[i]);
+	}
+}
 
 static int csv_needs_quotes(const char *value)
 {
@@ -69,13 +102,13 @@ static void print_prefixed_pmu_csv_headers(const char *scope_prefix)
 }
 
 static void print_pmu_csv_cpu_values(const struct interval_record *rec,
-				     int cpu_idx)
+				     int row_idx)
 {
 	for (int i = 0; i < rec->pmu_event_count; i++) {
-		if (!pmu_is_active() || !rec->cpu_rows[cpu_idx].pmu_valid)
+		if (!pmu_is_active() || !rec->cpu_rows[row_idx].pmu_valid)
 			printf(",");
 		else
-			printf(",%llu", rec->cpu_rows[cpu_idx].pmu[i]);
+			printf(",%llu", rec->cpu_rows[row_idx].pmu[i]);
 	}
 }
 
@@ -223,7 +256,6 @@ static void serialize_csv_cpu_row(const struct interval_record *rec,
 				  int row_idx)
 {
 	struct field_desc *fields[MACHINE_FIELD_CAPACITY];
-	int cpu_idx = rec->cpu_rows[row_idx].cpu_idx;
 	int count;
 	int first = 1;
 
@@ -237,7 +269,7 @@ static void serialize_csv_cpu_row(const struct interval_record *rec,
 	for (int i = 0; i < count; i++) {
 		char value[64];
 
-		format_field_value(fields[i], rec, cpu_idx, "", value,
+		format_field_value(fields[i], rec, row_idx, "", value,
 				   sizeof(value));
 		printf("%s", first ? "" : ",");
 		print_csv_cell(value);
@@ -245,7 +277,7 @@ static void serialize_csv_cpu_row(const struct interval_record *rec,
 	}
 
 	if (is_pmu_enabled())
-		print_pmu_csv_cpu_values(rec, cpu_idx);
+		print_pmu_csv_cpu_values(rec, row_idx);
 	printf("\n");
 }
 
@@ -295,7 +327,6 @@ static void serialize_csv_mixed_cpu_row(const struct interval_record *rec,
 					int summary_section)
 {
 	struct field_desc *cpu_fields[MACHINE_FIELD_CAPACITY];
-	int cpu_idx = rec->cpu_rows[row_idx].cpu_idx;
 	int cpu_count;
 
 	print_csv_metadata_prefix(rec);
@@ -307,7 +338,7 @@ static void serialize_csv_mixed_cpu_row(const struct interval_record *rec,
 	for (int i = 0; i < cpu_count; i++) {
 		char value[64];
 
-		format_field_value(cpu_fields[i], rec, cpu_idx, "", value,
+		format_field_value(cpu_fields[i], rec, row_idx, "", value,
 				   sizeof(value));
 		putchar(',');
 		print_csv_cell(value);
@@ -315,7 +346,7 @@ static void serialize_csv_mixed_cpu_row(const struct interval_record *rec,
 	if (is_pmu_enabled() && summary_section)
 		print_empty_csv_cells(rec->pmu_event_count);
 	if (is_pmu_enabled())
-		print_pmu_csv_cpu_values(rec, cpu_idx);
+		print_pmu_csv_cpu_values(rec, row_idx);
 	printf("\n");
 }
 
@@ -415,15 +446,27 @@ static void serialize_csv_mixed_rows(const struct interval_record *rec,
 	}
 }
 
-void serialize_csv(const struct interval_record *rec)
+int serialize_csv(const struct interval_record *rec)
 {
+	struct csv_layout layout;
 	int summary_section = section_is_summary_mode() ||
 		section_emit_default_summary();
 	int package_section = !section_is_summary_mode() &&
 		section_emit_package();
 	int cpu_section = !section_is_summary_mode() && section_emit_cpu();
 
+	get_csv_layout(&layout);
+	if (csv_header_printed &&
+	    memcmp(&layout, &initial_csv_layout, sizeof(layout))) {
+		fprintf(stderr,
+			"Error: CSV columns changed during sampling; stopped before "
+			"writing a mismatched row.\n"
+			"  Restart capture for the new capabilities, or use JSON "
+			"for changing column sets.\n");
+		return -1;
+	}
 	if (!csv_header_printed) {
+		initial_csv_layout = layout;
 		serialize_csv_header();
 		csv_header_printed = 1;
 	}
@@ -442,6 +485,7 @@ void serialize_csv(const struct interval_record *rec)
 	}
 
 	fflush(stdout);
+	return 0;
 }
 
 void reset_csv_state(void)

@@ -187,8 +187,8 @@ static void calculate_busy_idle_stats(const struct sys_snapshot *raw,
 				prev_authoritative_runtime_ns[i];
 			busy_us = runtime_delta_ns / 1000ULL;
 			/*
-			 * On nohz_full CPUs, schedstat rounding can make runtime
-			 * slightly exceed wall time. Derive idle from a clamped value.
+			 * Schedstat can settle runtime from earlier intervals at a
+			 * task switch. Bound this diagnostic view to the wall interval.
 			 */
 			if (busy_us > delta_us)
 				busy_us = delta_us;
@@ -309,6 +309,7 @@ static void find_pmu_event_indexes(int pmu_count, int *cycles_idx,
 
 static void calculate_summary_pmu_stats(const struct raw_counters *current,
 					struct interval_stats *stats,
+					int cpu_count,
 					int cycles_idx,
 					int instructions_idx)
 {
@@ -317,10 +318,27 @@ static void calculate_summary_pmu_stats(const struct raw_counters *current,
 
 	for (event = 0; current->pmu_valid && event < pmu_count &&
 	     event < MAX_PMU_EVENTS; event++) {
-		if (current->pmu[event] < prev_counters.pmu[event])
-			break;
-		stats->pmu_delta[event] = current->pmu[event] -
-			prev_counters.pmu[event];
+		if (current->pmu_per_cpu) {
+			unsigned long long total = 0;
+
+			/* Sum interval deltas, never saturated lifetime totals. */
+			if (cpu_count <= 0)
+				return;
+			for (int cpu = 0; cpu < cpu_count; cpu++) {
+				unsigned long long delta = stats->per_cpu_pmu[cpu][event];
+
+				if (!stats->per_cpu_pmu_valid[cpu] ||
+				    delta > ULLONG_MAX - total)
+					return;
+				total += delta;
+			}
+			stats->pmu_delta[event] = total;
+		} else {
+			if (current->pmu[event] < prev_counters.pmu[event])
+				break;
+			stats->pmu_delta[event] = current->pmu[event] -
+				prev_counters.pmu[event];
+		}
 	}
 	if (pmu_count > 0 && current->pmu_valid && event == pmu_count)
 		stats->pmu_valid = 1;
@@ -380,8 +398,9 @@ static void calculate_pmu_stats(const struct raw_counters *current,
 
 	find_pmu_event_indexes(current->pmu_count, &cycles_idx,
 			       &instructions_idx);
-	calculate_summary_pmu_stats(current, stats, cycles_idx, instructions_idx);
 	calculate_per_cpu_pmu_stats(current, stats, cpu_count, cycles_idx,
+				    instructions_idx);
+	calculate_summary_pmu_stats(current, stats, cpu_count, cycles_idx,
 				    instructions_idx);
 }
 

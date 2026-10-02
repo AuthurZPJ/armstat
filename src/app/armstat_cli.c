@@ -97,12 +97,12 @@ static void print_help(void)
 	printf("Options:\n");
 	printf("  -i, --interval <sec>   Measurement interval (default: 1.0)\n");
 	printf("  -n, --num-iterations <count> Samples to print (0 = unlimited)\n");
-	printf("  -N, --header-iterations <count> Reprint text header after every N samples (0 = first only)\n");
+	printf("  -N, --header-iterations <count> Reprint text header after every N samples (0 = only on startup/layout changes)\n");
 	printf("  -c, --cpu <list>       Real CPU IDs to monitor (e.g. 0,1,4-7)\n");
 	printf("  -B, --busy-source <src> Busy/Idle source hint: auto, procstat, schedstat, task-clock\n");
 	printf("  -o, --output <file>    Write output to file\n");
 	printf("  -O, --export <file>    Alias for --output\n");
-	printf("  -q, --quiet            Suppress text banner, headers, and interval markers\n");
+	printf("  -q, --quiet            Suppress text banner, headers, timestamps, and markers\n");
 	printf("  -D, --dump             Collect one complete interval and exit\n");
 	printf("  -S, --summary          Summary mode (SUM only)\n");
 	printf("  -a, --all              Enable all supported base column groups (use -I for IPC, -p for PMU)\n");

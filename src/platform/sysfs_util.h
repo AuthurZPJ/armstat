@@ -40,7 +40,8 @@ int sysfs_read_ull_checked(const char *path, unsigned long long *out);
 
 /*
  * Read a string (first line) from a sysfs/procfs file into buf.
- * Trailing newline is stripped. Always returns buf; on failure buf[0]=0.
+ * The full first line must fit; trailing newline is stripped. Always returns
+ * buf; on open/read/truncation failure buf[0]=0.
  */
 char *sysfs_read_str(const char *path, char *buf, size_t len);
 

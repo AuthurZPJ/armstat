@@ -135,12 +135,12 @@ static void print_pmu_json_summary_object(const struct interval_record *rec)
 }
 
 static void print_pmu_json_cpu_object(const struct interval_record *rec,
-				      int cpu_idx)
+				      int row_idx)
 {
 	int pmu_count = rec->pmu_event_count;
 
 	if (pmu_count <= 0 || !pmu_is_active() ||
-	    !rec->cpu_rows[cpu_idx].pmu_valid) {
+	    !rec->cpu_rows[row_idx].pmu_valid) {
 		printf("null");
 		return;
 	}
@@ -151,7 +151,7 @@ static void print_pmu_json_cpu_object(const struct interval_record *rec,
 
 		printf("%s", i ? ", " : "");
 		print_json_escaped_string(name ? name : "event");
-		printf(": %llu", rec->cpu_rows[cpu_idx].pmu[i]);
+		printf(": %llu", rec->cpu_rows[row_idx].pmu[i]);
 	}
 	printf("}");
 }
@@ -175,17 +175,15 @@ static void print_json_cpus(const struct interval_record *rec,
 			    int has_summary)
 {
 	printf("    \"cpus\": [\n");
-	for (int row = 0; row < rec->cpu_row_count; row++) {
-		int cpu_idx = rec->cpu_rows[row].cpu_idx;
-
-		printf("      {\"cpu\": %d", get_cpu_row_id(rec, row));
+	for (int row_idx = 0; row_idx < rec->cpu_row_count; row_idx++) {
+		printf("      {\"cpu\": %d", get_cpu_row_id(rec, row_idx));
 		for (int i = 0; i < field_count; i++)
-			print_json_inline_field(fields[i], rec, cpu_idx);
+			print_json_inline_field(fields[i], rec, row_idx);
 		if (is_pmu_enabled()) {
 			printf(", \"pmu\": ");
-			print_pmu_json_cpu_object(rec, cpu_idx);
+			print_pmu_json_cpu_object(rec, row_idx);
 		}
-		printf("}%s\n", row < rec->cpu_row_count - 1 ? "," : "");
+		printf("}%s\n", row_idx < rec->cpu_row_count - 1 ? "," : "");
 	}
 	printf("    ]%s\n", has_summary ? "," : "");
 }

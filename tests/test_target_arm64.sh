@@ -10,8 +10,10 @@ sample_count=${ARMSTAT_TARGET_SAMPLES:-5}
 soak_iterations=${ARMSTAT_SOAK_ITERATIONS:-0}
 soak_interval=${ARMSTAT_SOAK_INTERVAL:-1}
 max_rss_kib=${ARMSTAT_MAX_RSS_KIB:-262144}
-max_open_fds=${ARMSTAT_MAX_OPEN_FDS:-256}
+max_open_fds=${ARMSTAT_MAX_OPEN_FDS:-}
 max_diagnostic_lines=${ARMSTAT_MAX_DIAGNOSTIC_LINES:-16}
+min_valid_percent=${ARMSTAT_MIN_VALID_PERCENT:-95}
+require_freq=${ARMSTAT_REQUIRE_FREQ:-0}
 require_pmu=${ARMSTAT_REQUIRE_PMU:-0}
 require_cpuidle=${ARMSTAT_REQUIRE_CPUIDLE:-0}
 require_power=${ARMSTAT_REQUIRE_POWER:-0}
@@ -57,6 +59,22 @@ require_boolean()
 	esac
 }
 
+require_percentage()
+{
+	name=$1
+	value=$2
+	case $value in
+	''|*[!0-9]*)
+		echo "$name must be an integer from 1 through 100" >&2
+		exit 1
+		;;
+	esac
+	if [ "$value" -lt 1 ] || [ "$value" -gt 100 ]; then
+		echo "$name must be an integer from 1 through 100" >&2
+		exit 1
+	fi
+}
+
 probe_value()
 {
 	awk -v key="$1:" '$1 == key { print $2; exit }' "$tmp_dir/probe.txt"
@@ -80,8 +98,9 @@ case $soak_iterations in
 esac
 require_positive_integer ARMSTAT_TARGET_SAMPLES "$sample_count"
 require_positive_integer ARMSTAT_MAX_RSS_KIB "$max_rss_kib"
-require_positive_integer ARMSTAT_MAX_OPEN_FDS "$max_open_fds"
 require_positive_integer ARMSTAT_MAX_DIAGNOSTIC_LINES "$max_diagnostic_lines"
+require_percentage ARMSTAT_MIN_VALID_PERCENT "$min_valid_percent"
+require_boolean ARMSTAT_REQUIRE_FREQ "$require_freq"
 require_boolean ARMSTAT_REQUIRE_PMU "$require_pmu"
 require_boolean ARMSTAT_REQUIRE_CPUIDLE "$require_cpuidle"
 require_boolean ARMSTAT_REQUIRE_POWER "$require_power"
@@ -159,6 +178,8 @@ PY
 probe_schema_version=$(probe_value probe_schema_version)
 online_cpus=$(probe_value online_cpus)
 tracked_cpus=$(probe_value tracked_cpus)
+test "$(probe_value busy_source_requested)" = auto
+test "$(probe_value busy_source_effective)" = procstat
 if [ "$probe_schema_version" != 1 ]; then
 	echo "target-test requires probe_schema_version 1" >&2
 	exit 1
@@ -172,6 +193,20 @@ esac
 test "$online_cpus" -gt 0
 test "$tracked_cpus" -gt 0
 test "$tracked_cpus" -le "$online_cpus"
+
+# Two default IPC events require two perf fds per tracked CPU. Keep the soak
+# ceiling useful on large servers without making every operator calculate the
+# minimum budget by hand. An explicit ARMSTAT_MAX_OPEN_FDS always wins.
+if [ -z "$max_open_fds" ]; then
+	max_open_fds=256
+	if [ "$require_pmu" -eq 1 ]; then
+		pmu_fd_budget=$((tracked_cpus * 2 + 64))
+		if [ "$pmu_fd_budget" -gt "$max_open_fds" ]; then
+			max_open_fds=$pmu_fd_budget
+		fi
+	fi
+fi
+require_positive_integer ARMSTAT_MAX_OPEN_FDS "$max_open_fds"
 
 printf '%s\n' 'previous-valid-probe' >"$tmp_dir/temp-policy.out"
 if ARMSTAT_TEMP_POLICY=invalid "$armstat_bin" --probe \
@@ -354,11 +389,13 @@ fi
 grep -F 'cannot produce data' "$tmp_dir/invalid.stderr" >/dev/null
 grep -Fx 'previous-valid-export' "$tmp_dir/existing.out" >/dev/null
 
-"$armstat_bin" -S -a -f json -i "$sample_interval" -n "$sample_count" \
+"$armstat_bin" -a -f json -i "$sample_interval" -n "$sample_count" \
 	>"$tmp_dir/samples.json"
-python3 - "$tmp_dir/samples.json" "$sample_count" <<'PY'
+python3 - "$tmp_dir/samples.json" "$sample_count" "$tracked_cpus" \
+	"$require_freq" <<'PY'
 import json
 from datetime import datetime
+import math
 import re
 import sys
 
@@ -373,10 +410,23 @@ def parse_rfc3339_ns(value):
     # Older Python accepts at most microseconds in fromisoformat().
     return datetime.fromisoformat(value[:26] + value[29:])
 
-path, expected_text = sys.argv[1:]
+def finite_number(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool) and
+            math.isfinite(value))
+
+def valid_busy_idle(record):
+    busy = record.get("busy_percent")
+    idle = record.get("idle_percent")
+    return (finite_number(busy) and finite_number(idle) and
+            0 <= busy <= 100 and 0 <= idle <= 100 and
+            abs((busy + idle) - 100) <= 0.15)
+
+path, expected_text, tracked_text, require_freq_text = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
     samples = json.load(stream, parse_constant=reject_constant)
 expected = int(expected_text)
+tracked = int(tracked_text)
+require_freq = require_freq_text == "1"
 assert len(samples) == expected, (len(samples), expected)
 assert all(sample.get("schema_version") == 8 for sample in samples)
 assert [sample.get("interval") for sample in samples] == list(range(1, expected + 1))
@@ -392,6 +442,32 @@ assert all(isinstance(sample.get("timestamp_iso"), str) for sample in samples)
 assert all("." in sample["timestamp_iso"] for sample in samples)
 assert all(parse_rfc3339_ns(sample["timestamp_iso"])
            for sample in samples)
+
+summaries = [sample.get("summary", {}) for sample in samples]
+assert any(valid_busy_idle(summary) for summary in summaries), summaries
+if require_freq:
+    assert any(finite_number(summary.get("freq")) and summary["freq"] > 0
+               for summary in summaries), "summary Freq remained unavailable"
+
+per_cpu = {}
+for sample in samples:
+    cpus = sample.get("cpus")
+    assert isinstance(cpus, list) and len(cpus) == tracked, len(cpus or [])
+    ids = [cpu.get("cpu") for cpu in cpus]
+    assert all(isinstance(cpu_id, int) and not isinstance(cpu_id, bool)
+               for cpu_id in ids), ids
+    assert len(set(ids)) == len(ids), ids
+    for cpu in cpus:
+        per_cpu.setdefault(cpu["cpu"], []).append(cpu)
+
+assert len(per_cpu) == tracked, (len(per_cpu), tracked)
+for cpu_id, records in per_cpu.items():
+    assert any(valid_busy_idle(record) for record in records), \
+        f"CPU {cpu_id} Busy/Idle remained unavailable"
+    if require_freq:
+        assert any(finite_number(record.get("freq")) and record["freq"] > 0
+                   for record in records), \
+            f"CPU {cpu_id} cpuinfo_cur_freq remained unavailable"
 PY
 
 printf '%s\n' 'previous-valid-export' >"$tmp_dir/option-output.json"
@@ -667,9 +743,12 @@ PY
 	done
 
 if [ "$soak_iterations" -gt 0 ]; then
-	"$armstat_bin" -S -a -f json -i "$soak_interval" \
-		-n "$soak_iterations" >"$tmp_dir/soak.json" \
-		2>"$tmp_dir/soak.stderr" &
+	set -- "$armstat_bin" -S -a -f json -i "$soak_interval" \
+		-n "$soak_iterations"
+	if [ "$require_pmu" -eq 1 ]; then
+		set -- "$@" -I
+	fi
+	"$@" >"$tmp_dir/soak.json" 2>"$tmp_dir/soak.stderr" &
 	child_pid=$!
 	peak_rss_kib=0
 	peak_open_fds=0
@@ -716,17 +795,36 @@ if [ "$soak_iterations" -gt 0 ]; then
 		echo "target-test soak exceeded fd limit: $peak_open_fds > $max_open_fds" >&2
 		exit 1
 	fi
-	python3 - "$tmp_dir/soak.json" "$soak_iterations" <<'PY'
+	python3 - "$tmp_dir/soak.json" "$soak_iterations" \
+		"$min_valid_percent" "$require_freq" "$require_pmu" \
+		"$require_cpuidle" "$require_power" "$require_temp" \
+		"$require_membw" "$require_uncore" <<'PY'
 import json
+import math
+import re
 import sys
 
 def reject_constant(value):
     raise ValueError(f"non-standard JSON constant: {value}")
 
-path, expected_text = sys.argv[1:]
+def finite_number(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool) and
+            math.isfinite(value))
+
+def valid_busy_idle(summary):
+    busy = summary.get("busy_percent")
+    idle = summary.get("idle_percent")
+    return (finite_number(busy) and finite_number(idle) and
+            0 <= busy <= 100 and 0 <= idle <= 100 and
+            abs((busy + idle) - 100) <= 0.15)
+
+path, expected_text, minimum_text = sys.argv[1:4]
+(require_freq, require_pmu, require_cpuidle, require_power, require_temp,
+ require_membw, require_uncore) = (value == "1" for value in sys.argv[4:])
 with open(path, encoding="utf-8") as stream:
     samples = json.load(stream, parse_constant=reject_constant)
 expected = int(expected_text)
+minimum_percent = int(minimum_text)
 assert len(samples) == expected, (len(samples), expected)
 assert all(sample.get("schema_version") == 8 for sample in samples)
 assert [sample.get("interval") for sample in samples] == list(range(1, expected + 1))
@@ -734,6 +832,68 @@ assert all(isinstance(sample.get("duration_us"), int) and
            sample["duration_us"] > 0 for sample in samples)
 assert all(sample["timestamp_ns"] // 1_000_000_000 == sample["timestamp"]
            for sample in samples)
+
+summaries = [sample.get("summary", {}) for sample in samples]
+
+def require_valid_ratio(name, predicate):
+    valid = sum(bool(predicate(summary)) for summary in summaries)
+    required = (len(summaries) * minimum_percent + 99) // 100
+    assert valid >= required, \
+        f"{name} valid samples {valid}/{len(summaries)}; need {required}"
+    print(f"target-test: soak {name} valid {valid}/{len(summaries)}")
+
+require_valid_ratio("Busy/Idle", valid_busy_idle)
+if require_freq:
+    require_valid_ratio(
+        "Freq",
+        lambda summary: finite_number(summary.get("freq")) and
+        summary["freq"] > 0,
+    )
+if require_pmu:
+    def valid_pmu(summary):
+        pmu = summary.get("pmu")
+        return (isinstance(pmu, dict) and
+                isinstance(pmu.get("cycles"), int) and
+                not isinstance(pmu.get("cycles"), bool) and
+                isinstance(pmu.get("instructions"), int) and
+                not isinstance(pmu.get("instructions"), bool) and
+                finite_number(summary.get("ipc")))
+    require_valid_ratio("PMU/IPC", valid_pmu)
+if require_cpuidle:
+    require_valid_ratio(
+        "cpuidle",
+        lambda summary: any(
+            re.fullmatch(r"lpi[0-7]", key) and finite_number(value) and
+            0 <= value <= 100
+            for key, value in summary.items()
+        ),
+    )
+if require_power:
+    require_valid_ratio(
+        "power",
+        lambda summary: finite_number(summary.get("power")) and
+        summary["power"] >= 0,
+    )
+if require_temp:
+    require_valid_ratio(
+        "temperature",
+        lambda summary: any(
+            re.fullmatch(r"temp[0-3]", key) and finite_number(value)
+            for key, value in summary.items()
+        ),
+    )
+if require_membw:
+    require_valid_ratio(
+        "memory bandwidth",
+        lambda summary: finite_number(summary.get("mem_bw")) and
+        summary["mem_bw"] >= 0,
+    )
+if require_uncore:
+    require_valid_ratio(
+        "uncore frequency",
+        lambda summary: finite_number(summary.get("uncore_freq")) and
+        summary["uncore_freq"] > 0,
+    )
 PY
 	echo "target-test: soak peak RSS ${peak_rss_kib} KiB, peak fds ${peak_open_fds}"
 fi

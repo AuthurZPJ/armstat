@@ -41,6 +41,11 @@ void list_builtin_pmu_events(void);
 int read_all_pmu_counters(uint64_t (*values)[MAX_PMU_EVENTS],
 			  unsigned char *valid, int max_cpus);
 
+/* Scale one group interval exactly; invalid/overflow intervals clear totals. */
+int pmu_accumulate_interval_counts(uint64_t *totals, const uint64_t *deltas,
+				   int count, uint64_t time_enabled,
+				   uint64_t time_running);
+
 /* Rebuild PMU file descriptors after CPU hotplug */
 int rebuild_pmu_events(void);
 

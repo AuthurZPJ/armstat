@@ -76,7 +76,9 @@ larger or higher-numbered online set is reported as truncated.
 
 When online membership changes, the runtime rebuilds CPU-dependent caches and
 topology, resets the aggregator, and consumes a new baseline before producing
-another row. The rebuild interval is not presented as a normal measurement.
+another row. The rebuild interval is not presented as a normal measurement;
+both clocks are captured again after rebuild completion so its latency is not
+included in the next visible interval's rate denominator.
 
 ### Sampling layers
 
@@ -106,8 +108,9 @@ maintainer invariants that calculations and serializers must preserve:
 - `Idle% + Busy% = 100%` for every valid CPU interval.
 - `IOWait%` is an independent `/proc/stat` view and is not subtracted from
   `Busy%`.
-- With `--busy-source=auto`, ordinary CPUs use `/proc/stat`; CPUs identified
-  as `nohz_full` use `/proc/schedstat` runtime when that input is valid.
+- With `--busy-source=auto`, all tracked CPUs use `/proc/stat`, including
+  `nohz_full` CPUs. Explicit schedstat is diagnostic only: runtime is settled
+  at context switches and can omit execution still in progress.
 - Split `LPI-*` columns are a display decomposition of authoritative idle
   time. The deepest visible usable state absorbs the residual so displayed
   states approximate `Idle%` rather than claiming raw cpuidle counters are a
@@ -117,6 +120,16 @@ maintainer invariants that calculations and serializers must preserve:
   are unavailable and recovery establishes a new baseline.
 - `SUM` percentages and frequency are averages across valid tracked CPUs;
   system counters and PMU counters are interval deltas or aggregates.
+- Raw PMU event input requires `0x`/`0X` followed by hexadecimal digits within
+  64 bits; signs and embedded whitespace are invalid.
+- PMU summary aggregation sums per-CPU interval deltas, not differences of
+  lifetime sums. It requires every tracked CPU to be valid and rejects a
+  64-bit overflow of the interval sum itself.
+- Per-CPU PMU multiplex scaling uses exact integer arithmetic rounded to
+  nearest. An invalid time delta or overflow of a scaled interval or its
+  cumulative total makes the whole CPU group unavailable for that interval
+  and starts a new cumulative epoch. The next valid interval can recover
+  instead of subtracting a permanently saturated total and reporting zero.
 - Package rows group tracked CPUs by the physical package ID supplied by
   topology.
 - `Freq` is the current `cpuinfo_cur_freq` sample. Summary and package values
@@ -186,10 +199,25 @@ Section presence follows the selected level. The default emits `summary` and
 `packages`; `-S` emits only `summary`; `-a` expands the output with `cpus`.
 Explicit selection can emit any valid combination.
 
-Human-readable multi-row output marks every sample block as
-`--- interval N ---` and separates consecutive blocks with a blank line. The
-marker is not part of JSON or CSV. Summary-only text remains one data row per
-interval, and quiet text omits the marker with the other human-facing headers.
+Human-readable multi-row output marks every block with its interval number,
+timezone-qualified timestamp, and measured duration in seconds; consecutive
+blocks have a blank separator. Summary-only text has one timestamp-prefixed row
+per interval. Headers include units; `/int` denotes count per interval. Quiet
+text omits timestamps, markers, and headers. These presentation labels do not
+change machine field names or exact CLI selection tokens.
+Text measures the package row-key width across the current package set, keeping
+large, sparse package IDs aligned with the header and other rows. Headers repeat
+when column labels, selections, or measured widths change.
+CSV checks the emitted scopes and ordered columns against its first header.
+If runtime capability changes alter that layout, serialization returns an error
+before writing the affected interval, and the process exits nonzero. CPU
+membership changes alone can continue when the column layout remains the same.
+
+An output target is opened only after collector initialization, the baseline
+sample, and formatter-pool allocation have succeeded, so those startup
+failures do not truncate an existing export. Successful startup switches to
+streaming output; later collection or write failures therefore leave the
+complete prefix already produced and return a nonzero status.
 
 Unavailable numbers and strings are JSON `null`. Available `boost` values are
 JSON booleans. Non-finite internal floating-point values are normalized to
@@ -251,7 +279,20 @@ equivalent entry points are `scripts/plot_sum.py` and `scripts/plot_cpu.py`.
 Both use the shared loader for schema validation, field aliases, missing-value
 handling, and timestamps. Inputs must contain the exact integer
 `schema_version` supported by the scripts; an absent or fractional version is
-rejected rather than guessed.
+rejected rather than guessed. Missing or incorrectly typed JSON samples and
+sections, non-standard JSON numeric constants, duplicate JSON keys or CPU IDs
+within one sample, non-contiguous one-based interval numbers, duplicate CSV
+columns, and rows whose cell count differs from their header are rejected as
+damaged input rather than silently dropping or overwriting values.
+Numeric values outside floating-point plotting range become missing values;
+oversized JSON integers must not raise an uncaught conversion error. Output
+directory creation is handled by the atomic writer and reports a concise error
+if the destination cannot be created.
+Timezone parsing normalizes fractional seconds in a temporary parsing copy so
+Python 3.10 accepts the export's nine-digit fraction. The original timestamp
+and nanosecond metadata are retained.
+Compact ISO offsets such as `+0800` are normalized to `+08:00` in that parsing
+copy as well, preserving the offset on Python 3.10.
 
 ```bash
 armstat-plot-summary summary.json --preset freq
@@ -274,7 +315,10 @@ displayed clock. If offsets change inside one selected window, the axis is
 normalized to UTC. Non-increasing wall-clock timestamps also fall back to
 sample numbers so lines never run backward across the x-axis.
 Known fields show their canonical output units in field listings and axis
-labels. Smoothing is sample-based and preserves a gap when the current sample
+labels. Long axis labels for fields sharing one unit use `Value (unit)`;
+the legend keeps every field name. Space above the axes is measured from the
+rendered legend rather than estimated from its row count.
+Smoothing is sample-based and preserves a gap when the current sample
 is unavailable, so a failed read or offline CPU is not drawn as stale data.
 CPUs or groups with no primary-field data anywhere in the selected window are
 reported and skipped, while intermittent missing samples remain visible gaps.
@@ -287,7 +331,8 @@ Summary rendering uses ten distinct colors, which covers every line in the
 complete `idle-lpi` preset without palette reuse. Both commands force a
 headless rendering backend and write through a temporary file in the output
 directory; the destination is atomically replaced only after a complete PNG,
-SVG, or PDF has been produced.
+SVG, or PDF has been produced. Replacement preserves an existing image's
+permission bits; a new image uses the normal `0666 & ~umask` file mode.
 
 ## Build and validation
 
@@ -307,8 +352,9 @@ rendering when matplotlib is installed, and build/install transitions. Set
 `ARMSTAT_REQUIRE_PLOT_RENDER=1` to turn a missing matplotlib dependency into a
 test failure; CI enables this gate after installing the dependency.
 `make debug-test` rebuilds and runs the suite with AddressSanitizer and
-UndefinedBehaviorSanitizer. On Linux with GCC, `make analyze` runs the
-path-sensitive static analyzer in `.armstat-analysis/`.
+UndefinedBehaviorSanitizer. `make analyze` selects GCC `-fanalyzer` or Clang
+`--analyze` according to the configured compiler. GCC analysis objects are
+isolated under `.armstat-analysis/`; Clang analysis does not publish objects.
 
 Out-of-tree builds use `O` and must keep generated files under that directory:
 
@@ -316,6 +362,12 @@ Out-of-tree builds use `O` and must keep generated files under that directory:
 make O=/tmp/armstat-build
 /tmp/armstat-build/armstat --version
 ```
+
+Tests suppress Python bytecode caches, including in child plotting processes.
+`make O=... clean` leaves source-directory caches untouched and cleans only the
+selected output directory. Build, test, debug, and analysis commands can
+therefore use a read-only source checkout with a writable `O` directory.
+An in-tree `make clean` also removes source-directory Python caches.
 
 ### ARM64 target acceptance
 
@@ -333,6 +385,7 @@ resources, and optional telemetry when explicitly required. Capability gates
 are enabled with:
 
 ```bash
+ARMSTAT_REQUIRE_FREQ=1 \
 ARMSTAT_REQUIRE_PMU=1 \
 ARMSTAT_REQUIRE_CPUIDLE=1 \
 ARMSTAT_REQUIRE_POWER=1 \
@@ -342,11 +395,20 @@ ARMSTAT_REQUIRE_UNCORE=1 \
 make target-test
 ```
 
-Set only the requirements promised by that deployment platform. A stability
-run can be requested with `ARMSTAT_SOAK_ITERATIONS` and
-`ARMSTAT_SOAK_INTERVAL`; resource ceilings are configurable through
-`ARMSTAT_MAX_RSS_KIB`, `ARMSTAT_MAX_OPEN_FDS`, and
-`ARMSTAT_MAX_DIAGNOSTIC_LINES`.
+Busy/Idle coherence is a mandatory base gate. Set `ARMSTAT_REQUIRE_FREQ=1` on
+every Kunpeng model claimed for deployment: it requires a finite positive
+summary value and at least one finite positive `cpuinfo_cur_freq` sample for
+every tracked CPU. Set the other requirements only when that deployment
+platform promises the corresponding capability.
+
+A stability run can be requested with `ARMSTAT_SOAK_ITERATIONS` and
+`ARMSTAT_SOAK_INTERVAL`. It validates Busy/Idle plus every explicitly required
+capability across the entire capture. At least 95% of samples must be valid by
+default; configure this with `ARMSTAT_MIN_VALID_PERCENT`. Resource ceilings
+are configurable through `ARMSTAT_MAX_RSS_KIB`, `ARMSTAT_MAX_OPEN_FDS`, and
+`ARMSTAT_MAX_DIAGNOSTIC_LINES`. When PMU is required and no explicit fd ceiling
+is supplied, the test raises its default ceiling to at least two fds per
+tracked CPU plus a small process allowance, matching the two-event IPC group.
 
 With `ARMSTAT_REQUIRE_CPUIDLE=1`, the target gate verifies every visible
 `idle_state_N_name` probe mapping, summary residency, and at least one finite,
