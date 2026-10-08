@@ -30,7 +30,7 @@ def generate_summary_csv(num_samples: int) -> Path:
     with path.open("w") as f:
         f.write("schema_version,interval,timestamp,timestamp_iso,Scope,freq,uncore_freq,busy_percent,idle_percent,temp0,temp1\n")
         for i in range(1, num_samples + 1):
-            f.write(f"8,{i},1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1600.00,50.00,50.00,45.00,46.00\n")
+            f.write(f"9,{i},1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1600.00,50.00,50.00,45.00,46.00\n")
     return path
 
 
@@ -41,7 +41,7 @@ def generate_cpu_csv(num_samples: int, num_cpus: int) -> Path:
         f.write("schema_version,interval,timestamp,timestamp_iso,CPU,freq,busy_percent,idle_percent,temp\n")
         for i in range(1, num_samples + 1):
             for cpu in range(num_cpus):
-                f.write(f"8,{i},1774665600,2026-03-28T10:40:00+0800,{cpu},2200.00,50.00,50.00,45.00\n")
+                f.write(f"9,{i},1774665600,2026-03-28T10:40:00+0800,{cpu},2200.00,50.00,50.00,45.00\n")
     return path
 
 
@@ -133,7 +133,7 @@ def test_json_unchanged():
     import json
     data = [
         {
-            "schema_version": 8,
+            "schema_version": 9,
             "interval": i,
             "timestamp": 1774665600 + i,
             "summary": {"freq": 2200.0, "busy_percent": 50.0}

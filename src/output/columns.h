@@ -177,8 +177,8 @@ static inline int is_ipc_enabled(void)     { return show_ipc; }
 #define MAX_VISIBLE_IDLE_STATES 8
 
 /*
- * Idle-state series visibility (read by the record builder to apply the
- * residual display rule during materialization). Written by
+ * Idle-state series visibility (read by the record builder to select
+ * independent state values during materialization). Written by
  * update_idle_state_visibility() based on cpuidle state count + overrides.
  */
 extern int show_idle_state[MAX_VISIBLE_IDLE_STATES];

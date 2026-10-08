@@ -26,15 +26,6 @@ static struct cpu_row *cpu_rows_pool;
 static int cpu_rows_pool_size;
 static int pool_initialized;
 
-static double clamp_percent(double pct)
-{
-	if (pct < 0.0)
-		return 0.0;
-	if (pct > 100.0)
-		return 100.0;
-	return pct;
-}
-
 static const struct idle_state *get_raw_idle_state(const struct sys_snapshot *raw,
 						   int tracked_idx,
 						   int state_idx)
@@ -208,7 +199,6 @@ static void materialize_cpu_rows(struct interval_record *rec,
 
 	for (int i = 0; i < tracked_count; i++) {
 		struct cpu_row *row = &rec->cpu_rows[i];
-		double idle_pct;
 
 		memset(row, 0, sizeof(*row));
 		row->tracked_idx = i;
@@ -216,7 +206,6 @@ static void materialize_cpu_rows(struct interval_record *rec,
 		if (freqs)
 			row->freq = freqs[i];
 
-		idle_pct = stats ? clamp_percent(stats->per_cpu_idle[i]) : 0.0;
 		row->idle_percent = stats ? stats->per_cpu_idle[i] : 0.0;
 		row->iowait_percent = stats ? stats->per_cpu_iowait[i] : 0.0;
 		row->busy_percent = 100.0 - row->idle_percent;
@@ -228,8 +217,7 @@ static void materialize_cpu_rows(struct interval_record *rec,
 					   raw ? (const struct idle_state **)raw->idle : NULL,
 					   i,
 					   raw ? raw->idle_state_count : 0,
-					   idle_pct,
-					   show_idle_state, 0);
+					   show_idle_state);
 		materialize_cpu_idle_usage(row, raw, i);
 
 		if (stats) {
@@ -265,27 +253,25 @@ static void materialize_numa_temps(struct interval_record *rec,
 
 static void materialize_summary_idle_states(struct interval_record *rec,
 					    const struct sys_snapshot *raw,
-					    const struct interval_stats *stats,
 					    int tracked_count)
 {
 	double acc[MAX_VISIBLE_IDLE_STATES] = {0};
 
 	if (tracked_count <= 0) {
 		for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++)
-			rec->summary_idle_state_pct[s] = 0.0;
+			rec->summary_idle_state_pct[s] = NAN;
 		return;
 	}
 
 	for (int i = 0; i < tracked_count; i++) {
 		double tmp[MAX_VISIBLE_IDLE_STATES];
-		double idle_pct = stats ? clamp_percent(stats->per_cpu_idle[i]) : 0.0;
 
 		compute_idle_state_display(tmp,
 					   raw ? (const struct idle_state **)raw->idle : NULL,
 					   i,
 					   raw ? raw->idle_state_count : 0,
-					   idle_pct,
-					   show_summary_idle_state, 1);
+					   show_summary_idle_state);
+		/* Require complete coverage; missing CPUs are not zero idle. */
 		for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++)
 			acc[s] += tmp[s];
 	}
@@ -340,7 +326,7 @@ struct interval_record *build_interval_record(
 		materialize_packages(rec, stats);
 	materialize_numa_temps(rec, raw);
 	if (summary_idle_states_are_emitted())
-		materialize_summary_idle_states(rec, raw, stats, tracked_count);
+		materialize_summary_idle_states(rec, raw, tracked_count);
 
 	return rec;
 }

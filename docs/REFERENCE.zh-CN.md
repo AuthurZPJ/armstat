@@ -2,371 +2,336 @@
 # armstat 综合参考
 
 <p align="center">
-  <a href="../README.zh-CN.md">README</a> |
-  <a href="REFERENCE.md">English</a> |
-  <code>armstat(8)</code>
+  <a href="../README.zh-CN.md">README</a> | <a href="REFERENCE.md">English</a>
 </p>
 
-这是 `armstat` 唯一的维护者与集成参考。README 负责日常使用说明；本文集中保存
-架构、导出契约、画图和发布验证细节，避免把同一项目拆成大量专题文档。
+本文集中说明实现、指标公式、集成和验证。[README](../README.zh-CN.md) 负责日常
+使用，安装后可用 `man armstat` 查询命令选项。
 
 ## 仓库布局
 
-```text
-src/app/       命令行解析与进程生命周期
-src/core/      采集编排、区间聚合与 CPU inventory
-src/platform/  Linux / ARM 遥测后端
-src/output/    字段注册、中间记录以及 text/JSON/CSV 输出
-scripts/       导出加载器与画图工具
-tests/         主机无关回归测试与 ARM64 目标机验收
-man/           安装后的 man 手册
-docs/          本综合参考
-```
+| 目录 | 职责 |
+|---|---|
+| `src/app/` | 命令行与进程生命周期 |
+| `src/core/` | 采集、聚合、CPU 清单、采样时刻管理 |
+| `src/platform/` | Linux/ARM 数据源后端 |
+| `src/output/` | 字段注册、独立记录、序列化 |
+| `scripts/` | 导出加载器与绘图 |
+| `tests/` | 回归测试与 ARM64 目标机验收 |
+| `man/`、`docs/` | 安装后的手册与参考 |
 
-项目头文件放在对应实现区域旁边，属于内部接口；当前不提供公开的 C 库 API。
+头文件是对应实现旁的内部接口，项目不提供公开 C 库 API。
 
 ## 运行架构
 
-采样主路径分为三阶段：
-
 ```text
-采集原始快照 -> 计算区间 delta -> 构造记录并序列化
+采集 sys_snapshot -> 计算 interval_stats -> 构造 interval_record -> 序列化
 ```
 
-- `src/app/armstat_cli.c` 在运行时初始化前解析参数与列选择。
-- `src/app/armstat.c` 管理启动、基于 monotonic clock 的采样循环、信号、输出文件
-  收尾和退出清理。
-- `src/core/collector.c` 编排一份原始快照，不负责用户可见百分比或格式化。
-- `src/core/aggregator.c` 把累计值转成一份 `interval_stats`。公开入口保持为短而
-  有序的流水线：初始化、频率、Busy/Idle、系统指标、PMU、package 汇总，最后
-  提交下一轮 baseline。
-- `src/output/formatter_record.c` 把快照与统计量复制进自包含的
-  `interval_record`。
-- `src/output/formatter_values.c` 提供字段注册表使用的只读 getter，与记录分配和
-  物化分离。
-- `src/output/formatter_text.c`、`formatter_json.c`、`formatter_csv.c` 分别负责
-  三种序列化；`formatter_machine.c` 只保留 JSON/CSV 共用辅助逻辑。
+| 模块 | 负责的工作 |
+|---|---|
+| `app/armstat_cli.c`、`app/armstat.c` | 参数、启动、采样循环、信号、输出收尾与清理 |
+| `core/collector.c` | 编排原始快照，提供共享读取接口 |
+| `core/sample_cache.c` | 复用缓冲区、缓存读取、慢速刷新 |
+| `core/aggregator.c` | 区间增量、有效性、CPU/插槽聚合、提交下一轮基线 |
+| `output/columns.c` | 字段描述与可见性 |
+| `output/formatter_record.c`、`formatter_values.c` | 保存记录自身的数据，提供按类型读取字段的接口 |
+| `output/formatter_text.c`、`formatter_json.c`、`formatter_csv.c` | 序列化；机器输出共用辅助函数在 `formatter_machine.c` |
 
-第一次采集只建立累计计数器 baseline。等满一个完整区间后才产生第一条可见
-样本。采样 deadline 锚定 monotonic clock：正常采集与输出耗时会从下一次等待中
-扣除；如果整轮 deadline 已错过，则跳过它而不是突发追赶。所有区间公式使用实测
-`interval_delta_us`，而不是用户请求值。
+采集阶段读取原始样本，聚合阶段计算区间增量、百分比和速率。序列化器使用一份独立记录，
+不持有指向可变快照数据的指针。
+
+首份快照建立基线。后续采样时刻锚定单调时钟，采集与输出耗时从下一次等待中
+扣除；错过整个周期时跳过该时刻，不突发追赶。公式始终使用实测 `interval_delta_us`。
 
 ### CPU 身份
 
-项目有意保留两种 CPU 身份：
+`cpu_id` 是内核路径和输出中的真实 Linux 编号；`tracked_idx` 是所选在线 CPU
+集合中的连续下标。`cpu_inventory.c` 管理存在、在线与所选 CPU 清单，内部使用
+`for_each_tracked_cpu` 遍历。`--cpu` 过滤采集和由 CPU 数据计算的汇总值；全局
+计数器与平台传感器保留自身范围。编译表示范围为 ID `0..1023`，更大的清单会报告截断。
 
-- `cpu_id` 是真实 Linux CPU 编号，用于内核接口和对外输出；
-- `tracked_idx` 是被选中在线 CPU 集合中的连续内部下标。
-
-`src/core/cpu_inventory.c` 统一拥有 present、online、tracked membership。
-`for_each_tracked_cpu` 是常规内部遍历接口。`--cpu` 是采样过滤器，因此未选中的
-CPU 不会占用 per-CPU PMU 或 sysfs 资源。当前编译表示范围为 CPU ID
-`0..1023`；更多 CPU 或更高编号会明确报告为截断。
-
-在线 CPU membership 改变时，运行时重建所有 CPU 相关缓存与拓扑、重置
-aggregator，并在恢复输出前重新消费一次 baseline。重建区间不伪装成正常测量行；
-重建完成后会重新采集两套时钟，避免其耗时进入下一条可见 interval 的比率分母。
+热插拔检查读取紧凑的 online 掩码，仅在变化或读取失败后扫描目录，并用两次观察
+消除短暂变化。重建会重置 CPU 相关缓存、拓扑、PMU 与聚合状态。重建样本作为
+新基线，完成后重新采集时钟，避免重建耗时计入下一测量窗口。
 
 ### 三层采样
 
-- Static/rebuild：CPU membership、拓扑、传感器路径、cpuidle 状态身份、PMU 元数据。
-- Slow-changing：频率上下限、governor、boost、cpuidle enable 状态，使用滚动预算刷新。
-- Per-interval 按需采集：当前频率、Busy/Idle 输入、split cpuidle 计数器、
-  package 功耗、温度、内存带宽和 PMU 都只在所选字段需要时读取；
-  `/proc/stat` 由被选中的 Busy/Idle、LPI residency 与系统计数消费者共享。
-  cpuidle 还会按输出 scope、state index 和 counter 类型精确选择：summary
-  residency 不读取 `stateN/usage`；只导出 CPU `LPI-N_usage` 时不读取
-  `stateN/time` 或 `/proc/stat`。
+| 层次 | 数据 |
+|---|---|
+| 启动/重建 | CPU 成员、拓扑、传感器、空闲状态名称、PMU 元数据 |
+| 慢速刷新 | 频率上下限、governor、boost、cpuidle disable 标志 |
+| 每区间 | 所选频率、Busy/Idle、LPI、功耗、温度、带宽与 PMU 输入 |
 
-`src/core/sample_cache.c` 管理复用存储与缓存描述符。`src/core/collector.c` 为多个
-下游消费者共同使用的快照字段提供 accessor；当前快照结构还没有完全 opaque。
-记录构造器同样会跳过当前输出策略不可能发出的 per-CPU 与 package scope 物化。
+慢速数据先全量刷新，之后在快速快照完成后按滚动 CPU 游标刷新。默认预算为
+`ceil(所选 CPU 数 * 区间时长 / 5秒)`，限制在每轮 1–32 个 CPU；上限可能使
+完整刷新超过五秒。因此运行中修改 disable 标志会逐步生效。
 
-## 指标不变量与来源
+读取按字段和输出层级选择。只有 Busy/Idle/IOWait 或系统计数器需要时，才在该
+区间解析一次 `/proc/stat`；仅选择 LPI 不需要它。cpuidle 只读选中的状态和计数器：
+驻留统计不需要 usage，usage 也不需要 time。cpufreq/cpuidle 的 FD 缓存与 procstat
+流缓存减少重复打开和解析。不能输出的 CPU/插槽层级也不构造记录。采样前会尝试
+降低自身 nice 值，失败不影响继续运行。
 
-README 保存完整的用户字段说明。实现与序列化必须维持以下不变量：
+## 指标来源与计算
 
-- 每个有效 CPU 区间满足 `Idle% + Busy% = 100%`。
-- `IOWait%` 是独立的 `/proc/stat` 视角，不从 `Busy%` 中扣除。
-- `--busy-source=auto` 下，所有 tracked CPU（包括 `nohz_full` CPU）使用
-  `/proc/stat`。显式启用的 schedstat 仅用于诊断：运行时间在任务切换时结算，
-  可能遗漏仍在执行的任务。
-- 原始 PMU 事件要求 `0x`/`0X` 后跟不超过 64 位的十六进制数字，不接受符号
-  或内部空白。
-- PMU summary 累加 per-CPU 区间增量，不对累计总数求差；要求全部 tracked CPU
-  有效，区间和本身超过 64 位时显示不可用。
-- per-CPU PMU 复用缩放使用精确整数乘除并四舍五入。时间增量不合法、区间缩放
-  结果或累计值溢出时，该 CPU 整组事件在当前区间显示不可用，并重建累计基线，
-  后续有效区间可恢复，不会对永久饱和的计数求差而输出伪零。
-- `LPI-*` 是 authoritative idle time 的显示分解。最深的可见可用状态吸收残差，
-  使显示状态之和接近 `Idle%`；原始 cpuidle 计数器不是第二套 Busy/Idle 权威值。
-- per-CPU `LPI-N_usage` 是有限、非负的 `stateN/usage` 区间 delta 除以实测
-  interval 秒数；读取失败或计数器回退时当前样本不可用，恢复后重新建 baseline。
-- `SUM` 百分比与频率是有效 tracked CPU 的平均；系统计数器与 PMU 是区间 delta
-  或聚合值。
-- Package 行按 topology 提供的 physical package ID 聚合 tracked CPU。
-- `Freq` 是本轮当前 `cpuinfo_cur_freq` 采样值；summary 与 package 值是当前
-  CPU 采样值的跨 CPU 均值，不是时间平均，也不是硬件计数器推导的有效频率。
-- Energy 由区间平均 package 功耗与实测时长推导。
-- 只有命名为 `cycles` 与 `instructions` 的 delta 都有效且 cycles 非零时才输出 IPC。
+`armstat --list` 是精确字段 ID、层级、类型、单位、标签和 JSON key 的查询入口。
+下表中 `Δ` 表示相邻有效样本的差值，`T_us` 是实测微秒时长，`T_s = T_us / 1000000`。
 
-主要内核来源如下：
-
-| 指标 | 来源 | 输出单位 |
+| 字段 | 来源 | 计算/单位 |
 |---|---|---|
-| 当前/最小/最大频率、governor、boost | CPU `cpufreq` sysfs | MHz/string/bool |
-| Busy/Idle 与 IOWait | `/proc/stat`，可选 `/proc/schedstat` | % |
-| split idle 与 usage rate | CPU `cpuidle` sysfs | %, /s |
-| package 功耗 | 唯一且明确的 `power_meter`/`power1_average` 来源 | mW |
-| 区间能量 | 由功耗与时长推导 | J |
-| 温度 | 选定的 `thermal_zone` 策略 | degC |
-| 内存带宽 | 唯一且明确的平台计数器 | MiB/s |
-| 上下文切换与中断 | `/proc/stat` | count/interval |
-| PMU 与 IPC | `perf_event_open()` | count/interval, instructions/cycle |
+| `CPU`、`Pkg`、`Core`、`Node` | CPU 清单与 Linux 拓扑 | 真实编号；CPU 行按编号排序 |
+| `Freq` | CPU `cpufreq/cpuinfo_cur_freq` | kHz / 1000 → MHz；当前采样值 |
+| `Min`、`Max` | `scaling_min_freq`、`scaling_max_freq` | kHz / 1000 → MHz；配置上下限 |
+| `Governor`、`Boost` | `scaling_governor`、每 CPU 或全局 `cpufreq/boost` | 缓存字符串/布尔值 |
+| `UncoreFreq` | 唯一匹配的 `/sys/class/devfreq/<device>/cur_freq` | Hz / 1000000 → MHz；仅汇总 |
+| `Idle%`（procstat） | 每 CPU `/proc/stat` idle + iowait | 将 `Δ` 从 USER_HZ tick 换成微秒，再 `/ T_us * 100` |
+| `IOWait%` | 每 CPU `/proc/stat` iowait | 将 `Δ` 换成微秒，再 `/ T_us * 100` |
+| `Busy%` | 利用率策略 | `100 - Idle%`；schedstat 使用运行时间 `Δ / elapsed_ns * 100` |
+| `LPI-N`、`LPI-N_usage` | CPU `cpuidle/stateN/time`、`usage` | `Δtime_us / T_us * 100`；`Δusage / T_s` |
+| `Power` | 唯一 `power_meter/power1_average` 传感器 | 两端功耗采样值的平均，mW；汇总字段 |
+| `Energy` | 由功耗推导 | `Power_mW * T_s / 1000` → 区间 J |
+| `Temp0` ... `Temp3`、CPU `Temp` | 下述温度策略 | 毫摄氏度 / 1000 → °C |
+| `MemBW` | 唯一 `/sys/class/memory/mem*/mem_bytes_read` | `Δbytes / T_s / 1024²` → MiB/s |
+| `CtxSw`、`IRQs`、`SoftIRQs` | `/proc/stat` ctxt、intr、softirq | `Δ` → count/interval |
+| PMU、`IPC` | 每 CPU perf 事件组 | 缩放后的区间计数；`instructions / cycles` |
 
-功耗与内存带宽发现要求恰好一个匹配来源。存在歧义时保持 unavailable，并由
-`--probe` 解释；实现不会依赖目录遍历顺序随意选择。PMU 通常要求 root 或宽松的
-`perf_event_paranoid`。
+SUM/插槽频率是当前有效 CPU 样本的平均，不是区间平均或忙碌频率。Energy 用
+两端平均估算采样信号的区间能量，不是硬件能量计数器或累计值。系统和 PMU
+计数不是每秒速率；显示精度也不代表传感器精度。
 
-Unavailable 必须贯穿整个数据链保持 unavailable。有效的零是数据，不能拿来替代
-读取失败、重新建立 baseline 或平台不支持。
+### Busy/Idle 与 LPI
+
+Auto/procstat 对所有所选 CPU 使用 `/proc/stat`，包括 `nohz_full` CPU。
+有效利用率在 0–100 之间，满足 `Idle% + Busy% = 100`。Procstat 的 Idle 包含
+iowait，因此它已从 Busy 中排除。Schedstat 从任务运行时间推导 Idle；此模式下
+IOWait 仍是独立 procstat 观察值，不保证是该 Idle 的子集。
+
+显式 schedstat 用于诊断：运行时间在任务切换时结算，仍在执行的时间可能遗漏。
+读取器接受版本 10–17，要求 CPU 行含九个字段，以第七字段作为运行时间；不支持
+或不合法的记录按 CPU 回退到 procstat。`task-clock` 是同一路径的别名。
+短 procstat 区间受 USER_HZ 精度影响；jiffy 增量无法安全换算为微秒时显示不可用。
+内核记账路径见
+[`sched_info_depart()` / `sched_info_switch()`](https://github.com/torvalds/linux/blob/bd5f485f3f026225b86573e559af0b7254ef4184/kernel/sched/stats.h)。
+
+LPI 是各状态独立的 sysfs 统计，不分配残差、不截断到 100%，默认无 `IdleGap`
+字段，其和不必等于 Idle。仅暴露状态 0–7，更深状态不折叠到其他状态；`--probe`
+报告 `idle_state_N_name` 映射。
+
+时间在状态退出时结算，长时间空闲可能在退出前显示 0、退出后超过 100%。软件
+驻留统计不能证明硬件深度。状态/计数器缺失、禁用、读取失败或回退时独立显示
+不可用。SUM 的每个 LPI 状态要求所有所选 CPU 都有有效值，再计算平均；缺失
+CPU 不按零处理。
+
+### PMU
+
+每个所选 CPU 打开一个 perf 事件组。区间计数使用精确整数运算计算
+`round(Δcount * Δtime_enabled / Δtime_running)`。首次、失败、短读、回退或
+未运行的读取不可用。时间增量不合法、缩放或每 CPU 累计总量溢出时，整组失效
+并重建累计基线，后续有效区间可恢复。
+
+汇总累加每 CPU 的区间增量，要求全部所选 CPU 有效，并拒绝 64 位区间和溢出。
+IPC 要求命名为 `cycles` 和 `instructions` 的有效计数且 cycles 非零；汇总 IPC
+使用聚合计数计算。
+
+最多选择 16 个不重复的事件名称。原始配置要求 `0x`/`0X` 后跟不超过 64 位的
+十六进制数，不接受符号或空白。`mem-read` 与 `mem-write` 是退休的加载/存储
+次数，不是字节数；可选缓存事件依赖具体 CPU。完整列表见 `--list`。已知事件
+被 perf 拒绝时仍显示为不可用。FD 用量随 CPU/事件数增长；初始化尝试在硬限制
+内提高软 `RLIMIT_NOFILE`，不足时告警。
+
+### 传感器映射与缺失数据
+
+功耗和内存带宽要求恰好一个匹配来源；零个或多个候选都保持不可用。`--probe`
+报告路径、候选数和歧义。Uncore devfreq 也要求唯一匹配来源。
+
+`ARMSTAT_TEMP_POLICY=thermal-zone-index` 将 `thermal_zoneN/temp` 映射为
+`TempN` 与 NUMA/裸片 N，CPU `Temp` 使用其 NUMA 节点温度。保留稀疏编号与负温度。
+`none`、`disabled` 关闭汇总温度发现，其他值导致启动失败。需在服务器上确认映射。
+不提供逐核功耗/温度或专门的核心聚合行。
+
+不可用的区间输入在聚合和输出中继续保持不可用。读取失败只影响依赖字段；
+累计来源恢复时重建基线，避免跨缺失窗口求差或输出伪零。有效零保持为数据。
 
 ## 输出契约
 
-当前机器输出使用 `schema_version = 8`。`armstat --list` 是当前精确字段 ID、
-scope、类型、单位、text label 与 JSON key 的权威查询；它与序列化器读取同一份
-field registry。
+JSON/CSV 与随附绘图加载器使用 **schema 第 9 版**。第 8 版 LPI 是补齐后的值，
+不能按独立状态统计解释或与第 9 版混用。`--list` 来自序列化器共用的字段注册表。
+独立的 key-value 探测契约为 `probe_schema_version: 1`，PMU 探测仅覆盖首个 CPU 的 cycles。
 
 ### 稳定区间元数据
-
-每个 JSON interval 和每行 CSV 都包含等价的起始元数据：
 
 | 字段 | 含义 |
 |---|---|
 | `schema_version` | 整数兼容性门槛 |
-| `interval` | 从 1 开始的可见区间编号 |
-| `duration_us` | monotonic clock 实测采样窗口，单位微秒 |
-| `timestamp` | Unix wall time 整秒 |
-| `timestamp_ns` | Unix wall time 纳秒；程序处理首选时间轴 |
-| `timestamp_iso` | 带 9 位小数的 RFC 3339 本地时间 |
+| `interval` | 从 1 开始的可见样本编号 |
+| `duration_us` | 单调时钟实测窗口，微秒 |
+| `timestamp` | 样本结束的 Unix 整秒时间 |
+| `timestamp_ns` | 同一时刻的纳秒值；优先用于程序时间轴 |
+| `timestamp_iso` | 同一结束时刻的本地 RFC 3339 时间，带九位小数 |
 
-三个 timestamp 表示同一个样本结束时刻；`duration_us` 表示测量窗口，不是 wall
-clock 的显示精度。
+Duration 描述测量窗口，三个时间戳表示同一结束时刻。导出速率的分母应使用
+实测时长，不使用请求的采样区间。
+
+### 文本
+
+多行样本带区间编号、含时区的时间和实测秒数，样本间留空行。仅汇总行以时间
+开头。表头含单位，标签、选择或宽度变化时重印；行标识宽度适配稀疏 package ID。
+Quiet 模式省略标记、时间、表头和启动说明，机器字段 key 不变。
 
 ### JSON
 
-JSON 是顶层数组，每个可见区间对应一个对象。对象始终含上述元数据，还可能含：
+顶层数组每区间一个对象，含元数据及所选的 `summary`、`packages`、`cpus` 层级。
+插槽使用 `package` 标识，CPU 使用真实 Linux `cpu` 编号。默认输出汇总/插槽，
+`-S` 仅汇总，`-a` 展开 CPU；显式选择决定层级。
 
-- `summary`：已启用的 system-scope 字段与可选汇总 `pmu` 对象；
-- `packages`：每个 package 一个对象，只用 `package` 标识一次；
-- `cpus`：每个 tracked CPU 一个对象，用真实 Linux `cpu` 标识。
-
-Section 是否存在由层级选择决定。默认输出 `summary` 和 `packages`；`-S` 只输出
-`summary`；`-a` 再展开 `cpus`。显式选择可以输出任意有效组合。
-
-多行文本在每个采样块前显示区间编号、带时区的采样时间和实际区间秒数，连续
-采样块之间留一个空行。Summary-only 每区间一行，行首显示时间。表头标明单位，
-`/int` 表示每区间计数。Quiet 模式省略时间、标记和表头。这些展示标签不改变
-机器字段名或 CLI 精确选择 token。
-文本会按当前 package 集合中最长的行标识确定列宽，稀疏的大 package 编号也能
-与表头、其他行保持对齐。文本标签、列选择或列宽变化时重印表头。
-CSV 校验各输出 scope 和有序列集合
-是否与首次表头一致；运行中能力变化导致布局改变时，在写入该区间前返回错误，
-进程以非零状态退出。仅 CPU 成员变化且列布局不变时仍可继续。
-
-不可用的数字和字符串输出 JSON `null`。可用 Boost 输出 JSON boolean。内部非有限
-浮点数会被归一化成 `null`，不会生成非标准 `NaN` 或 infinity token。字符串经过
-JSON escaping。
+缺失数字/字符串与非有限值为 `null`，可用 Boost 为布尔值，字符串按 JSON 转义。
+正常退出时闭合数组；异常终止可能留下不完整文档。
 
 ### CSV
 
-Header 只打印一次。稳定元数据之后有四种布局：
+首次表头定义布局：
 
-- summary-only：身份列为 `Scope`，值为 `SUM`；
-- package-only：身份列为 `Package`；
-- CPU-only：身份列为 `CPU`，值为真实 Linux CPU ID；
-- mixed-scope：身份列为 `Scope,CPU,Package`，每个 interval 内按 `SUM`、`PKG`、
-  `CPU` 顺序输出。
+| 所选层级 | 身份列 |
+|---|---|
+| 仅汇总 | `Scope`，值为 `SUM` |
+| 仅插槽 | `Package` |
+| 仅 CPU | `CPU`，真实 Linux 编号 |
+| 混合 | `Scope,CPU,Package`；每区间按 `SUM`、`PKG`、`CPU` 排行 |
 
-Compact header 使用 JSON 的标准字段 key。Mixed header 额外使用
-`summary.<field>`、`package.<field>`、`cpu.<field>` 限定字段；compact PMU 字段为
-`pmu.<event>`，mixed PMU 字段为 `summary.pmu.<event>` 与 `cpu.pmu.<event>`。
-不属于当前行 scope 的单元格和 unavailable 值为空；有效零保持为零。含逗号、
-双引号、换行或回车的字段按 CSV 规则加引号，并把内部双引号写成两个双引号。
+单层级数据列用 JSON key，混合列添加 `summary.`、`package.`、`cpu.` 前缀。
+PMU 列为 `pmu.<event>`，混合时为 `summary.pmu.<event>` / `cpu.pmu.<event>`。
+缺失及不属于该行层级的单元格为空，Boost 用 0/1。逗号、双引号、CR、LF 按 CSV
+规则转义；使用标准解析器，并按身份筛选行。
 
-不要手工按逗号切分 CSV；应使用标准 CSV parser，并通过身份列筛选行。
+输出层级和有序列须与首次表头一致。能力变化改变布局时，在写入该区间前返回
+错误；CPU 成员变化且布局不变时可继续。字段可能变化时，重新采集 CSV 或使用 JSON。
 
-输出目标只会在 collector 初始化、baseline 采样和 formatter pool 分配全部成功后
-打开，因此这些启动失败不会截断已有导出。启动成功后采用 streaming 输出；后续
-采集或写入失败会保留已经完整生成的前缀，并返回非零状态。
+### 输出生命周期
 
-### 单位与兼容性
-
-标准单位为 MHz、百分比、degC、mW、J、MiB/s、usage delta/s、count/interval 与
-instructions/cycle。显示小数位是呈现策略，不等同于传感器精度声明。
-
-消费者必须要求 `schema_version = 8`；项目尚未上线，不保留更早机器契约兼容。
-消费者不得把缺失值转成零。
+已有输出目标只在初始化、基线采集与格式化缓冲区分配成功后打开。启动成功后
+逐步写入；后续失败保留已写前缀并返回非零状态。所有成功操作，包括 help/list/probe，
+都要求 stdout 刷新检查成功。SIGPIPE 按 EPIPE 处理，使资源清理后再退出。
 
 ## 导出画图
 
-可选脚本需要 Python 3 与 matplotlib：
+绘图需要 Python 3 与 matplotlib，例如在激活的环境中使用：
 
 ```bash
+python3 -m venv .venv
+. .venv/bin/activate
 python3 -m pip install matplotlib
-```
-
-生成 summary 或 CPU 输入：
-
-```bash
-armstat -S -f json -O summary.json
-armstat -S -f csv -O summary.csv
-armstat -a -f json -O cpus.json
-armstat -a -f csv -O cpus.csv
-```
-
-安装后使用 `armstat-plot-summary` 处理 summary 序列，使用
-`armstat-plot-cpu` 处理 per-CPU 与分组序列；源码树中的等价入口分别是
-`scripts/plot_sum.py` 与 `scripts/plot_cpu.py`。两者共同使用共享 loader 进行
-schema 校验、字段别名、缺失值和时间戳处理。输入必须含脚本支持的整数
-`schema_version`；缺失或小数版本会被明确拒绝，不做猜测。缺失或类型错误的 JSON
-样本/section、非标准 JSON 数字常量、同一样本中的重复 JSON key 或 CPU ID、
-一基 interval 编号重复或不连续、重复 CSV 列名以及字段数量与表头不一致的数据行会被
-视为损坏输入并拒绝，避免静默丢弃或覆盖数值。
-超出浮点绘图范围的数值作为缺失值处理，过大的 JSON 整数不会触发未捕获的转换
-异常。输出目录由原子写入器创建，创建失败时给出简短错误。
-解析时区时会在临时副本中规范化小数秒，使 Python 3.10 也能解析导出的九位
-小数；原始时间戳和纳秒元数据仍予以保留。
-`+0800` 等紧凑 ISO 偏移也在该副本中转为 `+08:00`，使 Python 3.10 保留时区。
-
-```bash
-armstat-plot-summary summary.json --preset freq
+armstat -S -a -f json -O summary.json -i 1 -n 60
+armstat -a -f csv -O cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --y power --y2 temp0
-armstat-plot-cpu cpus.json --preset busy --top 8
-armstat-plot-cpu cpus.csv --group-by node --y busy
-armstat-plot-cpu cpus.csv --y lpi0_usage --top 8
+armstat-plot-cpu cpus.csv --preset busy --top 8
 ```
 
-用 `--list-fields` 查询可画字段。大型服务器上的 CPU 图通常应使用
-`--cpu-filter`、`--top` 或 `--group-by`。JSON 会完整载入内存；CSV 配合
-`--sample-range` 时只保留请求的样本窗口。缺失值转换为 `NaN`，图中表现为断点；
-preset 所需数据全部不可用时会明确报错，不生成空图。只有所选样本的时间戳全部有效
-时才使用真实时间；否则整个横轴统一回退为样本号，避免混用两种坐标类型。
-横轴保留导出记录携带的 RFC 3339 时区偏移，并把偏移写入轴标签，因此把导出文件
-移动到另一个时区的机器上画图不会改变显示时钟。如果一个时间窗内的偏移发生变化，
-横轴统一转为 UTC；wall-clock 时间不递增时则回退为样本号，避免折线在横轴上倒退。
-字段列表和坐标轴会显示已知字段的标准输出单位。同单位多字段的长纵轴标签缩为
-`Value (单位)`，图例保留全部字段名；绘图区顶部留白由渲染后的图例尺寸决定，
-避免按行数粗估而浪费空间。平滑按样本计算，并在当前样本
-不可用时保留断点，因此采集失败或 CPU 下线不会被画成沿用旧值。在所选时间窗内
-完全没有主字段数据的 CPU 或分组会被报告并跳过；间歇缺失仍然显示为断点。
-对于双轴 CPU 图，只缺次字段的实体仍保留主线，其空的次轴线会被报告并跳过。
-`--group-by core` 使用
-`(package, core)` 身份，不会把不同 package 中编号相同的 core 合并。
-`--rank-by avg` 是可见样本的算术平均，不是按采样时长加权的时间平均。
-summary 图使用 10 种不同颜色，足以覆盖完整 `idle-lpi` preset 的全部曲线而不复用
-颜色。两个命令都强制使用无界面渲染后端，并先在输出目录写临时文件；只有完整的
-PNG、SVG 或 PDF 生成成功后才原子替换目标文件。覆盖时保留已有图片的权限位；
-新建图片使用正常的 `0666 & ~umask` 文件模式。
+源码入口为 `python3 scripts/plot_sum.py`、`python3 scripts/plot_cpu.py`。两者
+也接受包含所需层级的混合 JSON/CSV。使用各自的 `--help` 和输入的 `--list-fields`。
+
+| 选项 | 用途 |
+|---|---|
+| `--preset`，或 `--y` / `--y2` | 选择预设或字段，两种方式不混用 |
+| `--sample-range START:END` | 从 1 开始的样本窗口；CSV 只保留所选窗口，JSON 全量加载 |
+| `--smooth N` | N 个样本的滑动平均，当前样本缺失仍保留空缺 |
+| `--cpu-filter`、`--top`、`--group-by node/core` | 限制 CPU 曲线或分组 |
+| `--aggregate avg/max/min`、`--rank-by avg/max/last` | CPU 分组聚合与前 N 项排名 |
+| `--output`、`--output-dir`、`--format png/svg/pdf` | 输出位置和图片格式 |
+
+按 core 分组使用 `(package, core)`，避免不同插槽同编号合并。平均排名是可见
+样本的算术平均，不按时长加权。没有主字段数据的对象报告后跳过；只缺副字段
+时仅跳过该副曲线。
+
+加载器拒绝不支持或非整数 schema、重复 JSON key/CPU ID、不合法层级、非标准
+数字常量、不连续区间、重复 CSV 列和行宽不符。超出浮点范围的数字变为空缺；
+缺失数据与平滑不会用旧样本替代。
+
+只有所选时间戳全部有效且递增时才使用真实时间，否则整条轴改用样本编号。
+保留导出时区，窗口内偏移变化时转为 UTC。Python 3.10 也支持九位小数与 `+0800`
+等紧凑偏移，原始时间戳元数据仍保留。
+
+字段与坐标轴标明标准单位；同单位的长标签使用 `Value (unit)`，图例保留字段名。
+图例空间按渲染结果测量，汇总调色板覆盖全部十条 idle/LPI 曲线。无界面渲染先
+写入目标旁的临时文件，成功后原子替换；保留旧文件权限，新文件使用 `0666 & ~umask`。
+目录或渲染失败给出简洁错误，并保留已有输出。
 
 ## 构建与验证
 
-常规开发门槛：
-
-```bash
-make clean
-make
-make test
-make debug-test
-make analyze
-```
-
-`make test` 覆盖 C 计算与策略、CLI/错误路径、text/JSON/CSV 契约、streaming、
-plot loader、安装 matplotlib 时的真实渲染，以及构建/安装切换。设置
-`ARMSTAT_REQUIRE_PLOT_RENDER=1` 后，缺少 matplotlib 会使测试失败；CI 安装该依赖
-并启用此门槛。`make debug-test`
-使用 AddressSanitizer 与 UndefinedBehaviorSanitizer 重建并运行完整测试。
-`make analyze` 会根据当前编译器选择 GCC `-fanalyzer` 或 Clang `--analyze`。
-GCC 分析 object 隔离在 `.armstat-analysis/`，Clang 分析不发布 object。
-
-Out-of-tree 构建通过 `O` 指定，所有生成文件都应留在该目录：
+| 命令 | 用途 |
+|---|---|
+| `make`、`make clean` | 发布构建/清理所选输出目录 |
+| `make test` | C、CLI、导出、加载、流式处理，可选渲染和构建安装检查 |
+| `make debug`、`make debug-test` | ASan/UBSan 构建/完整检查 |
+| `make analyze` | GCC 路径敏感分析或 Clang 分析器 |
+| `make target-test` | ARM64 Linux 运行与能力检查 |
 
 ```bash
 make O=/tmp/armstat-build
 /tmp/armstat-build/armstat --version
+make CROSS_COMPILE=aarch64-linux-gnu-
+ARMSTAT_REQUIRE_PLOT_RENDER=1 make test
 ```
 
-测试会关闭 Python 字节码缓存写入，画图子进程也继承该设置。`make O=... clean`
-保留源码目录的缓存，只清理选定的输出目录。因此只要 `O` 目录可写，构建、测试、
-debug 与静态分析都可以使用只读源码检出。源码树内的 `make clean` 仍会清理源码
-目录的 Python 缓存。
+可独立构建，也可放在 Linux `tools/power/armstat` 下。`O` 隔离二进制、对象、
+依赖文件和测试。配置指纹包含编译器/目标、参数与 `VERSION`，防止切换构建时
+复用旧产物；所选二进制原子发布。Linux 发布构建启用栈保护、PIE、RELRO 与
+立即绑定。分析器产物独立，不替换发布二进制。
+
+测试禁止写入 Python 字节码缓存。`make O=... clean` 保留源码缓存，源码目录内
+clean 则删除它们。只读源码配合可写 `O` 也能构建和测试；除退出状态外，还应核对
+实际产物。
 
 ### ARM64 目标机验收
 
-主机无关测试不能证明硬件行为。应在每个声明支持的鲲鹏 ARM64 Linux 服务器型号上
-先检查能力，再运行：
+在每个鲲鹏部署型号上先检查 `--probe`，并按部署权限运行。Busy/Idle 一致性是
+必检项，声明用于部署的型号还须强制检查频率；其他能力仅在平台承诺提供时启用：
 
 ```bash
 ./armstat --probe
-make target-test
+ARMSTAT_REQUIRE_FREQ=1 make target-test
+ARMSTAT_REQUIRE_FREQ=1 ARMSTAT_REQUIRE_PMU=1 \
+ARMSTAT_SOAK_ITERATIONS=1000 ARMSTAT_SOAK_INTERVAL=1 make target-test
 ```
 
-目标测试覆盖基础选项、输出失败、probe 结构、默认/summary/JSON/CSV 执行、时间戳、
-缺失值、进程资源，以及显式要求的 optional telemetry。能力门槛可这样启用：
+| 强制项 | 检查能力 |
+|---|---|
+| `ARMSTAT_REQUIRE_FREQ` | 汇总频率为正，每个所选 CPU 至少一个正值样本 |
+| `ARMSTAT_REQUIRE_PMU` | cycles、instructions 与 IPC |
+| `ARMSTAT_REQUIRE_CPUIDLE` | 可见状态名映射、汇总驻留、CPU 层级至少一个有效 `lpi0_usage` 样本、绘图加载 |
+| `ARMSTAT_REQUIRE_POWER`、`ARMSTAT_REQUIRE_TEMP` | 功耗/温度 |
+| `ARMSTAT_REQUIRE_MEMBW`、`ARMSTAT_REQUIRE_UNCORE` | 内存带宽/uncore 频率 |
 
-```bash
-ARMSTAT_REQUIRE_FREQ=1 \
-ARMSTAT_REQUIRE_PMU=1 \
-ARMSTAT_REQUIRE_CPUIDLE=1 \
-ARMSTAT_REQUIRE_POWER=1 \
-ARMSTAT_REQUIRE_TEMP=1 \
-ARMSTAT_REQUIRE_MEMBW=1 \
-ARMSTAT_REQUIRE_UNCORE=1 \
-make target-test
-```
+目标测试还检查选项、输出失败、探测结构、文本、JSON/CSV、时间戳、缺失值与
+资源用量。稳定性采样检查 Busy/Idle 和所有强制能力的有效样本比例，默认至少 95%。
+可调整 `ARMSTAT_MIN_VALID_PERCENT`、`ARMSTAT_MAX_RSS_KIB`、`ARMSTAT_MAX_OPEN_FDS`
+和 `ARMSTAT_MAX_DIAGNOSTIC_LINES`。强制 PMU 且未设 FD 上限时，默认预算覆盖
+每 CPU 两个 FD 和额外余量。
 
-Busy/Idle 一致性是强制基础门槛。每个声明部署支持的鲲鹏型号都应启用
-`ARMSTAT_REQUIRE_FREQ=1`：它要求 summary 频率为有限正数，并要求每个 tracked
-CPU 至少取得一个有限正数的 `cpuinfo_cur_freq` 样本。其它强制项只在该部署平台
-明确承诺相应能力时启用。
-
-稳定性运行使用 `ARMSTAT_SOAK_ITERATIONS` 与 `ARMSTAT_SOAK_INTERVAL`，会在完整
-capture 中检查 Busy/Idle 以及所有显式强制能力。默认要求至少 95% 样本有效，可用
-`ARMSTAT_MIN_VALID_PERCENT` 调整。资源上限可通过 `ARMSTAT_MAX_RSS_KIB`、
-`ARMSTAT_MAX_OPEN_FDS` 和 `ARMSTAT_MAX_DIAGNOSTIC_LINES` 配置。要求 PMU 且未显式
-指定 fd 上限时，测试会把默认上限提高到每个 tracked CPU 至少两个 fd，再加少量
-进程余量，以匹配 IPC 的双事件 group。
-
-启用 `ARMSTAT_REQUIRE_CPUIDLE=1` 后，目标门槛会验证每个可见的
-`idle_state_N_name` probe 映射、汇总驻留率，以及至少一个有限且非负的 per-CPU
-`lpi0_usage` 样本。该样本还会通过 CPU 画图加载器，因此验收链路覆盖采集、导出和
-画图输入，而不是只停留在文本显示。
-
-发布前必须通过所有主机门槛、符合平台能力的 target test，检查默认 text、`-S`、
-JSON、CSV 样本，并在真实服务器持续运行。容器或虚拟 ARM64 可以证明可移植性与输出
-契约，但不能证明真实 PMU、cpuidle、功耗、温度或内存带宽语义。
+发布验收要求主机测试、静态分析、ASan/UBSan 检查、真实绘图、能力强制目标测试、人工
+检视文本/汇总/JSON/CSV，以及物理服务器上的持续运行。VM/容器只能证明可移植性
+与契约，不能证明物理 PMU、空闲、功耗、温度或带宽行为。
 
 ## 安装
 
-`make install` 安装：
+```bash
+sudo make install
+make DESTDIR=/tmp/armstat-stage PREFIX=/usr install
+make DESTDIR=/tmp/armstat-stage PREFIX=/usr uninstall
+```
 
-- `armstat`、`armstat-plot-summary` 与 `armstat-plot-cpu` 到 `PREFIX/bin`；
-- `man/armstat.8` 到 `PREFIX/share/man/man8`；
-- README 中英文到 `PREFIX/share/doc/armstat`，本参考中英文到
-  `PREFIX/share/doc/armstat/docs`；
-- 共享画图模块到 `PREFIX/share/armstat`。
-
-默认 `PREFIX` 为 `/usr`，支持用 `DESTDIR` staging。
+`PREFIX` 默认为 `/usr`。采集器和两个绘图命令位于 `bin`，共享绘图模块位于
+`share/armstat`，man 手册位于 `share/man/man8`，中英文 README/参考、`VERSION`
+和原样 `COPYING` 位于 `share/doc/armstat`。
 
 ## 文档维护
 
-用户可见行为按以下顺序同步：
+行为更新按以下顺序同步：
 
 ```text
-code -> README.md -> README.zh-CN.md -> man/armstat.8
+代码 -> README.md -> README.zh-CN.md -> man/armstat.8
      -> docs/REFERENCE.md -> docs/REFERENCE.zh-CN.md -> tests
 ```
 
-优先更新现有章节，不要为每个主题新建 Markdown。只有读者、生命周期或安装位置与
-README、man page、本文都确实不同时，才新增文档。
+README 保存用法，本文保存完整公式/契约，man 手册保存参数，AGENTS.md 保存
+维护规则。优先更新已有文档，精简时保留有意义的限制与失败语义。

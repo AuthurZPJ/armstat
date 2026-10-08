@@ -718,7 +718,7 @@ static void test_mixed_scope_csv_serializer_uses_scoped_headers(void)
 	args.rec = &rec;
 
 	output = capture_stdout(emit_csv_mixed_scope, &args);
-	assert(strstr(output, "8,2147483648,1000000,") != NULL);
+	assert(strstr(output, "9,2147483648,1000000,") != NULL);
 	assert(strstr(output, "summary.freq") != NULL);
 	assert(strstr(output, "summary.power") != NULL);
 	assert(strstr(output, "cpu.freq") != NULL);
@@ -747,7 +747,7 @@ static void test_summary_json_serializer_emits_schema_and_summary_only(void)
 	args.rec = &rec;
 
 	output = capture_stdout(emit_json_record, &args);
-	assert(strstr(output, "\"schema_version\": 8") != NULL);
+	assert(strstr(output, "\"schema_version\": 9") != NULL);
 	assert(strstr(output, "\"interval\": 2147483648") != NULL);
 	assert(strstr(output, "\"duration_us\": 1000000") != NULL);
 	assert(strstr(output, "\"timestamp_ns\": 1774665600123456789") != NULL);
@@ -1303,7 +1303,7 @@ static void test_package_csv_serializer_emits_package_rows(void)
 
 	output = capture_stdout(emit_csv_mixed_scope, &args);
 	assert(strstr(output, "Package,freq") != NULL);
-	assert(strstr(output, "8,1,1000000,") != NULL);
+	assert(strstr(output, "9,1,1000000,") != NULL);
 	assert(strstr(output, ",7,2134.50") != NULL);
 	assert(strstr(output, "Scope") == NULL);
 	assert_csv_rows_are_rectangular(output);
@@ -1378,7 +1378,7 @@ static void test_summary_csv_serializer_emits_metadata_and_summary_fields(void)
 	assert(strstr(output, "timestamp_iso,Scope,freq,power") != NULL);
 
 	/* Data row should have the schema_version value */
-	assert(strstr(output, "8,") != NULL);
+	assert(strstr(output, "9,") != NULL);
 	assert(strstr(output, "timestamp_iso,Scope,") != NULL);
 
 	/* Should contain a summary row */
@@ -1390,14 +1390,14 @@ static void test_summary_csv_serializer_emits_metadata_and_summary_fields(void)
 }
 
 /* ============================================================================
- * TEST COVERAGE: interval_record materialization (owned values + LPI residual)
+ * TEST COVERAGE: interval_record materialization (owned values + independent LPI values)
  * ============================================================================ */
 
 /*
  * Build a real interval_record from a fake raw snapshot + interval stats and
  * verify that all per-interval dynamic values are copied into the record's own
  * storage (cpu_rows, packages, numa_temps, summary) instead of dangling
- * pointers into the raw data. Also checks the build-time LPI residual rule.
+ * pointers into the raw data. Also checks the build-time independent LPI values rule.
  */
 static void test_interval_record_materializes_owned_values(void)
 {
@@ -1433,7 +1433,7 @@ static void test_interval_record_materializes_owned_values(void)
 	freqs[0].boost = 1;
 	snprintf(freqs[0].governor, sizeof(freqs[0].governor), "schedutil");
 
-	/* Two usable idle states: state0 shallow (20%), state1 deep (residual). */
+	/* Two usable idle states: state0 (20%), state1 (60%). */
 	states[0].available = 1;
 	states[0].disabled = 0;
 	states[0].percentage = 20.0;
@@ -1508,15 +1508,11 @@ static void test_interval_record_materializes_owned_values(void)
 	assert(rec->summary.busy_percent == 5.0);
 	assert(rec->summary.idle_percent == 95.0);
 
-	/*
-	 * LPI residual (build-time): LPI-0 keeps the raw 20%, LPI-1 (deepest
-	 * visible usable state) absorbs the rest so sum(LPI-*) == Idle% = 95.
-	 * Hidden states materialize as NAN in CPU mode.
-	 */
+	/* LPI values retain the sysfs deltas even when their sum differs from Idle%. */
 	assert(rec->cpu_rows[0].idle_state_pct[0] == 20.0);
-	assert(rec->cpu_rows[0].idle_state_pct[1] == 75.0);
+	assert(rec->cpu_rows[0].idle_state_pct[1] == 60.0);
 	assert(rec->cpu_rows[0].idle_state_pct[0] +
-	       rec->cpu_rows[0].idle_state_pct[1] == 95.0);
+	       rec->cpu_rows[0].idle_state_pct[1] == 80.0);
 	assert(isnan(rec->cpu_rows[0].idle_state_pct[2]));
 	assert(isnan(rec->cpu_rows[0].idle_state_pct[3]));
 	/* Usage rates are owned per state; hidden states remain unavailable. */
@@ -1524,14 +1520,10 @@ static void test_interval_record_materializes_owned_values(void)
 	assert(rec->cpu_rows[0].idle_state_usage[1] == 10.0);
 	assert(isnan(rec->cpu_rows[0].idle_state_usage[2]));
 
-	/*
-	 * Summary idle-state residency is the average of per-CPU display values,
-	 * computed at build time: single CPU -> same 20/75 split. Summary mode
-	 * hides hidden states as 0.0, not NAN.
-	 */
+	/* Summary states average the independent values and preserve missing data. */
 	assert(rec->summary_idle_state_pct[0] == 20.0);
-	assert(rec->summary_idle_state_pct[1] == 75.0);
-	assert(rec->summary_idle_state_pct[2] == 0.0);
+	assert(rec->summary_idle_state_pct[1] == 60.0);
+	assert(isnan(rec->summary_idle_state_pct[2]));
 
 	free_interval_record(rec);
 
@@ -1557,6 +1549,102 @@ static void test_interval_record_materializes_owned_values(void)
 	assert(rec->package_count == 0);
 	free_interval_record(rec);
 	cleanup_formatter_pool();
+}
+
+static void test_lpi_records_preserve_independent_states(void)
+{
+	struct sys_snapshot raw = {0};
+	struct interval_stats stats = {0};
+	struct idle_state states[2][2] = {0};
+	struct idle_state *idle_arr[2] = {states[0], states[1]};
+	struct interval_record *rec;
+	struct serializer_args args;
+	char *output;
+
+	reset_test_state();
+	seed_two_cpu_inventory();
+	enable_cpu(1);
+	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++) {
+		show_idle_state[s] = s < 2;
+		show_summary_idle_state[s] = s < 2;
+	}
+	for (int i = 0; i < 2; i++) {
+		states[i][0].available = 1;
+		states[i][1].available = 1;
+		stats.per_cpu_idle[i] = NAN;
+	}
+	states[0][0].percentage = 10.0;
+	states[1][0].percentage = 30.0;
+	states[0][1].percentage = 50.0;
+	states[1][1].percentage = 200.0;
+	raw.effective_cpu_count = 2;
+	raw.cpu_count = 2;
+	raw.idle = idle_arr;
+	raw.idle_state_count = 2;
+	raw.interval_delta_us = 1000000;
+
+	rec = build_interval_record(&raw, &stats, 1);
+	assert(rec != NULL);
+	assert(rec->cpu_rows[0].idle_state_pct[0] == 10.0);
+	assert(rec->cpu_rows[1].idle_state_pct[1] == 200.0);
+	assert(rec->summary_idle_state_pct[0] == 20.0);
+	assert(rec->summary_idle_state_pct[1] == 125.0);
+	args.rec = rec;
+
+	/* Every serializer retains delayed settlement above 100%. */
+	reset_machine_state();
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, "\"lpi1\": 125.00") != NULL);
+	assert(output_line_contains(output, "\"cpu\": 4", "\"lpi1\": 200.00"));
+	free(output);
+	reset_machine_state();
+	output = capture_stdout(emit_csv_mixed_scope, &args);
+	assert(output_line_contains(output, ",SUM,", "125.00"));
+	assert(output_line_contains(output, ",CPU,4,", "200.00"));
+	assert_csv_rows_are_rectangular(output);
+	free(output);
+	output = capture_stdout(emit_text_record, &args);
+	assert(strstr(output, "125.00") != NULL);
+	assert(strstr(output, "200.00") != NULL);
+	free(output);
+	free_interval_record(rec);
+
+	/* A missing state on one CPU invalidates only that summary state. */
+	states[1][0].disabled = 1;
+	rec = build_interval_record(&raw, &stats, 2);
+	assert(rec != NULL);
+	assert(rec->cpu_rows[0].idle_state_pct[0] == 10.0);
+	assert(isnan(rec->cpu_rows[1].idle_state_pct[0]));
+	assert(isnan(rec->summary_idle_state_pct[0]));
+	assert(rec->summary_idle_state_pct[1] == 125.0);
+	free_interval_record(rec);
+
+	states[1][0].disabled = 0;
+	states[1][1].percentage = NAN;
+	rec = build_interval_record(&raw, &stats, 3);
+	assert(rec != NULL);
+	assert(rec->cpu_rows[0].idle_state_pct[1] == 50.0);
+	assert(rec->summary_idle_state_pct[0] == 20.0);
+	assert(isnan(rec->summary_idle_state_pct[1]));
+	args.rec = rec;
+	reset_machine_state();
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, "\"lpi1\": null") != NULL);
+	free(output);
+	free_interval_record(rec);
+
+	/* CPU and summary selections affect visibility only, independently. */
+	states[1][1].percentage = 200.0;
+	show_idle_state[0] = 0;
+	show_summary_idle_state[1] = 0;
+	rec = build_interval_record(&raw, &stats, 4);
+	assert(rec != NULL);
+	assert(isnan(rec->cpu_rows[0].idle_state_pct[0]));
+	assert(rec->cpu_rows[0].idle_state_pct[1] == 50.0);
+	assert(rec->cpu_rows[1].idle_state_pct[1] == 200.0);
+	assert(rec->summary_idle_state_pct[0] == 20.0);
+	assert(isnan(rec->summary_idle_state_pct[1]));
+	free_interval_record(rec);
 }
 
 int main(void)
@@ -1595,6 +1683,7 @@ int main(void)
 	test_all_scope_csv_serializer_emits_package_rows();
 	test_summary_csv_serializer_emits_metadata_and_summary_fields();
 	test_interval_record_materializes_owned_values();
+	test_lpi_records_preserve_independent_states();
 	test_hotplug_rebuild_refreshes_cpufreq_state();
 	return 0;
 }

@@ -1,663 +1,269 @@
-.TH ARMSTAT 8 "August 22, 2026" "armstat" "System Administration"
+.TH ARMSTAT 8 "October 8, 2026" "armstat" "System Administration"
 .SH NAME
-armstat \- ARM server monitoring tool in the style of turbostat
+armstat \- ARM64 server interval monitor
 .SH SYNOPSIS
 .B armstat
-[\fIoptions\fR]
+.RI [ options ]
 .SH DESCRIPTION
 .B armstat
-collects interval-based CPU, idle, power, temperature, PMU, and topology data
-on ARM64 servers.
-
-It uses Linux interfaces such as
-.BR /proc/stat ,
-.BR sysfs ,
-.BR hwmon ,
-.BR thermal_zone ,
-and
-.BR perf_event_open (2).
-
-The current output model is:
-.IP \(bu 2
-default mode: one \fBSUM\fR row plus per-package aggregation rows
-.IP \(bu 2
-\fB-a\fR mode: \fBSUM\fR row + per-package aggregation rows + per-CPU rows
-.IP \(bu 2
-summary mode (\fB-S\fR): one \fBSUM\fR row per interval
-.IP \(bu 2
-normal multi-row text output prefixes every sample block with
-an interval number, a timezone-qualified sample timestamp, and measured duration
-in seconds, with a blank line between blocks. Summary-only rows start with a
-timestamp. Headers include units such as Freq[MHz] and CtxSw[/int] (count per
-interval). Quiet mode suppresses timestamps, markers, the banner, and headers
-Text columns remain aligned with large, sparse package IDs. Headers also repeat
-when column layout changes. CSV stops with an error
-before emitting a row whose columns differ from its original header; the
-complete prefix is preserved. Restart CSV capture or use JSON for changing
-column sets.
-.IP \(bu 2
-explicit \fB-s\fR selection emits only scopes requested by the selected groups
-or exact fields; use \fBcpu\fR to request CPU rows and \fBpkg\fR to request
-package rows
-
+samples CPU frequency, Busy/Idle, idle states, power, temperature, PMU counters,
+and IPC through Linux procfs, sysfs, hwmon, and perf interfaces.
+The initial target is Huawei Kunpeng; each deployment model needs physical
+hardware acceptance testing.
 .PP
-When \fB--cpu\fR is active, the default aggregate rows are based on the filtered
-tracked CPU set, while platform/global fields keep their natural summary scope.
-If CPU rows are explicitly expanded, implicit aggregate rows are suppressed to
-avoid surprising mixed-scope output. Use \fB-S --cpu\fR for an explicitly
-filtered summary.
-.PP
-The first visible line always represents one complete sampling interval, not an
-instantaneous snapshot at process start.
-.PP
-Later samples use monotonic deadlines anchored to the baseline. Normal
-collection and formatting overhead is deducted from the following wait instead
-of accumulating as cadence drift. If work overruns a full interval, missed
-deadlines are skipped rather than followed by burst catch-up samples; metric
-calculations continue to use the measured interval delta.
-.PP
-If armstat rebuilds runtime state after CPU topology change, that sample
-becomes a new baseline and is not printed as a normal interval row. Clocks are
-captured again after rebuild work completes, so rebuild latency is excluded
-from the following visible interval's rate denominator.
-
-.SH SUPPORTED PLATFORM
-The initial supported hardware family is Huawei Kunpeng running ARM64 Linux.
-Other ARM64 systems may expose compatible Linux interfaces, but they are not
-part of the initial support claim. Each Kunpeng model claimed for deployment
-must pass the target acceptance test and a sustained soak run on that model.
-
-.SH OPTIMIZATION STRATEGY
-The implementation is optimized around interval sampling overhead:
-
-.IP \(bu 2
-static / rebuild work handles CPU inventory, topology, sensor discovery, and
-cpuidle state metadata
-.IP \(bu 2
-the per-interval hotplug check compares the compact Linux online-CPU mask and
-only enumerates all \fBcpuN\fR directories after a change or read failure
-.IP \(bu 2
-slow-changing CPU attributes such as min/max frequency, governor, boost, and
-cpuidle disable flags are refreshed with a rolling budget instead of full
-machine sweeps, and cpufreq data is skipped entirely when no frequency field
-is visible
-.IP \(bu 2
-\fB/proc/stat\fR is parsed only when selected Busy/Idle/IOWait, LPI residency,
-or system-counter fields require it, then reused by all such consumers in that
-interval; usage-only LPI output does not require it
-.IP \(bu 2
-cpuidle reads are selected independently by output scope, visible state index,
-and counter family: summary residency does not read \fBstateN/usage\fR, while
-\fBLPI-N_usage\fR alone does not read \fBstateN/time\fR
-.IP \(bu 2
-power, energy, and temperature sensors are only sampled when a visible field
-depends on them
-.IP \(bu 2
-PMU counters are opened as perf groups per tracked CPU and multiplexed
-intervals are scaled using \fBtime_enabled\fR / \fBtime_running\fR
-.IP \(bu 2
-summary-only and package-only output do not materialize unused per-CPU rows
-.IP \(bu 2
-before normal interval sampling, armstat makes a best-effort attempt to lower
-its own nice value, matching turbostat's intent to reduce monitor-induced
-scheduling jitter; failure is non-fatal
-.IP \(bu 2
-the default Busy/Idle policy is \fBauto\fR: use \fB/proc/stat\fR on all
-tracked CPUs, including \fBnohz_full\fR CPUs. The \fBtask-clock\fR mode is retained
-as a compatibility alias and currently resolves to the same implementation as
-\fBschedstat\fR
-
+Default output contains one \fBSUM\fR row and one row per package.
+\fB-a\fR adds CPU rows and all supported base column groups.
+\fB-S\fR emits only the summary. Explicit \fB-s\fR selection determines
+which scopes are emitted. PMU and IPC require an explicit request.
 .SH OPTIONS
 .TP
 .BI \-i ", " \-\-interval " seconds"
-Sampling interval in finite positive seconds, with a minimum of 0.000001
-seconds (one microsecond). Default: 1.0. The text startup banner preserves
-subsecond precision
+Requested interval, default 1.0. Accepted range: 0.000001 to 31536000 seconds.
+Formulas use the measured duration.
 .TP
-.BI \-n ", " \-\-num-iterations " n"
-Number of completed samples to print. Zero means unlimited and is the default
+.BI \-n ", " \-\-num-iterations " count"
+Number of visible samples. Zero, the default, runs until interrupted.
 .TP
-.BI \-N ", " \-\-header-iterations " n"
-Reprint text headers every N complete samples. Zero prints them on startup
-and whenever the layout changes
+.BI \-N ", " \-\-header-iterations " count"
+Repeat text headers every N samples. Zero prints them at startup and on
+layout changes.
 .TP
-.BI \-c ", " \-\-cpu " cpu-list"
-Monitor only the specified real CPU IDs. Accepts comma-separated values and
-ranges such as \fB0,1,4-7\fR. This is a sampling filter: only online matching
-CPUs become tracked CPUs, so per-CPU rows, summary averages, PMU groups, and
-per-CPU Busy/Idle/sysfs readers are based on the filtered tracked set. Invalid
-tokens, reversed ranges, empty tokens, and filters that match no online CPU are
-startup errors. The current build represents CPU IDs 0 through 1023; higher
-IDs cannot be selected
+.BI \-c ", " \-\-cpu " list"
+Sample real Linux CPU IDs, for example \fB0,1,4-7\fR. Invalid lists or lists
+matching no online CPU are startup errors.
 .TP
-.BI \-B ", " \-\-busy-source " auto|procstat|schedstat|task-clock"
-Select the authoritative Busy/Idle source. Default: \fBauto\fR
+.BI \-B ", " \-\-busy-source " source"
+Select \fBauto\fR, \fBprocstat\fR, \fBschedstat\fR, or \fBtask-clock\fR.
+Default: auto. See METRICS.
 .TP
 .BI \-o ", " \-\-output " file"
-Write output to file
+Write output to a file.
 .TP
 .BI \-O ", " \-\-export " file"
-Export text, JSON, or CSV output to file. This is an explicit alias of
-\fB-o\fR / \fB--output\fR and is especially convenient for machine-readable
-formats. Current JSON/CSV exports carry \fBschema_version=8\fR. The detailed
-export contract is documented in \fBREFERENCE.md\fR and
-\fBREFERENCE.zh-CN.md\fR. An existing target is not truncated until collector
-initialization, the baseline sample, and formatter-buffer allocation have
-succeeded; interval data is streamed after startup
+Alias of \fB-o\fR for text, JSON, or CSV output.
 .TP
 .B \-q, \-\-quiet
-Suppress the text banner, headers, timestamps, and interval markers
+Omit the text banner, headers, timestamps, and interval markers.
 .TP
 .B \-D, \-\-dump
-Wait for, collect, and print one complete interval, then exit. Text output
-keeps its banner and column header unless \fB-q\fR is also specified
+Measure one complete interval and exit. Text retains headers unless
+\fB-q\fR is also specified.
 .TP
 .B \-S, \-\-summary
-Summary-only mode. Output one \fBSUM\fR row/object per interval
+Emit one SUM row or object per interval.
 .TP
 .B \-a, \-\-all
-Enable all supported base column groups and expand the default aggregate view
-with per-CPU rows. PMU and IPC remain explicit and are not auto-enabled by
-\fB-a\fR
+Enable supported base groups and expand the default view with CPU rows.
+Does not enable PMU or IPC.
 .TP
-.BI \-f ", " \-\-format " text|json|csv"
-Select output format. Default: text
+.BI \-f ", " \-\-format " format"
+Output format: \fBtext\fR (default), \fBjson\fR, or \fBcsv\fR.
 .TP
 .BI \-s ", " \-\-show " items"
-Show only the specified column groups or exact field names. Unknown items
-are reported as errors. Repeated \fB-s\fR options form a union. Explicit
-\fB-p\fR, \fB-I\fR, and \fB-J\fR requests remain in that union regardless of
-their position relative to \fB-s\fR. After platform discovery, a selection
-that cannot produce any row in the chosen mode is a startup error
+Select comma-separated groups or exact fields. Repeated options form a union;
+explicit \fB-p\fR, \fB-I\fR, and \fB-J\fR requests remain enabled regardless
+of their position relative to \fB-s\fR.
 .TP
 .BI \-H ", " \-\-hide " items"
-Hide the specified column groups or exact field names. Unknown items are
-reported as errors, matching \fB\-\-show\fR behavior
+Hide comma-separated groups or exact fields.
 .TP
 .BI \-p ", " \-\-pmu-events " events"
-Enable PMU events. Events are comma-separated. Unknown named events and lists
-with duplicate names or more than \fBMAX_PMU_EVENTS\fR entries are startup
-errors; known events that cannot be opened because of perf permissions remain
-visible as unavailable values
+Select comma-separated PMU events. Unknown or duplicate names and lists over
+16 events are startup errors. Unavailable known events remain visible.
 .TP
 .B \-I, \-\-ipc
-Enable PMU \fBcycles,instructions\fR and show IPC columns
+Select cycles and instructions and enable IPC.
 .TP
 .B \-J, \-\-joules
-Show interval energy in Joules
+Show interval energy in joules.
 .TP
 .B \-l, \-\-list
-List built-in column groups, exact selectable fields with scope, data type,
-unit, text label, and JSON key, and built-in PMU event names. Stable field IDs
-are recommended for scripts
+List groups, field IDs, scopes, types, units, labels, JSON keys, and PMU names.
+Stable field IDs are recommended for scripts.
 .TP
 .B \-P, \-\-probe
-Print a one-shot capability summary for the current platform, including CPU
-topology, effective busy-source policy, cpuidle/LPI availability,
-the temperature node mask, selected package-power and memory-bandwidth sysfs
-paths, source candidate counts and ambiguity notes, and basic PMU availability.
-When cpuidle states are present, \fBidle_state_N_name\fR maps each visible
-\fBLPI-N\fR field to the corresponding Linux \fBstateN/name\fR value.
-The PMU check opens \fBcycles\fR on the
-first tracked CPU only and is not a full event-by-CPU validation. The
-key-value contract reports \fBprobe_schema_version: 1\fR
+Report topology, data sources, candidate counts, Busy/Idle policy, idle-state
+names, and basic PMU availability. The key-value contract has
+\fBprobe_schema_version: 1\fR. The PMU check opens cycles on the first selected
+CPU only; it does not verify every event on every CPU.
 .TP
 .B \-d, \-\-debug
-Enable debug output
+Show initialization and runtime diagnostics.
 .TP
 .B \-v, \-\-version
-Show version information
+Print the version and exit.
 .TP
 .B \-h, \-\-help
-Show help
-
-.SH COLUMN GROUPS
-The following aliases are understood by
-.B --show
-and
-.BR --hide :
-
-.IP \(bu 2
-\fBcpu\fR
-.IP \(bu 2
-\fBpkg\fR, \fBpackage\fR
-.IP \(bu 2
-\fBcore\fR
-.IP \(bu 2
-\fBnuma\fR, \fBnode\fR
-.IP \(bu 2
-\fBfreq\fR
-.IP \(bu 2
-\fBidle\fR
-.IP \(bu 2
-\fBpower\fR
-.IP \(bu 2
-\fBtemp\fR
-.IP \(bu 2
-\fBpmu\fR
-.IP \(bu 2
-\fBsysstat\fR, \fBirq\fR
-.IP \(bu 2
-\fBmembw\fR, \fBmem\fR
-.IP \(bu 2
-\fBipc\fR
-.IP \(bu 2
-\fBenergy\fR, \fBjoules\fR
-.IP \(bu 2
-\fBall\fR
-
+Print command-line help and exit.
+.SH COLUMN SELECTION
+Groups are \fBcpu\fR, \fBpkg/package\fR, \fBcore\fR, \fBnuma/node\fR,
+\fBfreq\fR, \fBidle\fR, \fBpower\fR, \fBtemp\fR, \fBpmu\fR,
+\fBsysstat/irq\fR, \fBmembw/mem\fR, \fBipc\fR, \fBenergy/joules\fR,
+and \fBall\fR. A slash separates aliases, not literal option syntax.
+Exact fields include \fBIdle%\fR, \fBIOWait%\fR, \fBLPI-0\fR,
+\fBPower\fR, and \fBpkg_freq_mhz\fR. Use \fB--list\fR for the complete registry.
+Unknown items and selections that cannot emit any row fail at startup.
 .PP
-\fB--show\fR and \fB--hide\fR also accept exact field names such as
-\fBIdle%\fR, \fBBusy%\fR, \fBIOWait%\fR, \fBSoftIRQs\fR, \fBLPI-0\fR, or
-\fBPower\fR.
-
+\fB--cpu\fR filters collection and CPU-derived aggregates, including perf
+resources. Global counters and platform sensors retain their own scope.
+Default aggregate rows use the filtered CPUs. Explicitly expanding CPU rows
+with a CPU filter suppresses implicit aggregate sections; use
+\fB-S --cpu\fR for a filtered summary. Explicit aggregate-only selections
+remain available.
+.SH OUTPUT
+The first result follows one complete interval. Sampling uses monotonic
+clock deadlines; an overrun skips missed deadlines instead of issuing catch-up
+bursts. CPU hotplug rebuilds dependent state and establishes a new baseline
+before output resumes.
+.PP
+Multi-row text marks each interval with its number, timezone-qualified
+sample-end timestamp, and measured duration. Summary-only rows start with a
+timestamp. Headers include units; \fB/int\fR means a count per interval.
+Headers repeat when columns or widths change, including sparse package IDs.
+.PP
+CPU rows use real Linux IDs and are sorted by ID. Package rows group selected
+CPUs by physical package ID. SUM averages valid CPU frequency and Busy/Idle
+values. Each SUM LPI state requires valid data from every selected CPU; summary
+PMU likewise requires every CPU group and sums their interval counts.
+.SH METRICS
+.TP
+.B Frequency
+\fBFreq\fR is a cpuinfo_cur_freq point sample in MHz. Summary and package
+frequency are averages of current CPU samples, not interval-average or busy
+frequencies. \fBMin\fR and \fBMax\fR are configured scaling limits.
+\fBGovernor\fR and \fBBoost\fR report cached configuration. Summary
+\fBUncoreFreq\fR is a unique matching devfreq cur_freq sample in MHz.
+.TP
+.B Busy/Idle
+Auto and procstat use \fB/proc/stat\fR on all CPUs, including nohz_full.
+Idle% is the idle-plus-iowait delta divided by measured duration; Busy% is
+100 minus Idle%. IOWait% separately reports the iowait delta and is already
+excluded from procstat Busy%. Short intervals may show USER_HZ quantization.
+Schedstat uses per-CPU runtime with procstat fallback and is diagnostic only:
+runtime settled at task switches can omit ongoing execution. Task-clock is
+its compatibility alias.
+.TP
+.B Idle states
+\fBLPI-N\fR is cpuidle stateN/time delta divided by measured duration, times
+100. \fBLPI-N_usage\fR is per-CPU stateN/usage delta per second.
+States are independent of Idle% and column visibility; no residual is
+redistributed and there is no default IdleGap column. States 0 through 7 are
+exposed. \fB--probe\fR maps each field to the kernel state name.
+Time settles on state exit, so a long idle period may report zero in earlier
+windows and more than 100% on exit. Values are not capped. Software accounting
+does not prove the hardware reached the requested state. Missing, disabled,
+failed, or reset states are independently unavailable.
+.TP
+.B Power and energy
+\fBPower\fR estimates interval mean power from endpoint package-sensor samples,
+in mW, shown in SUM. \fBEnergy\fR estimates interval joules from this mean
+and measured duration; it is not a cumulative energy counter.
+.TP
+.B Temperature
+\fBTemp0\fR through \fBTemp3\fR follow the NUMA/die sensor mapping in
+ENVIRONMENT. CPU \fBTemp\fR uses the CPU's NUMA temperature. Units are degrees
+Celsius; this backend does not provide per-core temperature or power.
+.TP
+.B Other counters
+\fBMemBW\fR is memory-read counter delta per second in MiB/s.
+\fBCtxSw\fR, \fBIRQs\fR, \fBSoftIRQs\fR, and PMU events are interval
+counts, not per-second rates. \fBIPC\fR is instructions divided by cycles,
+requiring valid named events and a nonzero cycle count.
 .SH PMU EVENTS
-Built-in PMU names include:
-
-.IP \(bu 2
-\fBcycles\fR
-.IP \(bu 2
-\fBinstructions\fR
-.IP \(bu 2
-\fBcache-references\fR
-.IP \(bu 2
-\fBcache-misses\fR
-.IP \(bu 2
-\fBbranches\fR
-.IP \(bu 2
-\fBbranch-misses\fR
-.IP \(bu 2
-\fBmem-access\fR
-.IP \(bu 2
-\fBmem-read\fR
-.IP \(bu 2
-\fBmem-write\fR
-.IP \(bu 2
-\fBl1d-cache-refill\fR
-.IP \(bu 2
-\fBl1d-cache\fR
-.IP \(bu 2
-\fBl1i-cache-refill\fR
-.IP \(bu 2
-\fBl1i-cache\fR
-.IP \(bu 2
-\fBl2d-cache-refill\fR
-.IP \(bu 2
-\fBl2d-cache\fR
-.IP \(bu 2
-\fBl3d-cache-refill\fR
-.IP \(bu 2
-\fBl3d-cache\fR
-
-The ARMv8 raw aliases use architectural PMUv3 event numbers. In particular,
-\fBmem-read\fR counts retired loads and \fBmem-write\fR counts retired stores;
-neither is a byte or memory-bandwidth counter. Optional cache events may be
-unsupported by a particular CPU.
-
-PMU counters are opened per tracked CPU. Events on the same CPU are grouped
-with perf group semantics, and multiplexed intervals are scaled using
-\fBtime_enabled\fR / \fBtime_running\fR when available. PMU file descriptor
-use scales with both the event count and tracked CPU count; reduce either on
-large systems if descriptor pressure is a concern. Before opening PMU groups,
-armstat best-effort raises its soft \fBRLIMIT_NOFILE\fR within the existing
-hard limit and warns if the resulting budget may still be insufficient.
-
-Raw ARM PMU event configs can also be requested as hexadecimal values such as
-\fB0x11\fR. Only hexadecimal digits may follow the 0x/0X prefix;
-signs, embedded whitespace, and values exceeding 64 bits are rejected.
-
-Short reads, read errors, counter resets, and intervals with no PMU running
-time make that CPU unavailable for the interval and establish a new baseline.
-Summary PMU data is available only when every tracked CPU has a valid interval.
-Summary counts sum per-CPU interval deltas; saturation of an accumulated
-lifetime sum does not turn subsequent intervals into zeroes. An interval sum
-that itself exceeds 64 bits is unavailable.
-Multiplex scaling uses exact integer arithmetic rounded to nearest. An
-unrepresentable scaled interval, overflowing per-CPU cumulative total, or
-invalid enabled/running time delta invalidates that CPU's whole group for the
-interval and resets its cumulative baseline, allowing later intervals to recover.
-IPC is available only when the active list contains both named events
-\fBcycles\fR and \fBinstructions\fR and the interval cycle count is nonzero.
-
-Busy/Idle percentages are not produced by a hidden backend object. Raw
-authoritative counters are captured once per interval, then converted into
-interval deltas in the aggregation layer, using the selected busy-source policy
-to choose between \fB/proc/stat\fR and \fB/proc/schedstat\fR per CPU.
-
-The schedstat reader accepts known versions 10 through 17, requires all nine
-CPU fields, and reads task runtime from field 7. Unknown versions or invalid
-records fall back to procstat through the per-CPU busy-source policy.
-Schedstat is a diagnostic opt-in: runtime is settled when tasks switch out,
-so continuously running tasks may appear idle until a later switch.
-Use the default auto policy for utilization monitoring. Very short procstat
-intervals can show USER_HZ tick quantization; try a one-second interval.
-
-.SH OUTPUT MODEL
-Machine-readable output uses schema version 8. Unavailable numeric and string
-data is rendered as \fB-\fR in text, \fBnull\fR in JSON, and an empty CSV cell.
-A real zero remains numeric zero. \fBBoost\fR is a JSON boolean when available
-and uses 1 or 0 in text/CSV. CSV can represent summary, package, and CPU data
-in one stream. Summary-only CSV uses a \fBScope\fR column containing \fBSUM\fR.
-Mixed output uses the identity columns
-\fBScope,CPU,Package\fR and \fBSUM\fR, \fBPKG\fR, or \fBCPU\fR rows; fields are
-prefixed with \fBsummary.\fR, \fBpackage.\fR, or \fBcpu.\fR. A package-only
-selection such as \fB-s pkg_freq_mhz\fR uses a compact \fBPackage\fR layout;
-the physical package identity is serialized once. Compact CSV data columns use
-the canonical JSON field keys, and compact PMU columns use \fBpmu.<event>\fR.
-Schema 8 JSON and CSV also
-include the measured sampling window in \fBduration_us\fR and nanosecond Unix
-time in \fBtimestamp_ns\fR. The existing \fBtimestamp\fR remains whole seconds,
-and \fBtimestamp_iso\fR is RFC 3339 with nine fractional digits.
-
-.SS Summary-scope fields
-Typical summary fields include:
-
-.IP \(bu 2
-\fBFreq\fR
-.IP \(bu 2
-\fBUncoreFreq\fR
-.IP \(bu 2
-\fBIdle%\fR and \fBBusy%\fR derived from the selected busy-source policy
-.IP \(bu 2
-\fBIOWait%\fR derived from \fB/proc/stat\fR iowait accounting
-.IP \(bu 2
-idle-state residency columns labelled from cpuidle \fBstateN/name\fR (for
-example \fBLPI-0\fR, \fBLPI-1\fR) when cpuidle data is available
-.IP \(bu 2
-up to eight \fBLPI-*\fR columns are visible; deeper or unavailable states are
-folded into the deepest visible usable residual bucket
-.IP \(bu 2
-visible \fBLPI-*\fR columns are display-oriented: shallower usable states keep
-their raw cpuidle residency, while the deepest visible usable state becomes a
-residual bucket so that visible \fBLPI-*\fR columns sum to \fBIdle%\fR
-.IP \(bu 2
-if a deeper state is disabled, unavailable, or beyond the visible column limit,
-the residual is assigned to the deepest remaining visible usable state
-.IP \(bu 2
-if a visible usable cpuidle state lacks a current value or previous baseline,
-all visible split-state values for that CPU are unavailable for the interval;
-the recovered sample establishes a new baseline
-.IP \(bu 2
-usage rates for missing, disabled, or otherwise unusable cpuidle states are
-unavailable rather than zero
-.IP \(bu 2
-\fBPower\fR
-.IP \(bu 2
-\fBTemp0\fR ... \fBTemp3\fR when available
-.IP \(bu 2
-\fBEnergy\fR
-.IP \(bu 2
-\fBMemBW\fR
-.IP \(bu 2
-\fBCtxSw\fR
-.IP \(bu 2
-\fBIRQs\fR
-.IP \(bu 2
-\fBSoftIRQs\fR
-.IP \(bu 2
-\fBIPC\fR
-.IP \(bu 2
-aggregated PMU counters
-.IP \(bu 2
-summary \fBLPI-*\fR values are averages of the displayed per-CPU idle-state
-columns, not a separate whole-machine residual calculation
-
-.SS CPU-scope fields
-Typical CPU fields include:
-
-.IP \(bu 2
-\fBCPU\fR
-.IP \(bu 2
-\fBPkg\fR, \fBCore\fR, \fBNode\fR
-.IP \(bu 2
-\fBFreq\fR, \fBMin\fR, \fBMax\fR, \fBGovernor\fR, \fBBoost\fR
-.IP \(bu 2
-\fBIdle%\fR and \fBBusy%\fR derived from the selected busy-source policy
-.IP \(bu 2
-idle-state residency columns labelled from cpuidle \fBstateN/name\fR when
-cpuidle data is available
-.IP \(bu 2
-the deepest visible \fBLPI-*\fR column may therefore be residual-adjusted
-rather than a pure raw cpuidle percentage
-.IP \(bu 2
-\fBIPC\fR when requested
-.IP \(bu 2
-\fBTemp\fR
-.IP \(bu 2
-per-CPU PMU counters
-
-.SS Package-scope fields
-Package rows include the package ID, tracked CPU count, current sampled
-frequency averaged across valid tracked CPUs,
-Busy/Idle, and I/O-wait fields selected for that package. They are enabled by
-\fB-s pkg\fR, an exact package field, or \fB-a\fR. With \fB--cpu\fR, aggregate
-sections are suppressed only when they would be implicitly mixed with CPU
-rows; an explicit package-only selection uses the filtered tracked CPU set.
-
-.SH DATA SOURCES AND FORMULAS
-.IP \(bu 2
-\fBFreq\fR: \fBcpuinfo_cur_freq / 1000\fR
-.IP \(bu 2
-\fBMin\fR / \fBMax\fR: \fBscaling_min_freq\fR and \fBscaling_max_freq\fR,
-converted from kHz to MHz
-.IP \(bu 2
-Summary/package \fBFreq\fR: arithmetic mean of the current readable per-CPU
-\fBcpuinfo_cur_freq\fR samples in that scope. This is a cpufreq sample, not a
-time average, hardware-counter-derived effective frequency, or busy frequency
-.IP \(bu 2
-\fBUncoreFreq\fR: a unique readable
-\fB/sys/class/devfreq/<device>/cur_freq\fR whose device name looks like an
-uncore/interconnect/fabric clock source, converted from Hz to MHz and exported
-as \fBuncore_freq\fR. If the devfreq layout is ambiguous, armstat hides
-\fBuncore_freq\fR instead of guessing
-.IP \(bu 2
-\fBIdle%\fR: from the selected busy-source policy; with \fBprocstat\fR it is
-\fB/proc/stat idle delta / interval delta * 100\fR, while with
-\fBschedstat\fR it is \fB100 - Busy%\fR from per-CPU runtime accounting, and
-\fBtask-clock\fR is a compatibility alias for the same formula. \fBIdle%\fR is
-the authoritative total idle budget for the interval. Linux's iowait counter
-is included in the procstat idle value
-.IP \(bu 2
-\fBIOWait%\fR: \fB/proc/stat iowait delta / interval delta * 100\fR
-.IP \(bu 2
-\fBBusy%\fR: with \fBprocstat\fR it is \fB100 - Idle%\fR; with
-\fBschedstat\fR it is \fBsched_runtime_delta_ns / wall_clock_delta_ns * 100\fR;
-\fBtask-clock\fR is a compatibility alias for the same formula
-.IP \(bu 2
-\fBIOWait%\fR is reported independently as an explanatory subset of
-\fBIdle%\fR and is not subtracted from \fBBusy%\fR
-.IP \(bu 2
-\fBLPI-*\fR: cpuidle \fBstateN/time\fR delta divided by interval time; the
-deepest visible usable state may be residual-adjusted so visible
-\fBLPI-*\fR columns sum to \fBIdle%\fR. Raw cpuidle residency is used as the
-idle-state breakdown input, while \fBIdle%\fR remains the authoritative total
-idle budget. At most eight LPI columns are printed.
-.IP \(bu 2
-\fBLPI-*_usage\fR: per-CPU cpuidle \fBstateN/usage\fR delta divided by the
-measured interval in seconds. Counter failures and resets are unavailable;
-recovery establishes a new baseline. cpuidle reads are selected independently
-by visible state and counter family, so usage-only output does not read
-\fBstateN/time\fR or require \fB/proc/stat\fR.
-.IP \(bu 2
-\fBPower\fR: package power from exactly one discovered
-\fBpower_meter/power1_average\fR source
-.IP \(bu 2
-\fBEnergy\fR: interval average power multiplied by interval duration
-.IP \(bu 2
-\fBMemBW\fR: delta of exactly one discovered platform-specific
-\fBmem_bytes_read\fR counter divided by interval time, reported as MiB/s
-(bytes per second divided by 1024 squared)
-.IP \(bu 2
-\fBCtxSw\fR: \fB/proc/stat ctxt\fR delta
-.IP \(bu 2
-\fBIRQs\fR: \fB/proc/stat intr\fR delta
-.IP \(bu 2
-\fBSoftIRQs\fR: \fB/proc/stat softirq\fR delta
-.IP \(bu 2
-\fBIPC\fR: \fBinstructions / cycles\fR
-
-.SH PLATFORM NOTES
-The current implementation assumes a platform model where:
-
-.IP \(bu 2
-package power requires exactly one \fBpower_meter/power1_average\fR candidate
-.IP \(bu 2
-memory bandwidth requires exactly one \fBmem_bytes_read\fR candidate
-.IP \(bu 2
-\fBthermal_zoneN/temp\fR maps directly to \fBTempN\fR and NUMA/Vdie node
-\fBN\fR under the current \fBthermal-zone-index\fR summary-temperature policy
-
-As a result:
-
-.IP \(bu 2
-\fBPower\fR is a \fBSUM\fR-scope field backed by a package-level source; it is
-not emitted on \fBPKG\fR or CPU rows
-.IP \(bu 2
-CPU-row \fBTemp\fR is derived from the CPU's NUMA node temperature
-.IP \(bu 2
-\fBTemp0\fR through \fBTemp3\fR are summary fields shown for discovered
-NUMA/Vdie zones. Zone numbering may be sparse, and signed temperature values
-are preserved
-.IP \(bu 2
-\fB--probe\fR reports the effective \fBsummary_temp_policy\fR and package-power
-and memory-bandwidth candidate counts. Multiple candidates are treated as
-ambiguous and disabled instead of selecting the first directory entry
-.IP \(bu 2
-\fBARMSTAT_TEMP_POLICY=none\fR disables summary \fBTempN\fR discovery when the
-platform does not follow the direct \fBthermal_zoneN -> TempN -> NUMA/Vdie N\fR
-mapping. Accepted values are \fBthermal-zone-index\fR, \fBnone\fR, and
-\fBdisabled\fR; any other value is a startup error
-.IP \(bu 2
-per-core power is not currently exposed
-
-.SH LIMITATIONS
-.IP \(bu 2
-There are no dedicated core aggregate rows yet; summary, per-package, and
-per-CPU rows are implemented
-.IP \(bu 2
-Per-state idle columns require cpuidle support; when cpuidle is unavailable,
-\fBIdle%\fR / \fBBusy%\fR continue through the selected procstat/schedstat
-policy
-.IP \(bu 2
-The deepest visible idle-state column is a display-adjusted residual bucket
-when needed, so it should not always be interpreted as a raw \fBstateN/time\fR
-percentage
-.IP \(bu 2
-Requested PMU / IPC fields may render as unavailable when perf access is not
-possible; this is intentional and preferable to silently reporting zero
-.IP \(bu 2
-Transient frequency, cpuidle, power, temperature, memory-bandwidth, procstat,
-and PMU read failures invalidate only dependent fields; recovered cumulative
-sources are re-baselined before interval deltas resume
-.IP \(bu 2
-A procstat jiffy delta that cannot be represented safely in microseconds is
-unavailable rather than wrapping into a plausible Busy/Idle percentage
-.IP \(bu 2
-Per-core power is not implemented
-.IP \(bu 2
-Linux CPU IDs above 1023 cannot be represented by the current fixed-size
-sampling arrays. armstat preserves the actual online count, prints a truncation
-warning, and continues with representable online IDs
-.IP \(bu 2
-PMU monitoring usually requires root privileges or permissive perf settings
-
-.SH EXIT STATUS
-armstat returns 0 only after the requested operation and its stdout flush have
-succeeded. It returns 1 for invalid arguments, initialization or collection
-failure, an unusable effective field selection, and detected output write or
-finalization failure. A closed downstream pipe is handled as \fBEPIPE\fR
-rather than terminating through \fBSIGPIPE\fR, so resources are cleaned up
-before armstat returns 1.
-
-.SH EXAMPLES
-.TP
-Default aggregate output:
-.B armstat
-.TP
-Expand with per-CPU rows:
-.B armstat -a
-.TP
-5-second interval:
-.B armstat -i 5
-.TP
-10 iterations:
-.B armstat -n 10
-.TP
-Summary-only:
-.B armstat -S
-.TP
-Show package/core/node/frequency/idle:
-.B armstat -s pkg,core,node,freq,idle
-.TP
-Enable PMU counters:
-.B armstat -p cycles,instructions
-.TP
-Enable IPC:
-.B armstat -I
-.TP
-JSON output:
-.B armstat -f json
-.TP
-Export JSON to file:
-.B armstat -f json -O armstat.json
-.TP
-Export CSV to file:
-.B armstat -f csv -O armstat.csv
-.TP
-Plot an installed summary export:
-.B armstat-plot-summary summary.json --preset power-temp
-.TP
-Plot selected CPUs from an installed export:
-.B armstat-plot-cpu cpus.csv --cpu-filter 0-7 --preset busy
-.TP
-List built-in column groups and PMU event names:
-.B armstat -l
-.TP
-Probe the current platform:
-.B armstat --probe
-
+Built-in names are:
+.nf
+cycles, instructions, cache-references, cache-misses,
+branches, branch-misses, mem-access, mem-read, mem-write,
+l1d-cache-refill, l1d-cache, l1i-cache-refill, l1i-cache,
+l2d-cache-refill, l2d-cache, l3d-cache-refill, l3d-cache
+.fi
 .PP
-Architecture, machine-readable exports, plotting, and release validation are
-documented together in \fBREFERENCE.md\fR and \fBREFERENCE.zh-CN.md\fR.
-The ARM64 target gate always checks coherent summary and per-CPU Busy/Idle
-samples. Production Kunpeng acceptance should additionally set
-\fBARMSTAT_REQUIRE_FREQ=1\fR, and soak runs enforce a configurable valid-sample
-ratio through \fBARMSTAT_MIN_VALID_PERCENT\fR (95 by default) for basic and
-explicitly required telemetry.
-Out-of-tree builds and tests support a read-only source checkout through
-\fBmake O=/path/to/output\fR. Tests do not write Python caches into the source
-directory, and \fBmake O=... clean\fR only cleans the selected output directory.
-When installed with \fBmake install\fR, plotting is exposed through
-\fBarmstat-plot-summary\fR and \fBarmstat-plot-cpu\fR; their shared modules
-are installed under \fBshare/armstat/\fR and reference documentation under
-\fBshare/doc/armstat/\fR. Known field units are shown in field listings and
-axis labels. Sample-based smoothing preserves unavailable samples as gaps;
-CPUs or groups with no primary-field data in the selected window are reported
-and skipped rather than producing empty legend entries. In a two-axis CPU
-plot, an entity with no secondary-field data keeps its primary line while its
-empty secondary line is reported and skipped. Time axes retain the RFC 3339
-offset from the export rather than using the plotting host's local timezone.
-Summary plots use ten distinct colors for the complete idle/LPI preset.
-Long axis labels for fields sharing one unit use "Value (unit)" while the
-legend retains every field name. Plot spacing follows the rendered legend size.
-Rendering uses a headless backend, and a completed image atomically replaces
-the destination so a rendering failure does not damage an existing plot.
-Replacement preserves existing permission bits; a new image follows the
-process umask.
-Output-directory failures produce a concise error. Numeric values outside
-plotting range, including oversized JSON integers, become gaps.
-Nanosecond RFC 3339 timestamps retain their exported UTC offset when read
-with Python 3.10 as well as newer Python releases.
-Compact ISO timezone offsets such as +0800 are also accepted consistently.
-The shared plot loader rejects malformed JSON samples or sections, non-standard
-JSON numeric constants, duplicate JSON keys or CPU IDs, non-contiguous
-one-based interval numbers, duplicate CSV columns, and rows whose cell count
-differs from their header rather than silently dropping or replacing values.
-
+Raw events require 0x or 0X followed by hexadecimal digits within 64 bits;
+signs and embedded whitespace are invalid. Mem-read and mem-write count
+retired loads and stores, not bytes. Optional events depend on the CPU.
+.PP
+An explicit PMU/IPC request without an event list defaults to cycles and
+instructions. \fB-p\fR alone does not add IPC. Perf events are grouped per
+selected CPU and interval counts are multiplex-scaled with time_enabled and
+time_running using exact integer arithmetic rounded to nearest.
+Failed, short, reset, or unscheduled reads and scaling overflow make the whole
+CPU group unavailable. Recovery establishes a new baseline. Summary sums
+per-CPU interval deltas and rejects an overflowing sum.
+.PP
+PMU usually requires root or permissive perf_event_paranoid. File-descriptor
+use grows with CPUs and events. Armstat attempts to raise its soft
+RLIMIT_NOFILE within the hard limit; reduce CPUs or events if capacity remains
+insufficient.
+.SH EXPORTS
+JSON and CSV use \fBschema_version=9\fR. Bundled plotting loaders accept only
+that version. LPI fields contain independent sysfs statistics; version 8's
+residual-adjusted values cannot be interpreted as version 9 data.
+.PP
+Every interval or CSV row carries schema_version, one-based interval number,
+duration_us, timestamp, timestamp_ns, and timestamp_iso. The timestamps describe
+the sample end; timestamp_iso is local RFC 3339 with nine fractional digits.
+Use duration_us for the measured monotonic window.
+.PP
+JSON is an array of interval objects with selected summary, packages, and cpus
+sections. Package and CPU objects use package and cpu identity keys.
+Unavailable values are null; available Boost is boolean. Strings are escaped
+and non-finite numbers become null.
+.PP
+CSV has one header. Summary-only uses Scope=SUM; package-only uses Package;
+CPU-only uses CPU. Mixed output uses Scope,CPU,Package with SUM, PKG, and CPU
+rows. Mixed data columns are qualified with summary., package., or cpu.;
+compact columns use JSON keys. Unavailable and out-of-scope cells are empty.
+Use a conforming CSV parser.
+.PP
+CSV layout changes stop capture before the affected interval with a nonzero
+exit; restart CSV or use JSON for changing column sets. CPU membership may
+change if the layout stays fixed. Existing output targets are opened only
+after initialization, baseline collection, and output-buffer allocation
+succeed. Later errors retain the written prefix and return nonzero.
+.SH ENVIRONMENT
+.TP
+.B ARMSTAT_TEMP_POLICY
+Default \fBthermal-zone-index\fR maps thermal_zoneN/temp to TempN and NUMA/die
+N. Sparse node IDs and signed temperatures are preserved. \fBnone\fR or
+\fBdisabled\fR turns off summary temperature discovery. Unknown values fail
+startup. Disable this mapping when it does not describe the server's sensors.
+.SH LIMITATIONS
+Power requires exactly one power_meter/power1_average source; memory bandwidth
+requires exactly one mem_bytes_read source. Ambiguous discovery remains
+unavailable and is reported by --probe. Without cpuidle, LPI columns are
+hidden and Busy/Idle still works. Interval read failures affect dependent
+fields; cumulative counters need a new baseline after recovery.
+.PP
+CPU IDs above 1023 are unrepresentable. Armstat warns and continues with
+representable online IDs. Dedicated core aggregate rows are not implemented.
+Hardware telemetry and sustained behavior require validation on the actual
+server; VM execution verifies portability and contracts only.
+.SH EXIT STATUS
+Zero means the operation and checked output flush succeeded. One means invalid
+arguments, initialization or collection failure, an unusable selection, or
+an output write/finalization failure. Closed pipes are handled as EPIPE so
+resources are cleaned up before exit.
+.SH EXAMPLES
+.nf
+armstat --probe
+armstat -i 1 -n 5
+armstat -S -a -i 1 -n 10
+armstat -a --cpu 0-3
+armstat -s cpu,freq,idle
+armstat -s pkg_freq_mhz
+armstat -I
+armstat -S -a -f json -O summary.json -i 1 -n 60
+armstat -a -f csv -O cpus.csv -i 1 -n 60
+armstat-plot-summary summary.json --preset freq
+armstat-plot-cpu cpus.csv --preset busy --top 8
+.fi
+.SH FILES
+The installed README and integration reference are under
+\fBPREFIX/share/doc/armstat\fR; the default PREFIX is /usr.
+The reference covers architecture, formulas, export details, plotting, and
+release acceptance. Shared plotting modules are in PREFIX/share/armstat.
 .SH SEE ALSO
-.BR turbostat (8),
-.BR perf (1)
-
+.BR perf (1),
+.BR turbostat (8)
 .SH LICENSE
-GPL-2.0. The complete license text is distributed in \fBCOPYING\fR and is
-installed under \fBshare/doc/armstat/COPYING\fR.
+GPL-2.0. See COPYING in the source or installed documentation.

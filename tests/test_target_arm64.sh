@@ -374,7 +374,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 
 assert len(samples) == 1
 sample = samples[0]
-assert sample.get("schema_version") == 8
+assert sample.get("schema_version") == 9
 assert isinstance(sample.get("summary"), dict)
 assert isinstance(sample.get("packages"), list) and sample["packages"]
 assert "cpus" not in sample
@@ -428,7 +428,7 @@ expected = int(expected_text)
 tracked = int(tracked_text)
 require_freq = require_freq_text == "1"
 assert len(samples) == expected, (len(samples), expected)
-assert all(sample.get("schema_version") == 8 for sample in samples)
+assert all(sample.get("schema_version") == 9 for sample in samples)
 assert [sample.get("interval") for sample in samples] == list(range(1, expected + 1))
 assert all(isinstance(sample.get("duration_us"), int) and
            sample["duration_us"] > 0 for sample in samples)
@@ -481,7 +481,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
     samples = json.load(stream)
 
 assert len(samples) == 1
-assert samples[0].get("schema_version") == 8
+assert samples[0].get("schema_version") == 9
 assert isinstance(samples[0].get("summary", {}).get("ctx_switches"), int)
 PY
 
@@ -506,7 +506,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 
 assert len(samples) == 1
 sample = samples[0]
-assert sample.get("schema_version") == 8
+assert sample.get("schema_version") == 9
 assert all("package_id" not in package
            for package in sample.get("packages", []))
 for cpu in sample.get("cpus", []):
@@ -582,7 +582,7 @@ if require_idle:
     idle_values = [value for summary in summaries
                    for key, value in summary.items()
                    if re.fullmatch(r"lpi[0-7]", key)]
-    require_any("cpuidle", idle_values, lambda value: 0 <= value <= 100)
+    require_any("cpuidle", idle_values, lambda value: value >= 0)
 if require_power:
     require_any("package power", [summary.get("power") for summary in summaries],
                 lambda value: value >= 0)
@@ -645,7 +645,7 @@ assert rows[0][:7] == [
     "schema_version", "interval", "duration_us", "timestamp", "timestamp_ns",
     "timestamp_iso", "Scope",
 ]
-assert all(row[0] == "8" for row in rows[1:])
+assert all(row[0] == "9" for row in rows[1:])
 assert [int(row[1]) for row in rows[1:]] == list(range(1, expected + 1))
 assert all(int(row[2]) > 0 for row in rows[1:])
 assert all(int(row[4]) // 1_000_000_000 == int(row[3]) for row in rows[1:])
@@ -675,7 +675,7 @@ assert len({len(row) for row in rows}) == 1
 scopes = {row[6] for row in rows[1:]}
 assert {"SUM", "PKG", "CPU"}.issubset(scopes), scopes
 for row in rows[1:]:
-    assert row[0] == "8"
+    assert row[0] == "9"
     assert int(row[2]) > 0
     if row[6] == "SUM":
         assert row[7] == "" and row[8] == ""
@@ -702,7 +702,7 @@ assert rows[0][:8] == [
     "timestamp_iso", "Package", "freq",
 ]
 assert len({len(row) for row in rows}) == 1
-assert all(row[0] == "8" and int(row[2]) > 0 and row[6] != ""
+assert all(row[0] == "9" and int(row[2]) > 0 and row[6] != ""
            for row in rows[1:])
 PY
 
@@ -826,7 +826,7 @@ with open(path, encoding="utf-8") as stream:
 expected = int(expected_text)
 minimum_percent = int(minimum_text)
 assert len(samples) == expected, (len(samples), expected)
-assert all(sample.get("schema_version") == 8 for sample in samples)
+assert all(sample.get("schema_version") == 9 for sample in samples)
 assert [sample.get("interval") for sample in samples] == list(range(1, expected + 1))
 assert all(isinstance(sample.get("duration_us"), int) and
            sample["duration_us"] > 0 for sample in samples)
@@ -864,7 +864,7 @@ if require_cpuidle:
         "cpuidle",
         lambda summary: any(
             re.fullmatch(r"lpi[0-7]", key) and finite_number(value) and
-            0 <= value <= 100
+            value >= 0
             for key, value in summary.items()
         ),
     )

@@ -2,449 +2,388 @@
 # armstat Reference
 
 <p align="center">
-  <a href="../README.md">README</a> |
-  <a href="REFERENCE.zh-CN.md">简体中文</a> |
-  <code>armstat(8)</code>
+  <a href="../README.md">README</a> | <a href="REFERENCE.zh-CN.md">简体中文</a>
 </p>
 
-This is the single maintainer and integration reference for `armstat`. The
-README explains normal use; this document collects architecture, export,
-plotting, and release-validation details that should not be spread across
-separate files.
+This reference covers implementation, metric formulas, integration, and
+validation. The [README](../README.md) covers normal use;
+`man armstat` lists command-line options after installation.
 
 ## Repository layout
 
-```text
-src/app/       command-line parsing and process lifecycle
-src/core/      collection orchestration, interval aggregation, CPU inventory
-src/platform/  Linux and ARM telemetry backends
-src/output/    field registry, record materialization, text/JSON/CSV output
-scripts/       export loaders and plotting tools
-tests/         host-independent regression and ARM64 target acceptance tests
-man/           installed manual page
-docs/          this reference
-```
+| Directory | Responsibility |
+|---|---|
+| `src/app/` | CLI and process lifecycle |
+| `src/core/` | Collection, aggregation, CPU inventory, sampling deadlines |
+| `src/platform/` | Linux/ARM telemetry backends |
+| `src/output/` | Field registry, owned records, serializers |
+| `scripts/` | Export loaders and plots |
+| `tests/` | Regression tests and ARM64 target acceptance |
+| `man/`, `docs/` | Installed manual and reference |
 
-Headers are private project interfaces and stay beside their implementation
-area. The project does not currently publish a C library API.
+Headers are private interfaces beside their implementations; there is no
+public C library API.
 
 ## Runtime architecture
 
-The sampling path has three stages:
-
 ```text
-collect raw snapshot -> aggregate interval deltas -> materialize and serialize
+collect sys_snapshot -> calculate interval_stats -> build interval_record -> serialize
 ```
 
-- `src/app/armstat_cli.c` parses options and column selection before runtime
-  initialization.
-- `src/app/armstat.c` owns startup, the monotonic sampling loop, signals,
-  output-file finalization, and shutdown.
-- `src/core/collector.c` coordinates one raw snapshot. It does not format data
-  or calculate user-facing interval percentages.
-- `src/core/aggregator.c` converts cumulative inputs into one
-  `interval_stats`. Its public entry point is deliberately a short ordered
-  pipeline: initialize, frequency, Busy/Idle, system metrics, PMU, package
-  aggregation, then baseline commit.
-- `src/output/formatter_record.c` copies the snapshot and interval statistics
-  into an owned `interval_record`.
-- `src/output/formatter_values.c` exposes the typed, read-only accessors used
-  by the field registry, separate from allocation and materialization.
-- `src/output/formatter_text.c`, `formatter_json.c`, and `formatter_csv.c`
-  serialize that record. `formatter_machine.c` contains only helpers shared by
-  the JSON and CSV streams.
+| Module | Owned work |
+|---|---|
+| `app/armstat_cli.c`, `app/armstat.c` | Options, startup, sampling loop, signals, output finalization, cleanup |
+| `core/collector.c` | Raw snapshot orchestration and shared accessors |
+| `core/sample_cache.c` | Reusable buffers, cached reads, slow refresh |
+| `core/aggregator.c` | Interval deltas, validity, CPU/package aggregation, baseline commit |
+| `output/columns.c` | Field descriptors and visibility |
+| `output/formatter_record.c`, `formatter_values.c` | Owned record values and typed accessors |
+| `output/formatter_text.c`, `formatter_json.c`, `formatter_csv.c` | Serialization; machine helpers in `formatter_machine.c` |
 
-The first collection establishes cumulative baselines. A visible sample is
-emitted only after one complete interval. Sampling deadlines are anchored to
-the monotonic clock; normal work time is deducted from the next wait and a
-fully missed deadline is skipped instead of producing catch-up bursts. Metric
-formulas use the measured `interval_delta_us`, not the requested interval.
+Collection reads raw samples; aggregation derives interval deltas, percentages,
+and rates. Serializers consume one self-contained record rather than retaining
+pointers into mutable snapshot data.
+
+The first snapshot establishes a baseline. Later samples use monotonic deadlines
+anchored to it; collection/output time reduces the next wait. Fully missed
+deadlines are skipped, and formulas always use measured `interval_delta_us`.
 
 ### CPU identity
 
-Two CPU identities are intentional:
+`cpu_id` is the real Linux ID used in paths and output. `tracked_idx` is the
+dense index into the selected online set. `cpu_inventory.c` owns present,
+online, and selected membership; use `for_each_tracked_cpu` for traversal.
+`--cpu` filters collection and CPU-derived aggregates, while global counters
+and platform sensors keep their own scope. IDs `0..1023` are representable;
+larger inventories are reported as truncated.
 
-- `cpu_id` is the real Linux CPU number used at kernel interfaces and in
-  output.
-- `tracked_idx` is a dense internal index into the selected online CPU set.
-
-`src/core/cpu_inventory.c` owns present, online, and tracked membership. The
-`for_each_tracked_cpu` iterator is the normal internal traversal interface.
-`--cpu` is a sampling filter, so unselected CPUs do not consume per-CPU PMU or
-sysfs resources. The compiled representation accepts CPU IDs `0..1023`; a
-larger or higher-numbered online set is reported as truncated.
-
-When online membership changes, the runtime rebuilds CPU-dependent caches and
-topology, resets the aggregator, and consumes a new baseline before producing
-another row. The rebuild interval is not presented as a normal measurement;
-both clocks are captured again after rebuild completion so its latency is not
-included in the next visible interval's rate denominator.
+Hotplug checks the compact online mask, avoiding directory scans until a change
+or read failure; full scans use two observations to debounce changes. A rebuild
+resets CPU-dependent caches, topology, PMU, and aggregation. The rebuild sample
+is a new baseline; clocks are recaptured after it so rebuild time is excluded
+from the next measurement.
 
 ### Sampling layers
 
-- Static/rebuild data: CPU membership, topology, sensor paths, cpuidle state
-  identity, and PMU metadata.
-- Slow-changing data: frequency limits, governor, boost, and cpuidle enable
-  state, refreshed with a rolling budget.
-- Per-interval data is demand-driven: current frequency, Busy/Idle inputs,
-  cpuidle split counters, package power, temperature, memory bandwidth, and
-  PMU counters are read only when selected fields require them. `/proc/stat`
-  is shared by the selected Busy/Idle, LPI-residency, and system-counter
-  consumers. cpuidle selection is exact by output scope, state index, and
-  counter family: summary residency does not read `stateN/usage`, while an
-  `LPI-N_usage`-only CPU export does not read `stateN/time` or `/proc/stat`.
+| Layer | Data |
+|---|---|
+| Startup/rebuild | CPU membership, topology, sensors, idle-state names, PMU metadata |
+| Slow refresh | Frequency limits, governor, boost, cpuidle disable flags |
+| Per interval | Selected frequency, Busy/Idle, LPI, power, temperature, bandwidth, PMU inputs |
 
-`src/core/sample_cache.c` owns reusable storage and cached descriptors.
-`src/core/collector.c` exposes snapshot accessors for fields consumed by more
-than one downstream module; the snapshot is not yet fully opaque.
-The record builder likewise omits per-CPU and package materialization when the
-selected output policy cannot emit those scopes.
+Slow data starts with a full refresh, then advances a rolling CPU cursor after
+the fast snapshot. The default budget is `ceil(selected_cpus * interval / 5s)`,
+clamped to 1–32 CPUs; this cap can lengthen a complete sweep beyond five seconds.
+Runtime disable changes therefore take effect gradually.
+
+Reads follow selected fields and scopes. `/proc/stat` is parsed once when
+Busy/Idle/IOWait or system counters need it; LPI-only output does not need it.
+cpuidle reads only selected states and counter families: residency does not
+require usage, and usage alone does not require time. Cached cpufreq/cpuidle
+FDs and a cached procstat stream reduce repeated opens and parsing. Output
+likewise skips CPU/package record construction when those scopes cannot emit.
+A best-effort nice-value reduction before sampling is nonfatal if denied.
 
 ## Metric invariants and sources
 
-The README contains the complete user-facing field list. These rules are the
-maintainer invariants that calculations and serializers must preserve:
+Run `armstat --list` for exact field IDs, scopes, types, units, labels, and JSON
+keys. Below, `Δ` means the difference between valid consecutive samples,
+`T_us` is measured duration in microseconds, and `T_s = T_us / 1000000`.
 
-- `Idle% + Busy% = 100%` for every valid CPU interval.
-- `IOWait%` is an independent `/proc/stat` view and is not subtracted from
-  `Busy%`.
-- With `--busy-source=auto`, all tracked CPUs use `/proc/stat`, including
-  `nohz_full` CPUs. Explicit schedstat is diagnostic only: runtime is settled
-  at context switches and can omit execution still in progress.
-- Split `LPI-*` columns are a display decomposition of authoritative idle
-  time. The deepest visible usable state absorbs the residual so displayed
-  states approximate `Idle%` rather than claiming raw cpuidle counters are a
-  second Busy/Idle authority.
-- Per-CPU `LPI-N_usage` is the finite, non-negative `stateN/usage` counter
-  delta divided by measured interval seconds. Failure and counter reset samples
-  are unavailable and recovery establishes a new baseline.
-- `SUM` percentages and frequency are averages across valid tracked CPUs;
-  system counters and PMU counters are interval deltas or aggregates.
-- Raw PMU event input requires `0x`/`0X` followed by hexadecimal digits within
-  64 bits; signs and embedded whitespace are invalid.
-- PMU summary aggregation sums per-CPU interval deltas, not differences of
-  lifetime sums. It requires every tracked CPU to be valid and rejects a
-  64-bit overflow of the interval sum itself.
-- Per-CPU PMU multiplex scaling uses exact integer arithmetic rounded to
-  nearest. An invalid time delta or overflow of a scaled interval or its
-  cumulative total makes the whole CPU group unavailable for that interval
-  and starts a new cumulative epoch. The next valid interval can recover
-  instead of subtracting a permanently saturated total and reporting zero.
-- Package rows group tracked CPUs by the physical package ID supplied by
-  topology.
-- `Freq` is the current `cpuinfo_cur_freq` sample. Summary and package values
-  are cross-CPU averages of the current samples, not time averages or
-  hardware-counter-derived effective frequencies.
-- Energy is derived from interval-average package power and measured duration.
-- IPC is emitted only when named `cycles` and `instructions` deltas are both
-  valid and cycles is nonzero.
-
-Primary kernel interfaces are:
-
-| Metric | Source | Output unit |
+| Fields | Source | Calculation / unit |
 |---|---|---|
-| current/min/max frequency, governor, boost | CPU `cpufreq` sysfs | MHz/string/bool |
-| Busy/Idle and IOWait | `/proc/stat`, optionally `/proc/schedstat` | % |
-| split idle states and usage rates | CPU `cpuidle` sysfs | %, /s |
-| package power | one unambiguous `power_meter`/`power1_average` source | mW |
-| interval energy | derived from power and duration | J |
-| temperature | selected `thermal_zone` policy | degC |
-| memory bandwidth | one unambiguous platform counter | MiB/s |
-| context switches and interrupts | `/proc/stat` | count/interval |
-| PMU and IPC | `perf_event_open()` | count/interval, instructions/cycle |
+| `CPU`, `Pkg`, `Core`, `Node` | CPU inventory and Linux topology | Real IDs; CPU rows sorted by CPU ID |
+| `Freq` | CPU `cpufreq/cpuinfo_cur_freq` | kHz / 1000 → MHz; current point sample |
+| `Min`, `Max` | `scaling_min_freq`, `scaling_max_freq` | kHz / 1000 → MHz; configured limits |
+| `Governor`, `Boost` | `scaling_governor`, per-CPU or global `cpufreq/boost` | Cached string / boolean |
+| `UncoreFreq` | Unique matching `/sys/class/devfreq/<device>/cur_freq` | Hz / 1000000 → MHz; summary only |
+| `Idle%` (procstat) | Per-CPU `/proc/stat` idle + iowait | Convert `Δ` from USER_HZ ticks to µs, then `/ T_us * 100` |
+| `IOWait%` | Per-CPU `/proc/stat` iowait | Convert `Δ` to µs, then `/ T_us * 100` |
+| `Busy%` | Selected utilization policy | `100 - Idle%`; schedstat uses runtime `Δ / elapsed_ns * 100` |
+| `LPI-N`, `LPI-N_usage` | CPU `cpuidle/stateN/time`, `usage` | `Δtime_us / T_us * 100`; `Δusage / T_s` |
+| `Power` | Unique `power_meter/power1_average` sensor | Mean of endpoint power samples in mW; summary scope |
+| `Energy` | Derived from power | `Power_mW * T_s / 1000` → interval J |
+| `Temp0` ... `Temp3`, CPU `Temp` | Temperature policy below | Milli-Celsius / 1000 → °C |
+| `MemBW` | Unique `/sys/class/memory/mem*/mem_bytes_read` | `Δbytes / T_s / 1024²` → MiB/s |
+| `CtxSw`, `IRQs`, `SoftIRQs` | `/proc/stat` ctxt, intr, softirq | `Δ` → count/interval |
+| PMU, `IPC` | Per-CPU perf groups | Scaled interval counts; `instructions / cycles` |
 
-Power and memory-bandwidth discovery require exactly one matching source.
-Ambiguous discovery remains unavailable and is explained by `--probe`; the
-implementation does not select a source based on directory enumeration order.
-PMU normally requires root or a permissive `perf_event_paranoid` setting.
+Frequency at SUM/package scope averages valid current samples; it is not an
+interval-average or busy frequency. Energy estimates a sampled signal using
+endpoint averaging; it is neither a hardware energy counter nor a cumulative
+value. System and PMU counts are not per-second rates. Display precision is
+not a sensor-accuracy guarantee.
 
-Unavailable telemetry must remain unavailable across the pipeline. A valid
-zero is data; it must not be used as a substitute for a failed read, a
-re-baselining interval, or an unsupported capability.
+### Busy/Idle and LPI
+
+Auto/procstat uses `/proc/stat` on all selected CPUs, including `nohz_full`.
+Valid utilization is bounded to 0–100 and satisfies `Idle% + Busy% = 100`.
+Procstat Idle includes iowait, so IOWait is already excluded from Busy.
+Schedstat instead derives Idle from task runtime; IOWait remains a separate
+procstat observation and is not guaranteed to be its subset in that mode.
+
+Explicit schedstat is diagnostic: runtime settles at task switches and can
+omit ongoing execution. The reader accepts versions 10–17, requires nine CPU
+fields, and uses field 7 for runtime. Unsupported or invalid records fall back
+to procstat per CPU. `task-clock` aliases this path. Short procstat intervals
+show USER_HZ quantization; a jiffy delta that cannot safely convert to µs is
+unavailable. The kernel accounting path is in
+[`sched_info_depart()` / `sched_info_switch()`](https://github.com/torvalds/linux/blob/bd5f485f3f026225b86573e559af0b7254ef4184/kernel/sched/stats.h).
+
+LPI states are independent sysfs statistics, with no residual redistribution,
+100% cap, or default `IdleGap` field. Their sum need not equal Idle. Only states
+0–7 are exposed; deeper states are not folded into another state. `--probe`
+reports each `idle_state_N_name` mapping.
+
+Time settles on state exit: a long idle period may report zero before exit and
+more than 100% afterward. Software residency does not prove hardware depth.
+Missing, disabled, failed, or reset state/counter values are independently
+unavailable. Each SUM LPI state requires valid data from every selected CPU
+before averaging; missing CPUs are not counted as zero.
+
+### PMU
+
+Perf groups are opened per selected CPU. Each interval count is
+`round(Δcount * Δtime_enabled / Δtime_running)` using exact integer arithmetic.
+First, failed, short, reset, or unscheduled reads are unavailable. Invalid time
+deltas, scaling overflow, or per-CPU cumulative-total overflow invalidate the
+whole CPU group and start a new epoch; subsequent valid intervals can recover.
+
+Summary counts sum per-CPU interval deltas, requiring every selected CPU to be
+valid and rejecting 64-bit sum overflow. IPC requires valid named `cycles` and
+`instructions` with nonzero cycles; summary IPC uses aggregate counts.
+
+Event lists allow at most 16 unique names. Raw configs require `0x`/`0X` plus
+hexadecimal digits within 64 bits, without signs or whitespace. `mem-read` and
+`mem-write` are retired load/store counts, not bytes; optional cache events
+depend on the CPU. See `--list` for the catalog. Known events denied by perf
+remain visible as unavailable. FD use grows with CPUs/events; initialization
+attempts to raise soft `RLIMIT_NOFILE` within the hard limit and warns if the
+budget remains insufficient.
+
+### Sensor mapping and missing data
+
+Power and memory bandwidth require exactly one matching source. Zero or
+multiple candidates leave the metric unavailable; `--probe` reports paths,
+candidate counts, and ambiguity. Uncore devfreq discovery likewise requires a
+unique matching source.
+
+`ARMSTAT_TEMP_POLICY=thermal-zone-index` maps `thermal_zoneN/temp` to `TempN`
+and NUMA/die N. CPU `Temp` uses its NUMA node's reading. Sparse IDs and negative
+temperatures are preserved. `none` and `disabled` suppress summary temperature
+discovery; other values fail startup. Verify this mapping on the server.
+Per-core power/temperature and dedicated core aggregate rows are not provided.
+
+Unavailable interval inputs stay unavailable throughout aggregation and
+serialization. Failed reads invalidate dependent fields; cumulative sources
+are re-baselined on recovery to avoid bridging a gap or publishing false zero.
+A valid zero remains data.
 
 ## Output contract
 
-Machine-readable output currently uses `schema_version = 8`. Run
-`armstat --list` for the authoritative current field IDs, scopes, types, units,
-text labels, and JSON keys; that view is generated from the same field
-registry used by the serializers.
+JSON/CSV and bundled plot loaders use **schema version 9**. Version 8's LPI
+fields were residual-adjusted; do not interpret them as independent state
+statistics or mix those captures with version 9. `--list` is generated from
+the serializer's field registry. The separate key-value probe contract is
+`probe_schema_version: 1`; its PMU check covers cycles on the first CPU only.
 
 ### Stable interval metadata
 
-Every JSON interval and every CSV row starts with equivalent metadata:
-
 | Field | Meaning |
 |---|---|
-| `schema_version` | integer compatibility gate |
-| `interval` | one-based visible interval number |
-| `duration_us` | measured monotonic sampling window in microseconds |
-| `timestamp` | Unix wall time in whole seconds |
-| `timestamp_ns` | Unix wall time in nanoseconds; preferred programmatic axis |
-| `timestamp_iso` | RFC 3339 local timestamp with nine fractional digits |
+| `schema_version` | Integer compatibility gate |
+| `interval` | One-based visible sample number |
+| `duration_us` | Measured monotonic window in microseconds |
+| `timestamp` | Unix sample-end wall time in whole seconds |
+| `timestamp_ns` | Same wall time in nanoseconds; preferred programmatic axis |
+| `timestamp_iso` | Local RFC 3339 sample-end time with nine fractional digits |
 
-`timestamp`, `timestamp_ns`, and `timestamp_iso` describe the same sample end
-time. `duration_us` describes the measurement window, not wall-clock display
-precision.
+Duration describes the measurement window; all three timestamps describe the
+same end time. Do not use the requested interval as an exported rate denominator.
+
+### Text
+
+Multi-row samples have an interval marker, timezone-qualified timestamp, and
+measured seconds, with blank separators. Summary-only rows start with a
+timestamp. Headers include units and repeat on label, selection, or width
+changes. Row-key widths accommodate sparse package IDs. Quiet text omits
+markers, timestamps, headers, and the banner. Machine keys remain unchanged.
 
 ### JSON
 
-JSON is one top-level array with one object per visible interval. Each object
-always contains the metadata above and may contain:
+The top-level array contains one object per interval, with metadata and selected
+`summary`, `packages`, and `cpus` sections. Packages use `package` identity;
+CPUs use real Linux `cpu` IDs. Default mode emits summary/packages, `-S` emits
+summary, and `-a` expands CPU output; explicit selection controls the scopes.
 
-- `summary`: enabled system-scope fields and optional aggregate `pmu` object;
-- `packages`: one object per package, each identified once by `package`;
-- `cpus`: one object per tracked CPU, each identified by real Linux `cpu`.
-
-Section presence follows the selected level. The default emits `summary` and
-`packages`; `-S` emits only `summary`; `-a` expands the output with `cpus`.
-Explicit selection can emit any valid combination.
-
-Human-readable multi-row output marks every block with its interval number,
-timezone-qualified timestamp, and measured duration in seconds; consecutive
-blocks have a blank separator. Summary-only text has one timestamp-prefixed row
-per interval. Headers include units; `/int` denotes count per interval. Quiet
-text omits timestamps, markers, and headers. These presentation labels do not
-change machine field names or exact CLI selection tokens.
-Text measures the package row-key width across the current package set, keeping
-large, sparse package IDs aligned with the header and other rows. Headers repeat
-when column labels, selections, or measured widths change.
-CSV checks the emitted scopes and ordered columns against its first header.
-If runtime capability changes alter that layout, serialization returns an error
-before writing the affected interval, and the process exits nonzero. CPU
-membership changes alone can continue when the column layout remains the same.
-
-An output target is opened only after collector initialization, the baseline
-sample, and formatter-pool allocation have succeeded, so those startup
-failures do not truncate an existing export. Successful startup switches to
-streaming output; later collection or write failures therefore leave the
-complete prefix already produced and return a nonzero status.
-
-Unavailable numbers and strings are JSON `null`. Available `boost` values are
-JSON booleans. Non-finite internal floating-point values are normalized to
-`null`, so the output never depends on non-standard `NaN` or infinity tokens.
-Strings are JSON-escaped.
+Missing numbers/strings and non-finite values are `null`; available Boost is
+boolean. Strings are JSON-escaped. The array is finalized on orderly exit;
+abrupt termination can leave an incomplete document.
 
 ### CSV
 
-The header is emitted once. After stable metadata, CSV uses one of four
-layouts:
+One header defines the layout:
 
-- summary-only: identity column `Scope`, value `SUM`;
-- package-only: identity column `Package`;
-- CPU-only: identity column `CPU` containing the real Linux ID;
-- mixed-scope: identity columns `Scope,CPU,Package`, with rows ordered `SUM`,
-  `PKG`, then `CPU` for each interval.
+| Selected scopes | Identity columns |
+|---|---|
+| Summary only | `Scope`, with value `SUM` |
+| Package only | `Package` |
+| CPU only | `CPU`, with real Linux IDs |
+| Mixed | `Scope,CPU,Package`; rows ordered `SUM`, `PKG`, `CPU` |
 
-Compact headers use the canonical JSON field keys. Mixed headers additionally
-qualify data columns as `summary.<field>`, `package.<field>`, or `cpu.<field>`.
-Compact PMU fields use `pmu.<event>`; mixed PMU fields use
-`summary.pmu.<event>` and `cpu.pmu.<event>`.
-Cells outside a row's scope and unavailable values are empty; valid zeroes
-remain zero. Fields containing a comma, quote, newline, or carriage return are
-quoted according to CSV rules, including doubling embedded quotes.
+Compact data columns use JSON keys; mixed columns add `summary.`, `package.`,
+or `cpu.`. PMU columns are `pmu.<event>` or, in mixed output,
+`summary.pmu.<event>` / `cpu.pmu.<event>`. Missing and out-of-scope cells are
+empty; Boost uses 0/1. Commas, quotes, CR, and LF follow CSV quoting rules.
+Use a conforming parser and select rows by identity.
 
-Do not split CSV on commas manually. Use a conforming CSV parser and select
-rows by their identity fields.
+Scopes and ordered columns must match the first header. A capability-induced
+layout change returns an error before the affected interval; CPU membership
+can change if the layout remains fixed. Restart CSV or use JSON when fields
+can change.
 
-### Units and compatibility
+### Output lifecycle
 
-Canonical units are MHz, percent, degC, mW, J, MiB/s, usage delta per second,
-count per interval, and instructions per cycle. Rendered decimal precision is
-a presentation choice, not a sensor-accuracy guarantee.
-
-Consumers must require `schema_version = 8`; the project has not shipped an
-older contract that needs compatibility. Consumers must preserve missing
-values rather than converting them to zero.
+Existing targets are opened only after initialization, baseline collection,
+and formatter allocation succeed. After startup, output streams progressively;
+later failures retain the written prefix and return nonzero. All successful
+operations, including help/list/probe, require a checked stdout flush. SIGPIPE
+is handled as EPIPE, allowing resource cleanup before exit.
 
 ## Plotting exports
 
-The optional scripts require Python 3 and matplotlib:
+Plotting needs Python 3 and matplotlib, for example in an activated environment:
 
 ```bash
+python3 -m venv .venv
+. .venv/bin/activate
 python3 -m pip install matplotlib
-```
-
-Create summary or CPU inputs with:
-
-```bash
-armstat -S -f json -O summary.json
-armstat -S -f csv -O summary.csv
-armstat -a -f json -O cpus.json
-armstat -a -f csv -O cpus.csv
-```
-
-Installed builds provide `armstat-plot-summary` for summary series and
-`armstat-plot-cpu` for per-CPU and grouped series. From a source tree, the
-equivalent entry points are `scripts/plot_sum.py` and `scripts/plot_cpu.py`.
-Both use the shared loader for schema validation, field aliases, missing-value
-handling, and timestamps. Inputs must contain the exact integer
-`schema_version` supported by the scripts; an absent or fractional version is
-rejected rather than guessed. Missing or incorrectly typed JSON samples and
-sections, non-standard JSON numeric constants, duplicate JSON keys or CPU IDs
-within one sample, non-contiguous one-based interval numbers, duplicate CSV
-columns, and rows whose cell count differs from their header are rejected as
-damaged input rather than silently dropping or overwriting values.
-Numeric values outside floating-point plotting range become missing values;
-oversized JSON integers must not raise an uncaught conversion error. Output
-directory creation is handled by the atomic writer and reports a concise error
-if the destination cannot be created.
-Timezone parsing normalizes fractional seconds in a temporary parsing copy so
-Python 3.10 accepts the export's nine-digit fraction. The original timestamp
-and nanosecond metadata are retained.
-Compact ISO offsets such as `+0800` are normalized to `+08:00` in that parsing
-copy as well, preserving the offset on Python 3.10.
-
-```bash
-armstat-plot-summary summary.json --preset freq
+armstat -S -a -f json -O summary.json -i 1 -n 60
+armstat -a -f csv -O cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --y power --y2 temp0
-armstat-plot-cpu cpus.json --preset busy --top 8
-armstat-plot-cpu cpus.csv --group-by node --y busy
-armstat-plot-cpu cpus.csv --y lpi0_usage --top 8
+armstat-plot-cpu cpus.csv --preset busy --top 8
 ```
 
-Use `--list-fields` to inspect available series. CPU plots should normally use
-`--cpu-filter`, `--top`, or `--group-by` on large machines. JSON inputs are
-loaded in full; CSV with `--sample-range` is streamed so only the requested
-sample window is retained. Missing values become `NaN` and appear as gaps;
-presets fail clearly when all required source fields are unavailable. Real
-time is used only when every selected sample has a valid timestamp; otherwise
-the entire x-axis falls back to sample numbers instead of mixing axis types.
-The RFC 3339 offset carried by the export is retained and included in the axis
-label, so moving an export to a host in another timezone does not change the
-displayed clock. If offsets change inside one selected window, the axis is
-normalized to UTC. Non-increasing wall-clock timestamps also fall back to
-sample numbers so lines never run backward across the x-axis.
-Known fields show their canonical output units in field listings and axis
-labels. Long axis labels for fields sharing one unit use `Value (unit)`;
-the legend keeps every field name. Space above the axes is measured from the
-rendered legend rather than estimated from its row count.
-Smoothing is sample-based and preserves a gap when the current sample
-is unavailable, so a failed read or offline CPU is not drawn as stale data.
-CPUs or groups with no primary-field data anywhere in the selected window are
-reported and skipped, while intermittent missing samples remain visible gaps.
-For two-axis CPU plots, an entity that lacks only the secondary field keeps its
-primary line; its empty secondary line is reported and skipped.
-`--group-by core` uses `(package, core)` identity so equal core IDs from
-different packages never merge. `--rank-by avg` is the arithmetic mean of the
-visible samples, not a duration-weighted time average.
-Summary rendering uses ten distinct colors, which covers every line in the
-complete `idle-lpi` preset without palette reuse. Both commands force a
-headless rendering backend and write through a temporary file in the output
-directory; the destination is atomically replaced only after a complete PNG,
-SVG, or PDF has been produced. Replacement preserves an existing image's
-permission bits; a new image uses the normal `0666 & ~umask` file mode.
+Source-tree entry points are `python3 scripts/plot_sum.py` and
+`python3 scripts/plot_cpu.py`. Both also accept JSON/CSV mixed exports that
+contain their required scope. Use their `--help` and input `--list-fields`.
+
+| Options | Use |
+|---|---|
+| `--preset`, or `--y` / `--y2` | Choose a metric preset or fields; do not combine them |
+| `--sample-range START:END` | One-based sample window; CSV retains only that window, JSON loads fully |
+| `--smooth N` | Rolling mean over N samples, preserving current missing samples |
+| `--cpu-filter`, `--top`, `--group-by node/core` | Limit CPU lines or group them |
+| `--aggregate avg/max/min`, `--rank-by avg/max/last` | CPU group aggregation and top-N ranking |
+| `--output`, `--output-dir`, `--format png/svg/pdf` | Output location and image format |
+
+Core grouping uses `(package, core)` identity. Average ranking is the arithmetic
+mean of visible samples, not duration weighted. Entities with no primary data
+are reported and skipped; a missing secondary field skips only that line.
+
+Loaders reject unsupported/fractional schema versions, duplicate JSON keys or
+CPU IDs, malformed sections, nonstandard numeric constants, noncontiguous
+intervals, duplicate CSV columns, and row-width mismatches. Oversized numbers
+outside floating-point range become gaps. Missing data and smoothing never
+substitute stale samples.
+
+Real time is used only when all selected timestamps are valid and increasing;
+otherwise the whole axis uses sample numbers. Export timezone offsets are
+preserved; changing offsets normalize to UTC. Parsing supports nine-digit
+fractions and compact offsets such as `+0800` on Python 3.10 while retaining
+original timestamp metadata.
+
+Fields/axes show canonical units; long same-unit labels use `Value (unit)` with
+field names in the legend. Legend space is measured after rendering, and the
+summary palette covers all ten idle/LPI lines. Headless rendering writes a
+temporary file beside the destination and replaces it atomically on success.
+Existing permissions are preserved; new files use `0666 & ~umask`. Directory
+or rendering failures report a clean error and preserve existing output.
 
 ## Build and validation
 
-Normal development gates are:
-
-```bash
-make clean
-make
-make test
-make debug-test
-make analyze
-```
-
-`make test` covers C calculation and policy tests, CLI/error-path tests,
-text/JSON/CSV contracts, streaming and plotting loaders, optional real plot
-rendering when matplotlib is installed, and build/install transitions. Set
-`ARMSTAT_REQUIRE_PLOT_RENDER=1` to turn a missing matplotlib dependency into a
-test failure; CI enables this gate after installing the dependency.
-`make debug-test` rebuilds and runs the suite with AddressSanitizer and
-UndefinedBehaviorSanitizer. `make analyze` selects GCC `-fanalyzer` or Clang
-`--analyze` according to the configured compiler. GCC analysis objects are
-isolated under `.armstat-analysis/`; Clang analysis does not publish objects.
-
-Out-of-tree builds use `O` and must keep generated files under that directory:
+| Command | Purpose |
+|---|---|
+| `make`, `make clean` | Release build / clean selected output |
+| `make test` | C/CLI/export/loader/streaming tests, optional render, build/install checks |
+| `make debug`, `make debug-test` | ASan/UBSan build / complete sanitizer suite |
+| `make analyze` | GCC path-sensitive analysis or Clang analyzer |
+| `make target-test` | ARM64 Linux runtime and capability checks |
 
 ```bash
 make O=/tmp/armstat-build
 /tmp/armstat-build/armstat --version
+make CROSS_COMPILE=aarch64-linux-gnu-
+ARMSTAT_REQUIRE_PLOT_RENDER=1 make test
 ```
 
-Tests suppress Python bytecode caches, including in child plotting processes.
-`make O=... clean` leaves source-directory caches untouched and cleans only the
-selected output directory. Build, test, debug, and analysis commands can
-therefore use a read-only source checkout with a writable `O` directory.
-An in-tree `make clean` also removes source-directory Python caches.
+Build standalone or under Linux `tools/power/armstat`. `O` isolates binaries,
+objects, dependency files, and tests. Configuration fingerprints include
+compiler/target, flags, and `VERSION`, preventing stale reuse across build
+changes; the selected binary is published atomically. Linux release builds
+enable stack protection, PIE, RELRO, and immediate binding. Analyzer output is
+separate and does not replace the release binary.
+
+Tests suppress Python caches. `make O=... clean` preserves source caches;
+in-tree clean removes them. A read-only source checkout can build/test with a
+writable `O`. Verify actual artifacts as well as command exit status.
 
 ### ARM64 target acceptance
 
-Host-independent tests cannot prove hardware behavior. On each supported
-Kunpeng ARM64 Linux deployment model, first inspect capabilities and then run:
+On each Kunpeng deployment model, inspect `--probe` and run under deployment
+permissions. Busy/Idle coherence is mandatory; frequency is required for every
+model claimed for deployment. Enable other capability requirements only when
+the platform promises them:
 
 ```bash
 ./armstat --probe
-make target-test
+ARMSTAT_REQUIRE_FREQ=1 make target-test
+ARMSTAT_REQUIRE_FREQ=1 ARMSTAT_REQUIRE_PMU=1 \
+ARMSTAT_SOAK_ITERATIONS=1000 ARMSTAT_SOAK_INTERVAL=1 make target-test
 ```
 
-The target test checks basic options, output failures, probe structure,
-default/summary/JSON/CSV execution, timestamps, missing values, process
-resources, and optional telemetry when explicitly required. Capability gates
-are enabled with:
+| Requirement flag | Checked capability |
+|---|---|
+| `ARMSTAT_REQUIRE_FREQ` | Positive summary frequency and at least one positive sample per selected CPU |
+| `ARMSTAT_REQUIRE_PMU` | Cycles, instructions, and IPC |
+| `ARMSTAT_REQUIRE_CPUIDLE` | Visible state-name mappings, summary residency, at least one valid CPU-scope `lpi0_usage` sample, plot ingestion |
+| `ARMSTAT_REQUIRE_POWER`, `ARMSTAT_REQUIRE_TEMP` | Power / temperature |
+| `ARMSTAT_REQUIRE_MEMBW`, `ARMSTAT_REQUIRE_UNCORE` | Memory bandwidth / uncore frequency |
 
-```bash
-ARMSTAT_REQUIRE_FREQ=1 \
-ARMSTAT_REQUIRE_PMU=1 \
-ARMSTAT_REQUIRE_CPUIDLE=1 \
-ARMSTAT_REQUIRE_POWER=1 \
-ARMSTAT_REQUIRE_TEMP=1 \
-ARMSTAT_REQUIRE_MEMBW=1 \
-ARMSTAT_REQUIRE_UNCORE=1 \
-make target-test
-```
+The target test also checks options, output failures, probe structure, text,
+JSON/CSV, timestamps, missing values, and resources. A soak checks Busy/Idle and
+every required capability's valid-sample ratio, defaulting to at least 95%.
+Tune `ARMSTAT_MIN_VALID_PERCENT`, `ARMSTAT_MAX_RSS_KIB`, `ARMSTAT_MAX_OPEN_FDS`,
+and `ARMSTAT_MAX_DIAGNOSTIC_LINES` as needed. If PMU is required without an
+explicit FD ceiling, the default covers two FDs per CPU plus an allowance.
 
-Busy/Idle coherence is a mandatory base gate. Set `ARMSTAT_REQUIRE_FREQ=1` on
-every Kunpeng model claimed for deployment: it requires a finite positive
-summary value and at least one finite positive `cpuinfo_cur_freq` sample for
-every tracked CPU. Set the other requirements only when that deployment
-platform promises the corresponding capability.
-
-A stability run can be requested with `ARMSTAT_SOAK_ITERATIONS` and
-`ARMSTAT_SOAK_INTERVAL`. It validates Busy/Idle plus every explicitly required
-capability across the entire capture. At least 95% of samples must be valid by
-default; configure this with `ARMSTAT_MIN_VALID_PERCENT`. Resource ceilings
-are configurable through `ARMSTAT_MAX_RSS_KIB`, `ARMSTAT_MAX_OPEN_FDS`, and
-`ARMSTAT_MAX_DIAGNOSTIC_LINES`. When PMU is required and no explicit fd ceiling
-is supplied, the test raises its default ceiling to at least two fds per
-tracked CPU plus a small process allowance, matching the two-event IPC group.
-
-With `ARMSTAT_REQUIRE_CPUIDLE=1`, the target gate verifies every visible
-`idle_state_N_name` probe mapping, summary residency, and at least one finite,
-non-negative per-CPU `lpi0_usage` sample. That sample is also passed through
-the CPU plotting loader, so the checked path covers collection, export, and
-plot ingestion rather than stopping at the text display.
-
-Before release, require all host gates, the capability-appropriate target
-test, valid default text plus `-S`, JSON and CSV samples, and a sustained run
-on the actual server. Container or virtual ARM64 execution proves portability
-and contracts, but not real PMU, cpuidle, power, temperature, or bandwidth
-semantics.
+Release acceptance requires host tests, analysis, sanitizer tests, real plots,
+capability-enforced target tests, inspected text/summary/JSON/CSV samples, and a
+sustained run on the physical server. VM/container results prove portability
+and contracts, not physical PMU, idle, power, temperature, or bandwidth behavior.
 
 ## Installation
 
-`make install` installs:
+```bash
+sudo make install
+make DESTDIR=/tmp/armstat-stage PREFIX=/usr install
+make DESTDIR=/tmp/armstat-stage PREFIX=/usr uninstall
+```
 
-- `armstat`, `armstat-plot-summary`, and `armstat-plot-cpu` under
-  `PREFIX/bin`;
-- `man/armstat.8` under `PREFIX/share/man/man8`;
-- the README pair under `PREFIX/share/doc/armstat` and this reference pair
-  under `PREFIX/share/doc/armstat/docs`;
-- shared plotting modules under `PREFIX/share/armstat`.
-
-The default `PREFIX` is `/usr`; staging with `DESTDIR` is supported.
+Default `PREFIX` is `/usr`. Installation places the collector and two plot
+commands in `bin`, shared plot modules in `share/armstat`, the manual in
+`share/man/man8`, and README/reference pairs, `VERSION`, and unmodified
+`COPYING` under `share/doc/armstat`.
 
 ## Documentation maintenance
 
-Keep user-visible behavior synchronized in this order:
+Keep behavior updates synchronized in this order:
 
 ```text
 code -> README.md -> README.zh-CN.md -> man/armstat.8
      -> docs/REFERENCE.md -> docs/REFERENCE.zh-CN.md -> tests
 ```
 
-Prefer updating an existing section over creating another Markdown file. A new
-document is justified only when it has a distinct audience, lifecycle, or
-installation destination that cannot be served by the README, manual page, or
-this reference.
+Keep usage in README, full formulas/contracts here, options in the manual, and
+contribution rules in AGENTS.md. Update existing documents before adding a
+file; retain meaningful limits and failure behavior when shortening prose.

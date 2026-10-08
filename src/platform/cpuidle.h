@@ -9,7 +9,7 @@
 struct idle_state {
 	unsigned long long time;	/* microseconds */
 	unsigned long long usage;	/* entry count (cumulative) */
-	double percentage;
+	double percentage;		/* time delta / interval * 100, may exceed 100 */
 	double usage_per_sec;		/* stateN/usage delta per second */
 	int time_valid;
 	int usage_valid;
@@ -28,8 +28,8 @@ void close_cpuidle(void);
 
 /*
  * Enable/disable cpuidle monitoring
- * armstat prefers cpuidle when it is available; disabling it forces the
- * collector to fall back to /proc/stat for Idle%/Busy%.
+ * This controls per-state residency and usage only. Busy/Idle uses its own
+ * procstat/schedstat policy regardless of cpuidle availability.
  */
 void enable_cpuidle(int enable);
 
@@ -38,7 +38,8 @@ int is_cpuidle_enabled(void);
 
 /*
  * Pure interval helpers. Invalid baselines, zero-length intervals, and counter
- * resets return NAN; residency is capped at 100%.
+ * resets return NAN. Preserve residency above 100% from delayed state-exit
+ * accounting; do not normalize it to Busy/Idle.
  */
 double cpuidle_residency_percent(unsigned long long current, int current_valid,
 				 unsigned long long previous, int previous_valid,

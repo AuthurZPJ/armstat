@@ -55,9 +55,9 @@ class PlotLoaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "oversized.json"
             path.write_text(json.dumps([
-                {"schema_version": 8, "interval": 1,
+                {"schema_version": 9, "interval": 1,
                  "summary": {"power": 10 ** 400}},
-                {"schema_version": 8, "interval": 2,
+                {"schema_version": 9, "interval": 2,
                  "summary": {"power": 1000}},
             ]), encoding="utf-8")
             series = armstat_loader.load_summary_series(path)
@@ -178,13 +178,13 @@ class PlotLoaderTests(unittest.TestCase):
     def test_partial_timestamps_fall_back_to_one_sample_axis(self):
         data = [
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "interval": 1,
                 "timestamp": 1774665600,
                 "summary": {"freq": 2100.0},
             },
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "interval": 2,
                 "timestamp": None,
                 "summary": {"freq": 2200.0},
@@ -212,7 +212,7 @@ class PlotLoaderTests(unittest.TestCase):
 
     def test_fractional_cpu_ids_are_rejected(self):
         data = [{
-            "schema_version": 8,
+            "schema_version": 9,
             "interval": 1,
             "cpus": [{"cpu": 0.5, "freq": 2200.0}],
         }]
@@ -225,7 +225,7 @@ class PlotLoaderTests(unittest.TestCase):
 
     def test_duplicate_cpu_ids_are_rejected(self):
         json_data = [{
-            "schema_version": 8,
+            "schema_version": 9,
             "interval": 1,
             "cpus": [
                 {"cpu": 4, "freq": 2100.0},
@@ -234,8 +234,8 @@ class PlotLoaderTests(unittest.TestCase):
         }]
         csv_data = (
             "schema_version,interval,timestamp,CPU,freq\n"
-            "8,1,1774665600,4,2100\n"
-            "8,1,1774665600,4,2200\n"
+            "9,1,1774665600,4,2100\n"
+            "9,1,1774665600,4,2200\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -253,17 +253,17 @@ class PlotLoaderTests(unittest.TestCase):
         malformed_inputs = {
             "duplicate column": (
                 "schema_version,interval,Scope,freq,freq\n"
-                "8,1,SUM,2100,2200\n",
+                "9,1,SUM,2100,2200\n",
                 "duplicate summary CSV columns: freq",
             ),
             "extra cell": (
                 "schema_version,interval,Scope,freq\n"
-                "8,1,SUM,2100,unexpected\n",
+                "9,1,SUM,2100,unexpected\n",
                 "contains more cells than its CSV header",
             ),
             "missing cell": (
                 "schema_version,interval,Scope,freq\n"
-                "8,1,SUM\n",
+                "9,1,SUM\n",
                 "contains fewer cells than its CSV header",
             ),
         }
@@ -278,8 +278,8 @@ class PlotLoaderTests(unittest.TestCase):
     def test_csv_range_still_rejects_damage_outside_selected_window(self):
         content = (
             "schema_version,interval,Scope,freq\n"
-            "8,1,SUM,2100\n"
-            "8,2,SUM\n"
+            "9,1,SUM,2100\n"
+            "9,2,SUM\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -290,13 +290,13 @@ class PlotLoaderTests(unittest.TestCase):
 
     def test_noncontiguous_intervals_are_rejected(self):
         json_data = [
-            {"schema_version": 8, "interval": 1, "summary": {"freq": 2100}},
-            {"schema_version": 8, "interval": 3, "summary": {"freq": 2200}},
+            {"schema_version": 9, "interval": 1, "summary": {"freq": 2100}},
+            {"schema_version": 9, "interval": 3, "summary": {"freq": 2200}},
         ]
         csv_data = (
             "schema_version,interval,Scope,freq\n"
-            "8,1,SUM,2100\n"
-            "8,3,SUM,2200\n"
+            "9,1,SUM,2100\n"
+            "9,3,SUM,2200\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -313,39 +313,39 @@ class PlotLoaderTests(unittest.TestCase):
     def test_malformed_json_structure_is_rejected_cleanly(self):
         malformed_inputs = {
             "non-object sample": (
-                '[{"schema_version": 8, "interval": 1, '
+                '[{"schema_version": 9, "interval": 1, '
                 '"summary": {"freq": 2100}}, 7]',
                 plot_sum.load_summary_series,
                 "sample 2 is not a JSON object",
             ),
             "missing summary": (
-                '[{"schema_version": 8, "interval": 1, "cpus": []}]',
+                '[{"schema_version": 9, "interval": 1, "cpus": []}]',
                 plot_sum.load_summary_series,
                 "does not contain a summary object",
             ),
             "missing cpus": (
-                '[{"schema_version": 8, "interval": 1, "summary": {}}]',
+                '[{"schema_version": 9, "interval": 1, "summary": {}}]',
                 plot_cpu.load_cpu_series,
                 "does not contain a cpus array",
             ),
             "non-object CPU row": (
-                '[{"schema_version": 8, "interval": 1, "cpus": [4]}]',
+                '[{"schema_version": 9, "interval": 1, "cpus": [4]}]',
                 plot_cpu.load_cpu_series,
                 "CPU entry 1 is not a JSON object",
             ),
             "empty CPU rows": (
-                '[{"schema_version": 8, "interval": 1, "cpus": []}]',
+                '[{"schema_version": 9, "interval": 1, "cpus": []}]',
                 plot_cpu.load_cpu_series,
                 "does not contain any CPU rows",
             ),
             "duplicate JSON key": (
-                '[{"schema_version": 8, "summary": '
+                '[{"schema_version": 9, "summary": '
                 '{"freq": 2100, "freq": 2200}}]',
                 plot_sum.load_summary_series,
                 "duplicate JSON key 'freq'",
             ),
             "non-standard JSON number": (
-                '[{"schema_version": 8, "summary": {"freq": NaN}}]',
+                '[{"schema_version": 9, "summary": {"freq": NaN}}]',
                 plot_sum.load_summary_series,
                 "non-standard JSON constant 'NaN'",
             ),
@@ -357,6 +357,46 @@ class PlotLoaderTests(unittest.TestCase):
                 path.write_text(content, encoding="utf-8")
                 with self.assertRaisesRegex(SystemExit, message):
                     loader(path)
+
+    def test_lpi_values_above_100_survive_json_and_csv(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = Path(tmpdir) / "lpi.json"
+            csv_path = Path(tmpdir) / "lpi.csv"
+            json_path.write_text(json.dumps([{
+                "schema_version": 9, "interval": 1,
+                "summary": {"idle_percent": 80, "lpi0": 125},
+                "cpus": [{"cpu": 0, "lpi0": 200}],
+            }]), encoding="utf-8")
+            csv_path.write_text(
+                "schema_version,interval,Scope,CPU,Package,summary.lpi0,cpu.lpi0\n"
+                "9,1,SUM,,,125,\n"
+                "9,1,CPU,0,,,200\n", encoding="utf-8",
+            )
+            for path in (json_path, csv_path):
+                summary = plot_sum.load_summary_series(path)
+                cpus = plot_cpu.load_cpu_series(path)
+                self.assertEqual(plot_sum.extract_series(summary.rows, "lpi0"), [125])
+                self.assertEqual(float(cpus.samples[0][0]["lpi0"]), 200)
+
+    def test_old_residual_lpi_schema_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = Path(tmpdir) / "old.json"
+            csv_path = Path(tmpdir) / "old.csv"
+            json_path.write_text(json.dumps([{
+                "schema_version": 8, "interval": 1,
+                "summary": {"lpi0": 80},
+                "cpus": [{"cpu": 0, "lpi0": 80}],
+            }]), encoding="utf-8")
+            csv_path.write_text(
+                "schema_version,interval,Scope,CPU,Package,summary.lpi0,cpu.lpi0\n"
+                "8,1,SUM,,,80,\n"
+                "8,1,CPU,0,,,80\n", encoding="utf-8",
+            )
+            for path in (json_path, csv_path):
+                for loader in (plot_sum.load_summary_series,
+                               plot_cpu.load_cpu_series):
+                    with self.assertRaisesRegex(SystemExit, "schema_version=8"):
+                        loader(path)
 
     def test_schema_version_is_required_and_integral(self):
         invalid_versions = (None, 8.9, "8.5", float("inf"))
@@ -391,7 +431,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_legacy_summary_csv_layout_is_rejected(self):
         content = (
             "schema_version,interval,timestamp,timestamp_iso,SUM,freq\n"
-            "8,1,1774665600,2026-03-28T10:40:00+0800,SUM,2200\n"
+            "9,1,1774665600,2026-03-28T10:40:00+0800,SUM,2200\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -403,7 +443,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_summary_json_loader_accepts_schema_version(self):
         data = [
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "interval": 1,
                 "duration_us": 1000123,
                 "timestamp": 1774665600,
@@ -436,7 +476,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_summary_freq_preset_includes_uncore_when_available(self):
         data = [
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "interval": 1,
                 "timestamp": 1774665600,
                 "summary": {
@@ -470,12 +510,12 @@ class PlotLoaderTests(unittest.TestCase):
     def test_json_sample_range_recomputes_available_fields(self):
         data = [
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "interval": 1,
                 "summary": {"freq": 2200.0},
             },
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "interval": 2,
                 "summary": {"freq": None, "power": 120000.0},
             },
@@ -518,7 +558,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_summary_csv_loader_accepts_canonical_fields(self):
         content = (
             "schema_version,interval,timestamp,timestamp_iso,Scope,freq,busy_percent\n"
-            "8,1,1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1.00\n"
+            "9,1,1774665600,2026-03-28T10:40:00+0800,SUM,2200.00,1.00\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -534,7 +574,7 @@ class PlotLoaderTests(unittest.TestCase):
         content = (
             "schema_version,interval,duration_us,timestamp,timestamp_ns,"
             "timestamp_iso,Scope,freq,busy_percent\n"
-            "8,1,1000123,1774665600,1774665600123456789,"
+            "9,1,1000123,1774665600,1774665600123456789,"
             "2026-03-28T10:40:00.123456789+08:00,SUM,2200.00,1.00\n"
         )
 
@@ -554,7 +594,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_summary_csv_loader_accepts_high_lpi_columns(self):
         content = (
             "schema_version,interval,timestamp,timestamp_iso,Scope,lpi4\n"
-            "8,1,1774665600,2026-03-28T10:40:00+0800,SUM,12.50\n"
+            "9,1,1774665600,2026-03-28T10:40:00+0800,SUM,12.50\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -568,9 +608,9 @@ class PlotLoaderTests(unittest.TestCase):
     def test_summary_csv_loader_accepts_mixed_scope_csv(self):
         content = (
             "schema_version,interval,timestamp,timestamp_ns,timestamp_iso,Scope,CPU,Package,summary.power,package.freq,cpu.freq,summary.pmu.cycles,cpu.pmu.cycles\n"
-            "8,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,SUM,,,120000,,,999,\n"
-            "8,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,PKG,,0,,2200.00,,,\n"
-            "8,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,CPU,0,,,,2200.00,,123\n"
+            "9,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,SUM,,,120000,,,999,\n"
+            "9,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,PKG,,0,,2200.00,,,\n"
+            "9,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,CPU,0,,,,2200.00,,123\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -585,12 +625,12 @@ class PlotLoaderTests(unittest.TestCase):
     def test_summary_csv_range_counts_only_summary_rows(self):
         content = (
             "schema_version,interval,timestamp,timestamp_ns,timestamp_iso,Scope,CPU,Package,summary.power,package.freq,cpu.freq\n"
-            "8,1,1774665600,1774665600100000000,,SUM,,,100,,\n"
-            "8,1,1774665600,1774665600100000000,,PKG,,0,,2200,\n"
-            "8,1,1774665600,1774665600100000000,,CPU,0,,,,2200\n"
-            "8,2,1774665600,1774665600200000000,,SUM,,,200,,\n"
-            "8,2,1774665600,1774665600200000000,,PKG,,0,,2300,\n"
-            "8,2,1774665600,1774665600200000000,,CPU,0,,,,2300\n"
+            "9,1,1774665600,1774665600100000000,,SUM,,,100,,\n"
+            "9,1,1774665600,1774665600100000000,,PKG,,0,,2200,\n"
+            "9,1,1774665600,1774665600100000000,,CPU,0,,,,2200\n"
+            "9,2,1774665600,1774665600200000000,,SUM,,,200,,\n"
+            "9,2,1774665600,1774665600200000000,,PKG,,0,,2300,\n"
+            "9,2,1774665600,1774665600200000000,,CPU,0,,,,2300\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -604,7 +644,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_cpu_json_loader_accepts_schema_version(self):
         data = [
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "interval": 1,
                 "timestamp": 1774665600,
                 "cpus": [
@@ -633,7 +673,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_cpu_csv_loader_accepts_canonical_fields(self):
         content = (
             "schema_version,interval,timestamp,timestamp_iso,CPU,freq,busy_percent,temp\n"
-            "8,1,1774665600,2026-03-28T10:40:00+0800,0,2200.00,1.00,45.00\n"
+            "9,1,1774665600,2026-03-28T10:40:00+0800,0,2200.00,1.00,45.00\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -648,7 +688,7 @@ class PlotLoaderTests(unittest.TestCase):
     def test_cpu_csv_loader_accepts_high_lpi_usage_columns(self):
         content = (
             "schema_version,interval,timestamp,timestamp_iso,CPU,lpi4_usage\n"
-            "8,1,1774665600,2026-03-28T10:40:00+0800,0,12.50\n"
+            "9,1,1774665600,2026-03-28T10:40:00+0800,0,12.50\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -665,9 +705,9 @@ class PlotLoaderTests(unittest.TestCase):
     def test_cpu_csv_loader_accepts_mixed_scope_csv(self):
         content = (
             "schema_version,interval,timestamp,timestamp_ns,timestamp_iso,Scope,CPU,Package,summary.power,package.freq,cpu.freq,summary.pmu.cycles,cpu.pmu.cycles\n"
-            "8,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,SUM,,,120000,,,999,\n"
-            "8,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,PKG,,0,,2200.00,,,\n"
-            "8,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,CPU,0,,,,2200.00,,123\n"
+            "9,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,SUM,,,120000,,,999,\n"
+            "9,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,PKG,,0,,2200.00,,,\n"
+            "9,1,1774665600,1774665600123456789,2026-03-28T10:40:00.123456789+0800,CPU,0,,,,2200.00,,123\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -682,9 +722,9 @@ class PlotLoaderTests(unittest.TestCase):
     def test_cpu_csv_range_exposes_only_selected_cpu_ids(self):
         content = (
             "schema_version,interval,timestamp,timestamp_ns,timestamp_iso,CPU,freq\n"
-            "8,1,1774665600,1774665600100000000,,0,2100\n"
-            "8,2,1774665600,1774665600200000000,,1,2200\n"
-            "8,3,1774665600,1774665600300000000,,2,2300\n"
+            "9,1,1774665600,1774665600100000000,,0,2100\n"
+            "9,2,1774665600,1774665600200000000,,1,2200\n"
+            "9,3,1774665600,1774665600300000000,,2,2300\n"
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:

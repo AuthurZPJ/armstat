@@ -1,49 +1,32 @@
 # Project Instructions
 
-This file provides context for AI assistants working on this project.
+`armstat` is a C monitor for ARM64 Linux servers, in the style of `turbostat`.
+It reads sysfs/procfs/hwmon/perf interfaces through a collect → aggregate →
+format pipeline. PMU usually needs root or permissive `perf_event_paranoid`.
+Compile-time limits: `MAX_CPUS = 1024`, `MAX_PMU_EVENTS = 16`.
 
-## Project Type
+## Build and Test
 
-C (Linux kernel style), ARM64 server monitoring tool (`turbostat`-like).
+| Command | Purpose |
+|---|---|
+| `make`, `make clean` | Build with `-O2 -Wall -Wextra`; clean artifacts |
+| `make debug`, `make debug-test` | ASan/UBSan build; sanitizer tests |
+| `make test` | All regression and smoke tests |
+| `make analyze` | GCC/Clang path-sensitive analysis |
+| `make target-test` | ARM64 Linux runtime acceptance |
+| `make install`, `make uninstall` | Install/remove under `PREFIX` (default `/usr`) |
 
-## Build/Test Commands
+Use `CROSS_COMPILE=aarch64-linux-gnu-` for cross builds and `O=/path/to/output`
+for out-of-tree builds. Tests must pass; host structural/export checks do not
+prove ARM telemetry behavior. Validate runtime metrics on the target hardware.
 
-```bash
-make              # Build armstat binary (default: -O2 -Wall -Wextra)
-make clean        # Clean build artifacts
-make debug        # Rebuild with AddressSanitizer + UBSan (-g -O0)
-make test         # Run all tests
-make analyze      # Run GCC or Clang path-sensitive static analysis
-make install      # Install to PREFIX (default /usr)
-make uninstall    # Remove installed files
-```
+## Code and Documentation
 
-Cross-compilation: set `CROSS_COMPILE` (e.g. `CROSS_COMPILE=aarch64-linux-gnu-`).
-Out-of-tree build: `make O=/path/to/output`.
-
-### Documentation
-See README.md for user-facing usage. Architecture, exports, plotting, and
-release validation are consolidated in `docs/REFERENCE.md` and
-`docs/REFERENCE.zh-CN.md`. The man page is `man/armstat.8`.
-
-## Guidelines
-
-- Follow existing code style and patterns (Linux kernel C style, tabs, snake_case)
-- SPDX license headers on source files
-- `-Wall -Wextra` enforced; `-D_FORTIFY_SOURCE=2` in default builds
-- Write tests for new functionality (add to existing test files in tests/)
-- Smoke tests must pass (`make test`)
-- Keep changes focused and atomic
-- When behavior changes, update all documentation in order:
-  Code → README → README.zh-CN → man/armstat.8 → docs/REFERENCE
-  → docs/REFERENCE.zh-CN → tests
-- Prefer extending the existing README/reference over adding Markdown files
-
-## Important Notes
-
-- Target platform: ARM64 Linux servers (sysfs/procfs/hwmon/perf_event_open)
-- MAX_CPUS = 1024, MAX_PMU_EVENTS = 16 (compile-time constants)
-- Three-stage pipeline: collect → aggregate → format
-- PMU monitoring usually requires root or permissive perf_event_paranoid
-- Tests validate code structure and export contracts only; ARM runtime
-  behavior requires manual validation on target hardware
+- Follow existing Linux kernel C style: tabs, snake_case, SPDX source headers.
+- Preserve `-Wall -Wextra` and default `-D_FORTIFY_SOURCE=2` checks.
+- Keep changes focused and atomic; add new functionality tests to `tests/`.
+- For behavior changes, update in order: code → README.md → README.zh-CN.md
+  → man/armstat.8 → docs/REFERENCE.md → docs/REFERENCE.zh-CN.md → tests.
+- Extend existing documents before adding Markdown files. README covers use;
+  the reference pair covers architecture, formulas, exports, plotting, and
+  release validation; `man/armstat.8` is the installed CLI manual.

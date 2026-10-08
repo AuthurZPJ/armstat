@@ -550,13 +550,9 @@ double cpuidle_residency_percent(unsigned long long current, int current_valid,
 				 unsigned long long previous, int previous_valid,
 				 unsigned long long elapsed_us)
 {
-	double percentage = cpuidle_delta_rate(current, current_valid,
-						 previous, previous_valid,
-						 elapsed_us, 100.0);
-
-	if (percentage > 100.0)
-		percentage = 100.0;
-	return percentage;
+	/* State-exit accounting may charge earlier intervals to this delta. */
+	return cpuidle_delta_rate(current, current_valid, previous, previous_valid,
+				 elapsed_us, 100.0);
 }
 
 double cpuidle_usage_per_sec(unsigned long long current, int current_valid,

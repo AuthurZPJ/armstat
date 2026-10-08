@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * idle_display.c - LPI residual display rule
+ * idle_display.c - Select independent cpuidle interval percentages
  *
  * See idle_display.h for the interface contract.
  */
@@ -9,15 +9,6 @@
 #include <stddef.h>
 
 #include "idle_display.h"
-
-static double clamp_percent(double pct)
-{
-	if (pct < 0.0)
-		return 0.0;
-	if (pct > 100.0)
-		return 100.0;
-	return pct;
-}
 
 static const struct idle_state *get_usable_state(
 	const struct idle_state **idle_matrix,
@@ -43,54 +34,17 @@ void compute_idle_state_display(double out[MAX_VISIBLE_IDLE_STATES],
 				const struct idle_state **idle_matrix,
 				int cpu_idx,
 				int state_count,
-				double idle_pct,
-				const int *visible,
-				int summary_mode)
+				const int *visible)
 {
-	double remaining = idle_pct;
-	int last_state = -1;
-	int data_complete = !isnan(idle_pct);
-	double hidden_value = summary_mode ? 0.0 : NAN;
-
 	if (state_count > MAX_VISIBLE_IDLE_STATES)
 		state_count = MAX_VISIBLE_IDLE_STATES;
-
-	for (int s = state_count - 1; s >= 0; s--) {
-		const struct idle_state *state =
-			get_usable_state(idle_matrix, cpu_idx, s, state_count);
-
-		if (state && visible[s]) {
-			if (isnan(state->percentage))
-				data_complete = 0;
-			if (last_state < 0)
-				last_state = s;
-		}
-	}
 
 	for (int s = 0; s < MAX_VISIBLE_IDLE_STATES; s++) {
 		const struct idle_state *state =
 			get_usable_state(idle_matrix, cpu_idx, s, state_count);
-		double displayed;
 
-		if (s >= state_count || !state || !visible[s]) {
-			out[s] = hidden_value;
-			continue;
-		}
-		if (!data_complete) {
-			out[s] = NAN;
-			continue;
-		}
-
-		if (s == last_state) {
-			displayed = remaining;
-		} else {
-			displayed = clamp_percent(state->percentage);
-			if (displayed > remaining)
-				displayed = remaining;
-			remaining -= displayed;
-			if (remaining < 0.0)
-				remaining = 0.0;
-		}
-		out[s] = clamp_percent(displayed);
+		out[s] = state && visible && visible[s] &&
+			isfinite(state->percentage) && state->percentage >= 0.0 ?
+			state->percentage : NAN;
 	}
 }

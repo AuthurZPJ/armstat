@@ -52,7 +52,7 @@ def main() -> int:
 
         summary_path.write_text(json.dumps([
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "interval": interval,
                 "duration_us": 1_000_000,
                 "timestamp": 1_774_665_600 + interval,
@@ -62,7 +62,8 @@ def main() -> int:
                     "temp0": 45.0 + interval,
                     "busy_percent": 40.0 + interval,
                     "idle_percent": 60.0 - interval,
-                    **{f"lpi{state}": (60.0 - interval) * (state + 1) / 36.0
+                    **{f"lpi{state}": (125.0 if state == 7 else
+                                     (60.0 - interval) * (state + 1) / 36.0)
                        for state in range(8)},
                 },
             }
@@ -71,7 +72,7 @@ def main() -> int:
 
         cpu_path.write_text(json.dumps([
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "interval": interval,
                 "duration_us": 1_000_000,
                 "timestamp": 1_774_665_600 + interval,

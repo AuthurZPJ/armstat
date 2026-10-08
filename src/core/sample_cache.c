@@ -430,9 +430,7 @@ static void collect_power_and_temp_snapshot(struct sys_snapshot *snapshot)
 	}
 }
 
-static void collect_system_counter_snapshot(
-	struct sys_snapshot *snapshot,
-	unsigned int idle_residency_mask)
+static void collect_system_counter_snapshot(struct sys_snapshot *snapshot)
 {
 	static unsigned long long procstat_idles[MAX_CPUS];
 	static unsigned long long procstat_iowaits[MAX_CPUS];
@@ -442,8 +440,7 @@ static void collect_system_counter_snapshot(
 	int procstat_limit;
 	int schedstat_limit = -1;
 	int tracked = get_tracked_cpu_count();
-	int need_idle = is_idle_enabled() || is_iowait_enabled() ||
-		idle_residency_mask;
+	int need_idle = is_idle_enabled() || is_iowait_enabled();
 
 	memset(procstat_idles, 0, sizeof(procstat_idles));
 	memset(procstat_iowaits, 0, sizeof(procstat_iowaits));
@@ -589,7 +586,7 @@ static void collect_sample_data(struct sys_snapshot *snapshot)
 	collect_idle_snapshot(snapshot, tracked, snapshot->interval_delta_us,
 			      idle_residency_mask, idle_usage_mask);
 	collect_power_and_temp_snapshot(snapshot);
-	collect_system_counter_snapshot(snapshot, idle_residency_mask);
+	collect_system_counter_snapshot(snapshot);
 	collect_pmu_snapshot(snapshot, tracked);
 }
 

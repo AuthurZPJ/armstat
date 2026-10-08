@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Unit tests for core calculation logic: aggregator idle%, LPI residual.
+ * Unit tests for core calculation logic: aggregator idle%, cpuidle interval accounting.
  *
  * These tests use synthetic sys_snapshot data so they run without real
  * hardware. They validate the formulas, not the data sources.
@@ -127,9 +127,9 @@ static void test_checked_string_reader_rejects_truncation(void)
 	assert(unlink(path) == 0);
 }
 
-static void test_incomplete_idle_state_data_stays_unavailable(void)
+static void test_idle_states_are_independent(void)
 {
-	struct idle_state states[2];
+	struct idle_state states[MAX_VISIBLE_IDLE_STATES + 1];
 	const struct idle_state *matrix[1] = {states};
 	double out[MAX_VISIBLE_IDLE_STATES];
 	int visible[MAX_VISIBLE_IDLE_STATES] = {1, 1};
@@ -138,15 +138,39 @@ static void test_incomplete_idle_state_data_stays_unavailable(void)
 	states[0].available = 1;
 	states[0].percentage = 20.0;
 	states[1].available = 1;
+	states[1].percentage = 60.0;
+	states[MAX_VISIBLE_IDLE_STATES].available = 1;
+	states[MAX_VISIBLE_IDLE_STATES].percentage = 30.0;
+
+	compute_idle_state_display(out, matrix, 0,
+				   MAX_VISIBLE_IDLE_STATES + 1, visible);
+	assert(out[0] == 20.0 && out[1] == 60.0);
+	assert(isnan(out[2]));
+
+	/* Column selection and unavailable neighbors do not redistribute time. */
+	visible[0] = 0;
+	compute_idle_state_display(out, matrix, 0, 2, visible);
+	assert(isnan(out[0]) && out[1] == 60.0);
+	visible[0] = 1;
 	states[1].percentage = NAN;
+	compute_idle_state_display(out, matrix, 0, 2, visible);
+	assert(out[0] == 20.0 && isnan(out[1]));
+	states[1].percentage = 200.0;
+	compute_idle_state_display(out, matrix, 0, 2, visible);
+	assert(out[0] == 20.0 && out[1] == 200.0);
+	states[1].disabled = 1;
+	compute_idle_state_display(out, matrix, 0, 2, visible);
+	assert(out[0] == 20.0 && isnan(out[1]));
 
-	compute_idle_state_display(out, matrix, 0, 2, 80.0, visible, 0);
+	/* Invalid inputs and absent CPUs stay unavailable. */
+	states[0].percentage = INFINITY;
+	compute_idle_state_display(out, matrix, 0, 2, visible);
 	assert(isnan(out[0]));
-	assert(isnan(out[1]));
-
-	compute_idle_state_display(out, matrix, 0, 2, 80.0, visible, 1);
+	states[0].percentage = -1.0;
+	compute_idle_state_display(out, matrix, 0, 2, visible);
 	assert(isnan(out[0]));
-	assert(isnan(out[1]));
+	compute_idle_state_display(out, NULL, 0, 2, visible);
+	assert(isnan(out[0]) && isnan(out[1]));
 }
 
 static void test_cpuidle_interval_delta_helpers(void)
@@ -157,7 +181,10 @@ static void test_cpuidle_interval_delta_helpers(void)
 	assert(cpuidle_residency_percent(600000, 1, 100000, 1,
 					 1000000) == 50.0);
 	assert(cpuidle_residency_percent(2100000, 1, 100000, 1,
-					 1000000) == 100.0);
+					 1000000) == 200.0);
+	/* A continuous idle period is charged only when the state exits. */
+	assert(cpuidle_residency_percent(100000, 1, 100000, 1,
+					 1000000) == 0.0);
 
 	assert(isnan(cpuidle_usage_per_sec(12, 0, 10, 1, 1000000)));
 	assert(isnan(cpuidle_usage_per_sec(8, 1, 10, 1, 1000000)));
@@ -949,7 +976,7 @@ int main(void)
 {
 	test_checked_numeric_readers_reject_malformed_values();
 	test_checked_string_reader_rejects_truncation();
-	test_incomplete_idle_state_data_stays_unavailable();
+	test_idle_states_are_independent();
 	test_cpuidle_interval_delta_helpers();
 	test_frequency_sample_handles_max_value();
 	test_aggregator_idle_100_pct();
