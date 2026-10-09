@@ -44,6 +44,11 @@ static void test_static_default_column_state_inherits_group_visibility(void)
 	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "freq"));
 	assert(scope_has_field(FIELD_SCOPE_CPU, "freq"));
 	assert(scope_has_field(FIELD_SCOPE_CPU, "idle_percent"));
+	assert(scope_has_field(FIELD_SCOPE_CPU, "package"));
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "min"));
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "governor"));
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "lpi0_usage"));
+	assert(section_emit_package() == 0);
 	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "uncore_freq"));
 	assert(power->scope == FIELD_SCOPE_SYSTEM);
 }
@@ -78,9 +83,11 @@ static void test_hide_exact_summary_field_keeps_group_alive(void)
 static void test_hide_exact_cpu_field_keeps_group_alive(void)
 {
 	reset_columns();
+	enable_freq_config(1);
 	parse_column_option("boost", 0);
 
 	assert(show_freq == 1);
+	assert(show_freq_config == 1);
 	assert(scope_has_field(FIELD_SCOPE_CPU, "freq"));
 	assert(scope_has_field(FIELD_SCOPE_CPU, "governor"));
 	assert(!scope_has_field(FIELD_SCOPE_CPU, "boost"));
@@ -110,6 +117,26 @@ static void test_show_exact_package_field_enables_package_section(void)
 	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "freq"));
 	assert(!scope_has_field(FIELD_SCOPE_CPU, "freq"));
 	assert(section_emit_package() == 1);
+}
+
+static void test_explicit_package_group_and_hide_control_output(void)
+{
+	reset_columns();
+	assert(parse_column_option("pkg", 1) == 0);
+	assert(section_emit_package() == 1);
+
+	clear_columns();
+	assert(parse_column_option("package", 1) == 0);
+	assert(section_emit_package() == 1);
+
+	set_all_columns_enabled(1);
+	clear_field_overrides();
+	assert(parse_column_option("pkg", 0) == 0);
+	assert(section_emit_cpu() == 1);
+	assert(section_emit_default_summary() == 1);
+	assert(section_emit_package() == 0);
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "package"));
+	assert(scope_has_field(FIELD_SCOPE_CPU, "freq"));
 }
 
 static void test_show_idle_percent_does_not_reenable_split_lpi_fields(void)
@@ -200,7 +227,9 @@ static void test_all_columns_enable_base_groups_but_not_pmu_or_ipc(void)
 
 	assert(show_cpu == 1);
 	assert(show_freq == 1);
+	assert(show_freq_config == 1);
 	assert(show_idle == 1);
+	assert(show_idle_usage == 1);
 	assert(show_power == 1);
 	assert(show_temp == 1);
 	assert(show_sysstat == 1);
@@ -242,7 +271,9 @@ static void test_hide_all_turns_off_explicit_pmu_and_ipc(void)
 
 	assert(show_cpu == 0);
 	assert(show_freq == 0);
+	assert(show_freq_config == 0);
 	assert(show_idle == 0);
+	assert(show_idle_usage == 0);
 	assert(show_power == 0);
 	assert(show_temp == 0);
 	assert(show_sysstat == 0);
@@ -255,6 +286,142 @@ static void test_hide_all_turns_off_explicit_pmu_and_ipc(void)
 	assert(show_ipc == 0);
 }
 
+static void test_groups_ignore_case_and_separate_frequency_configuration(void)
+{
+	clear_columns();
+	assert(parse_column_option("FrEq", 1) == 0);
+	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "freq"));
+	assert(scope_has_field(FIELD_SCOPE_CPU, "freq"));
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "min"));
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "governor"));
+	assert(section_emit_cpu() == 0);
+	assert(section_emit_package() == 0);
+
+	assert(parse_column_option("FREQ-CONFIG", 1) == 0);
+	assert(section_emit_cpu() == 1);
+	assert(section_emit_package() == 0);
+	assert(scope_has_field(FIELD_SCOPE_CPU, "min"));
+	assert(scope_has_field(FIELD_SCOPE_CPU, "max"));
+	assert(scope_has_field(FIELD_SCOPE_CPU, "governor"));
+	assert(scope_has_field(FIELD_SCOPE_CPU, "boost"));
+	assert(parse_column_option("freq-config", 0) == 0);
+	assert(scope_has_field(FIELD_SCOPE_CPU, "freq"));
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "min"));
+}
+
+static void test_stable_ids_select_one_scope_and_aliases_keep_rows_opt_in(void)
+{
+	clear_columns();
+	assert(parse_column_option("idle_percent", 1) == 0);
+	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "idle_percent"));
+	assert(!scope_has_field(FIELD_SCOPE_CPU, "idle_percent"));
+	assert(!scope_has_field(FIELD_SCOPE_PACKAGE, "idle_percent"));
+	assert(section_emit_cpu() == 0);
+	assert(section_emit_package() == 0);
+
+	clear_columns();
+	assert(parse_column_option("cpu_busy_percent", 1) == 0);
+	assert(scope_has_field(FIELD_SCOPE_CPU, "busy_percent"));
+	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "busy_percent"));
+	assert(!scope_has_field(FIELD_SCOPE_PACKAGE, "busy_percent"));
+	assert(section_emit_cpu() == 1);
+	assert(section_emit_package() == 0);
+
+	clear_columns();
+	assert(parse_column_option("Busy%", 1) == 0);
+	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "busy_percent"));
+	assert(scope_has_field(FIELD_SCOPE_CPU, "busy_percent"));
+	assert(section_emit_cpu() == 0);
+	assert(section_emit_package() == 0);
+
+	clear_columns();
+	assert(parse_column_option("Min", 1) == 0);
+	assert(scope_has_field(FIELD_SCOPE_CPU, "min"));
+	assert(section_emit_cpu() == 1);
+	assert(!any_fields_enabled(FIELD_SCOPE_SYSTEM));
+	assert(section_emit_package() == 0);
+
+	clear_columns();
+	assert(parse_column_option("Governor", 1) == 0);
+	assert(scope_has_field(FIELD_SCOPE_CPU, "governor"));
+	assert(section_emit_cpu() == 1);
+	assert(!any_fields_enabled(FIELD_SCOPE_SYSTEM));
+
+	reset_columns();
+	assert(parse_column_option("idle_percent", 0) == 0);
+	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "idle_percent"));
+	assert(scope_has_field(FIELD_SCOPE_CPU, "idle_percent"));
+}
+
+static void test_residency_and_usage_hiding_preserves_the_other_family(void)
+{
+	reset_columns();
+	set_all_columns_enabled(1);
+	assert(parse_column_option("idle_state_usage0", 0) == 0);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_USAGE) == 0xfeU);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0xffU);
+	assert(get_requested_series_mask(FIELD_SCOPE_SYSTEM,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0xffU);
+
+	reset_columns();
+	set_all_columns_enabled(1);
+	assert(parse_column_option("idle_state0", 0) == 0);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0xfeU);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_USAGE) == 0xffU);
+	assert(get_requested_series_mask(FIELD_SCOPE_SYSTEM,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0xffU);
+
+	assert(parse_column_option("idle", 0) == 0);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0U);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_USAGE) == 0xffU);
+
+	reset_columns();
+	set_all_columns_enabled(1);
+	assert(parse_column_option("idle-usage", 0) == 0);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_USAGE) == 0U);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0xffU);
+}
+
+static void test_requested_idle_states_exist_before_runtime_discovery(void)
+{
+	clear_columns();
+	assert(parse_column_option("idle_state_usage7", 1) == 0);
+	assert(section_emit_cpu() == 1);
+	/* Discovery has not populated any runtime-visible state yet. */
+	show_idle_state[7] = 0;
+	assert(get_enabled_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_USAGE) == 0U);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_USAGE) == 0x80U);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0U);
+	assert(get_requested_series_mask(FIELD_SCOPE_SYSTEM,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0U);
+
+	clear_columns();
+	assert(parse_column_option("sum_idle_state7", 1) == 0);
+	assert(get_requested_series_mask(FIELD_SCOPE_SYSTEM,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0x80U);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0U);
+
+	clear_columns();
+	assert(parse_column_option("IDLE-USAGE", 1) == 0);
+	assert(section_emit_cpu() == 1);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_USAGE) == 0xffU);
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0U);
+}
+
 int main(void)
 {
 	test_field_registry_keys_are_unique();
@@ -263,6 +430,7 @@ int main(void)
 	test_hide_exact_cpu_field_keeps_group_alive();
 	test_show_exact_field_whitelists_only_that_field();
 	test_show_exact_package_field_enables_package_section();
+	test_explicit_package_group_and_hide_control_output();
 	test_show_idle_percent_does_not_reenable_split_lpi_fields();
 	test_idle_group_whitelist_obeys_runtime_lpi_availability();
 	test_temp_group_whitelist_obeys_runtime_temp_availability();
@@ -271,5 +439,9 @@ int main(void)
 	test_all_columns_enable_base_groups_but_not_pmu_or_ipc();
 	test_show_all_remains_union_with_later_tokens();
 	test_hide_all_turns_off_explicit_pmu_and_ipc();
+	test_groups_ignore_case_and_separate_frequency_configuration();
+	test_stable_ids_select_one_scope_and_aliases_keep_rows_opt_in();
+	test_residency_and_usage_hiding_preserves_the_other_family();
+	test_requested_idle_states_exist_before_runtime_discovery();
 	return 0;
 }

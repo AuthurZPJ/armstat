@@ -79,7 +79,9 @@ Runtime disable changes therefore take effect gradually.
 Reads follow selected fields and scopes. `/proc/stat` is parsed once when
 Busy/Idle/IOWait or system counters need it; LPI-only output does not need it.
 cpuidle reads only selected states and counter families: residency does not
-require usage, and usage alone does not require time. Cached cpufreq/cpuidle
+require usage, and usage alone does not require time. With no LPI demand,
+collection skips cpuidle initialization and its availability warnings;
+`--probe` discovers capabilities independently of `-s`/`-H`. Cached cpufreq/cpuidle
 FDs and a cached procstat stream reduce repeated opens and parsing. Output
 likewise skips CPU/package record construction when those scopes cannot emit.
 A best-effort nice-value reduction before sampling is nonfatal if denied.
@@ -187,6 +189,34 @@ statistics or mix those captures with version 9. `--list` is generated from
 the serializer's field registry. The separate key-value probe contract is
 `probe_schema_version: 1`; its PMU check covers cycles on the first CPU only.
 
+### Column selection
+
+Default output is SUM; `-a` adds CPU live metrics and Pkg/Core/Node topology,
+without package aggregate rows, frequency configuration, or LPI usage.
+`-s all` adds those omitted groups; PMU/IPC always require explicit requests.
+`freq` selects current frequency/UncoreFreq, `freq-config` selects
+Min/Max/Governor/Boost, `idle` selects residency and Busy/Idle/IOWait, and
+`idle-usage` selects per-CPU state-entry rates.
+
+Groups match without case and take precedence over exact stable IDs, which
+take precedence over text/JSON aliases. Shared aliases select fields without
+expanding row scopes. Stable CPU field IDs and the `cpu`, `core`, `numa`,
+`freq-config`, and `idle-usage` groups enable CPU rows. Package field IDs and
+`pkg`/`package` enable package rows. CPU-only aliases such as `Min`, `Governor`,
+and `lpi0_usage` also enable CPU rows.
+`-s cpu` alone supplies common CPU live metrics without SUM and preserves
+explicit hide exclusions; combined selections use the requested fields and
+scopes. Independent PMU/IPC/energy requests retain their required SUM output.
+Existing CPU-filter rules still suppress implicit aggregate sections when CPU
+rows are expanded. The first `-s` replaces earlier views: `-a -s cpu` selects
+the CPU shortcut; `-s cpu -a` selects the expanded live view.
+Repeated `-s` extends the whitelist, including the full `-s all` selection,
+without restoring unrelated groups hidden by `-H`, including explicitly
+requested PMU, IPC, or energy fields.
+If discovery leaves the selected view with only CPU row IDs and no data
+columns, startup fails. Visible columns with unavailable sample values remain
+valid selections.
+
 ### Stable interval metadata
 
 | Field | Meaning |
@@ -203,18 +233,24 @@ same end time. Do not use the requested interval as an exported rate denominator
 
 ### Text
 
-Multi-row samples have an interval marker, timezone-qualified timestamp, and
-measured seconds, with blank separators. Summary-only rows start with a
-timestamp. Headers include units and repeat on label, selection, or width
-changes. Row-key widths accommodate sparse package IDs. Quiet text omits
+When SUM is the only output scope, text uses a continuous table with one
+timestamped data row per interval, including default, `-S`, and matching `-s`
+selections. Other views
+use interval markers, measured seconds, and blank separators. Text timestamps
+retain the date/timezone and three fractional digits. Headers include units
+and repeat on label, selection, or width changes. Row-key widths accommodate
+sparse package IDs. Quiet text omits
 markers, timestamps, headers, and the banner. Machine keys remain unchanged.
 
 ### JSON
 
 The top-level array contains one object per interval, with metadata and selected
 `summary`, `packages`, and `cpus` sections. Packages use `package` identity;
-CPUs use real Linux `cpu` IDs. Default mode emits summary/packages, `-S` emits
-summary, and `-a` expands CPU output; explicit selection controls the scopes.
+CPUs use real Linux `cpu` IDs. Default mode and `-S` emit only summary; `-a`
+adds CPU output, and `-s all` also adds packages. Explicit selection controls
+the scopes: `-s pkg` (or `package`) and exact fields such as `pkg_freq_mhz`
+request package rows.
+CPU package topology remains available for identification and plotting.
 
 Missing numbers/strings and non-finite values are `null`; available Boost is
 boolean. Strings are JSON-escaped. The array is finalized on orderly exit;
@@ -222,7 +258,7 @@ abrupt termination can leave an incomplete document.
 
 ### CSV
 
-One header defines the layout:
+One header defines the layout. Default output uses the summary-only layout:
 
 | Selected scopes | Identity columns |
 |---|---|

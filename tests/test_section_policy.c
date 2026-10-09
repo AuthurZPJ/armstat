@@ -5,8 +5,8 @@
  * Drives the policy directly with controlled field visibility, summary-mode
  * state, and CPU filter state, asserting which output sections are emitted.
  * These cover the decisions previously buried in each serializer:
- *   - default mode: SUM + package rows
- *   - -a: SUM + package + CPU sections
+ *   - default mode: SUM only, with CPU package topology retained
+ *   - explicit full selection: SUM + package + CPU sections
  *   - -S: summary-only mode
  *   - --cpu filter: suppresses implicit aggregation beside CPU rows, while
  *     preserving explicitly selected aggregate-only output
@@ -64,9 +64,39 @@ static void test_default_mode(void)
 	CHECK(section_is_summary_mode() == 0);
 	CHECK(section_emit_cpu() == 0);
 	CHECK(section_emit_cpu_identity() == 0);
-	CHECK(section_emit_package() == 1);
+	CHECK(show_package == 1);
+	CHECK(section_emit_package() == 0);
+	CHECK(section_emit_default_summary() == 1);
+	CHECK(section_emit_mixed_csv() == 0);
+}
+
+static void test_cpu_or_pmu_rows_do_not_enable_package_output(void)
+{
+	reset_policy_state();
+	enable_cpu(1);
+
+	CHECK(show_package == 1);
+	CHECK(section_emit_cpu() == 1);
+	CHECK(section_emit_package() == 0);
 	CHECK(section_emit_default_summary() == 1);
 	CHECK(section_emit_mixed_csv() == 1);
+
+	enable_cpu(0);
+	enable_pmu(1);
+	CHECK(show_package == 1);
+	CHECK(section_emit_cpu() == 1);
+	CHECK(section_emit_package() == 0);
+}
+
+static void test_reset_clears_explicit_package_output(void)
+{
+	reset_policy_state();
+	enable_package(1);
+	CHECK(section_emit_package() == 1);
+
+	reset_columns();
+	CHECK(show_package == 1);
+	CHECK(section_emit_package() == 0);
 }
 
 static void test_all_columns_mode(void)
@@ -145,6 +175,7 @@ static void test_cpu_filter_keeps_explicit_aggregate_only_output(void)
 static void test_clear_columns(void)
 {
 	reset_policy_state();
+	enable_package(1);
 	clear_columns();
 
 	CHECK(section_emit_cpu() == 0);
@@ -153,6 +184,53 @@ static void test_clear_columns(void)
 	CHECK(section_emit_default_summary() == 0);
 	CHECK(section_emit_mixed_csv() == 0);
 	CHECK(section_has_output() == 0);
+}
+
+static void test_pmu_summary_survives_empty_registry_field_selection(void)
+{
+	reset_policy_state();
+	clear_columns();
+	enable_cpu(1);
+	enable_pmu(1);
+	set_section_default_summary_output(1);
+
+	CHECK(any_fields_enabled(FIELD_SCOPE_SYSTEM) == 0);
+	CHECK(section_emit_default_summary() == 1);
+	CHECK(section_emit_cpu() == 1);
+	CHECK(section_emit_package() == 0);
+	CHECK(section_emit_mixed_csv() == 1);
+
+	set_section_summary_mode(1);
+	CHECK(section_has_output() == 1);
+	CHECK(section_emit_mixed_csv() == 0);
+}
+
+static void test_cpu_row_key_requires_selected_data_or_another_scope(void)
+{
+	reset_policy_state();
+	clear_columns();
+	enable_cpu(1);
+	CHECK(section_emit_cpu_identity() == 1);
+	CHECK(section_has_output() == 0);
+
+	select_exact_field("core");
+	CHECK(section_has_output() == 1);
+
+	reset_policy_state();
+	clear_columns();
+	enable_cpu(1);
+	select_exact_field("numa_node");
+	CHECK(section_has_output() == 1);
+
+	/* Missing CPU metrics cannot invalidate an independently selected SUM. */
+	reset_policy_state();
+	clear_columns();
+	enable_cpu(1);
+	select_exact_field("summary_freq_mhz");
+	set_section_default_summary_output(1);
+	CHECK(any_fields_enabled(FIELD_SCOPE_CPU) == 0);
+	CHECK(section_emit_default_summary() == 1);
+	CHECK(section_has_output() == 1);
 }
 
 static void test_summary_rejects_cpu_only_selection(void)
@@ -206,12 +284,16 @@ static void test_idle_collection_masks_follow_emitted_sections(void)
 int main(void)
 {
 	test_default_mode();
+	test_cpu_or_pmu_rows_do_not_enable_package_output();
+	test_reset_clears_explicit_package_output();
 	test_all_columns_mode();
 	test_package_and_cpu_use_mixed_csv();
 	test_summary_mode();
 	test_cpu_filter_suppresses_aggregation();
 	test_cpu_filter_keeps_explicit_aggregate_only_output();
 	test_clear_columns();
+	test_pmu_summary_survives_empty_registry_field_selection();
+	test_cpu_row_key_requires_selected_data_or_another_scope();
 	test_summary_rejects_cpu_only_selection();
 	test_idle_collection_masks_follow_emitted_sections();
 

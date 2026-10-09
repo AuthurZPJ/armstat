@@ -28,7 +28,7 @@ static int header_interval = 0;
 #define TEXT_MAX_SYSTEM_FIELDS 32
 #define TEXT_MAX_CPU_FIELDS 64
 #define TEXT_VALUE_BUF_LEN 128
-#define TEXT_TIMESTAMP_WIDTH 35
+#define TEXT_TIMESTAMP_WIDTH 29
 
 struct text_layout {
 	struct field_desc *fields[TEXT_MAX_CPU_FIELDS];
@@ -43,6 +43,24 @@ struct text_layout {
 
 static struct text_layout previous_layouts[3];
 static int previous_layout_valid;
+static int previous_compact_summary;
+
+static int compact_summary_view(int emit_summary, int emit_package, int emit_cpu)
+{
+	return emit_summary && !emit_package && !emit_cpu;
+}
+
+static void format_text_timestamp(const struct interval_record *rec,
+				  char *buf, size_t buf_size)
+{
+	char *fraction;
+
+	machine_format_timestamp_iso(rec, buf, buf_size);
+	/* Text needs milliseconds; retain the date and timezone verbatim. */
+	fraction = strchr(buf, '.');
+	if (fraction && strlen(fraction) >= 10)
+		memmove(fraction + 4, fraction + 10, strlen(fraction + 10) + 1);
+}
 
 static void format_text_label(const struct field_desc *field,
 			      char *buf, size_t size)
@@ -337,12 +355,13 @@ static void serialize_text_package_row(const struct interval_record *rec,
 	printf("\n");
 }
 
-static void serialize_text_summary_header(const struct text_layout *layout)
+static void serialize_text_summary_header(const struct text_layout *layout,
+					 int compact_summary)
 {
-	if (!any_fields_enabled(FIELD_SCOPE_SYSTEM))
+	if (!layout->count && !layout->pmu_count)
 		return;
 
-	if (!quiet_mode && section_is_summary_mode())
+	if (!quiet_mode && compact_summary)
 		printf("%-*s  ", TEXT_TIMESTAMP_WIDTH, "Timestamp");
 	printf("%-*s", TEXT_ROW_KEY_WIDTH, "SUM");
 	for (int i = 0; i < layout->count; i++) {
@@ -377,12 +396,13 @@ static void serialize_text_cpu_header(const struct text_layout *layout)
  * ============================================================================ */
 
 static void serialize_text_summary_row(const struct interval_record *rec,
-				       const struct text_layout *layout)
+				       const struct text_layout *layout,
+				       int compact_summary)
 {
-	if (!quiet_mode && section_is_summary_mode()) {
+	if (!quiet_mode && compact_summary) {
 		char timestamp[64];
 
-		machine_format_timestamp_iso(rec, timestamp, sizeof(timestamp));
+		format_text_timestamp(rec, timestamp, sizeof(timestamp));
 		printf("%-*s  ", TEXT_TIMESTAMP_WIDTH,
 		       timestamp[0] ? timestamp : "-");
 	}
@@ -439,6 +459,7 @@ void serialize_text(const struct interval_record *rec)
 	int emit_summary;
 	int emit_package;
 	int emit_cpu;
+	int compact_summary;
 	int section_count;
 	int section_index;
 	struct text_layout summary_layout;
@@ -449,11 +470,16 @@ void serialize_text(const struct interval_record *rec)
 	memset(&package_layout, 0, sizeof(package_layout));
 	memset(&cpu_layout, 0, sizeof(cpu_layout));
 
-	if (any_fields_enabled(FIELD_SCOPE_SYSTEM))
+	emit_summary = section_is_summary_mode() || section_emit_default_summary();
+	emit_package = !section_is_summary_mode() && section_emit_package();
+	emit_cpu = !section_is_summary_mode() && section_emit_cpu();
+	compact_summary = compact_summary_view(emit_summary, emit_package, emit_cpu);
+
+	if (emit_summary)
 		build_text_layout(&summary_layout, FIELD_SCOPE_SYSTEM, rec);
-	if (section_emit_package())
+	if (emit_package)
 		build_text_layout(&package_layout, FIELD_SCOPE_PACKAGE, rec);
-	if (section_emit_cpu())
+	if (emit_cpu)
 		build_text_layout(&cpu_layout, FIELD_SCOPE_CPU, rec);
 
 	print_header = (!quiet_mode && iteration == 1);
@@ -461,6 +487,7 @@ void serialize_text(const struct interval_record *rec)
 	    iteration > 1 && (iteration - 1) % header_interval == 0)
 		print_header = 1;
 	if (!quiet_mode && (!previous_layout_valid ||
+	    previous_compact_summary != compact_summary ||
 	    memcmp(&summary_layout, &previous_layouts[0], sizeof(summary_layout)) ||
 	    memcmp(&package_layout, &previous_layouts[1], sizeof(package_layout)) ||
 	    memcmp(&cpu_layout, &previous_layouts[2], sizeof(cpu_layout))))
@@ -469,17 +496,17 @@ void serialize_text(const struct interval_record *rec)
 	previous_layouts[1] = package_layout;
 	previous_layouts[2] = cpu_layout;
 	previous_layout_valid = 1;
+	previous_compact_summary = compact_summary;
 
 	/*
-	 * Default and expanded text views are multi-row sample blocks. Mark each
-	 * block explicitly so the next interval cannot be mistaken for another
-	 * section of the previous one. Summary-only mode remains one row per
-	 * interval, and quiet mode remains compact for simple text pipelines.
+	 * A single SUM uses a continuous table regardless of how it was selected.
+	 * Other views retain interval blocks so multiple rows stay attributable
+	 * to their sample. Quiet mode omits timestamps and block markers.
 	 */
-	if (!quiet_mode && !section_is_summary_mode()) {
+	if (!quiet_mode && !compact_summary) {
 		char timestamp[64];
 
-		machine_format_timestamp_iso(rec, timestamp, sizeof(timestamp));
+		format_text_timestamp(rec, timestamp, sizeof(timestamp));
 		if (iteration > 1)
 			putchar('\n');
 		printf("--- interval %llu | %s | duration %.6f s ---\n",
@@ -487,11 +514,11 @@ void serialize_text(const struct interval_record *rec)
 		       rec->duration_us / 1000000.0);
 	}
 
-	if (section_is_summary_mode()) {
-		/* Summary-only mode: one SUM block. */
+	if (compact_summary) {
+		/* Single summary: one data row per interval. */
 		if (print_header)
-			serialize_text_summary_header(&summary_layout);
-		serialize_text_summary_row(rec, &summary_layout);
+			serialize_text_summary_header(&summary_layout, compact_summary);
+		serialize_text_summary_row(rec, &summary_layout, compact_summary);
 	} else {
 		/*
 		 * Mixed scope: keep each section self-contained so the SUM, Pkg,
@@ -499,17 +526,15 @@ void serialize_text(const struct interval_record *rec)
 		 * running together as one merged table. Sections are separated by
 		 * a blank line.
 		 */
-		emit_summary = section_emit_default_summary();
-		emit_package = section_emit_package();
-		emit_cpu = section_emit_cpu();
 		section_count = emit_summary + emit_package + emit_cpu;
 		section_index = 0;
 
 		if (emit_summary) {
 			section_index++;
 			if (print_header)
-				serialize_text_summary_header(&summary_layout);
-			serialize_text_summary_row(rec, &summary_layout);
+				serialize_text_summary_header(&summary_layout,
+							      compact_summary);
+			serialize_text_summary_row(rec, &summary_layout, compact_summary);
 			if (section_index < section_count)
 				printf("\n");
 		}

@@ -158,6 +158,9 @@ static int run_probe(struct armstat_options *opts)
 	long long package_power_mw;
 	const char *idle_backend_name;
 
+	/* Probe discovers capabilities independently of display selections. */
+	reset_columns();
+	enable_cpuidle(1);
 	if (init_collector() < 0) {
 		fprintf(stderr, "Error: Failed to init collector for probe\n");
 		fprintf(stderr, "  armstat requires ARM64 Linux with sysfs/procfs access.\n");

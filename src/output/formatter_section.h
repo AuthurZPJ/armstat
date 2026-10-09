@@ -43,5 +43,7 @@ void section_get_idle_collection_masks(unsigned int *residency_mask,
 
 void set_section_summary_mode(int summary);
 void set_section_default_summary_output(int enable);
+/* Package rows are opt-in; CPU package identity can remain visible without them. */
+void set_section_package_output(int enable);
 
 #endif /* ARMSTAT_FORMATTER_SECTION_H */

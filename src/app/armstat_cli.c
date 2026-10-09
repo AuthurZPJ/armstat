@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <errno.h>
 #include <getopt.h>
@@ -94,6 +95,9 @@ static void print_help(void)
 {
 	printf("Usage: armstat [options]\n");
 	printf("\n");
+	printf("Default: SUM. -a: SUM + CPU live metrics. -s all: full base view.\n");
+	printf("Package rows require -s pkg/package, a stable package field ID, or -s all.\n");
+	printf("\n");
 	printf("Options:\n");
 	printf("  -i, --interval <sec>   Measurement interval (default: 1.0)\n");
 	printf("  -n, --num-iterations <count> Samples to print (0 = unlimited)\n");
@@ -105,7 +109,7 @@ static void print_help(void)
 	printf("  -q, --quiet            Suppress text banner, headers, timestamps, and markers\n");
 	printf("  -D, --dump             Collect one complete interval and exit\n");
 	printf("  -S, --summary          Summary mode (SUM only)\n");
-	printf("  -a, --all              Enable all supported base column groups (use -I for IPC, -p for PMU)\n");
+	printf("  -a, --all              Expand live metrics with CPU rows (use -s all for configuration and usage)\n");
 	printf("  -f, --format <fmt>     Output format: text, json, csv\n");
 	printf("  -s, --show <items>     Show only selected groups or exact field names\n");
 	printf("  -H, --hide <items>     Hide selected groups or exact field names\n");
@@ -124,7 +128,9 @@ static void print_help(void)
 	printf("  core\n");
 	printf("  numa, node\n");
 	printf("  freq\n");
+	printf("  freq-config\n");
 	printf("  idle\n");
+	printf("  idle-usage\n");
 	printf("  power\n");
 	printf("  temp\n");
 	printf("  pmu\n");
@@ -133,6 +139,7 @@ static void print_help(void)
 	printf("  ipc\n");
 	printf("  energy, joules\n");
 	printf("  all\n");
+	printf("\nGroups are case-insensitive and take precedence over stable IDs and aliases.\n");
 }
 
 static const char *field_scope_name(enum field_scope scope)
@@ -178,7 +185,9 @@ void list_counters(void)
 	printf("  core\n");
 	printf("  numa, node\n");
 	printf("  freq\n");
+	printf("  freq-config\n");
 	printf("  idle\n");
+	printf("  idle-usage\n");
 	printf("  power\n");
 	printf("  temp\n");
 	printf("  pmu\n");
@@ -188,7 +197,8 @@ void list_counters(void)
 	printf("  energy, joules\n");
 	printf("  all\n");
 	printf("\n");
-	printf("Use lowercase names with -s/-H (e.g. -s cpu,freq,power).\n");
+	printf("Group names are case-insensitive. cpu alone selects its usual live metrics.\n");
+	printf("freq/idle select summary metrics; add cpu for per-CPU rows.\n");
 	printf("\nExact fields (stable ID; scope; type; unit; text label; JSON key):\n");
 	for (int i = 0; i < field_count; i++) {
 		printf("  %-24s [%-7s] type=%-7s unit=%-18s text=%-12s json=%s\n",
@@ -199,10 +209,13 @@ void list_counters(void)
 		       fields[i].label ? fields[i].label : "",
 		       fields[i].json_label ? fields[i].json_label : "");
 	}
-	printf("Stable IDs are unambiguous exact -s/-H tokens; labels and JSON keys also work when they do not collide with group aliases.\n");
+	printf("Group names take precedence; other stable IDs match one field before labels/JSON aliases.\n");
+	printf("CPU-only aliases such as Min and lpi0_usage enable CPU rows; shared aliases do not.\n");
+	printf("Use pkg/package for package rows; labels never implicitly enable package rows.\n");
 	printf("Machine output uses JSON null / empty CSV cells for unavailable values.\n");
 	printf("\n");
 	printf("Built-in PMU events:\n");
+	printf("Counts are per interval; mem-read/write count retired load/store instructions, not bytes.\n");
 	list_builtin_pmu_events();
 }
 
@@ -248,14 +261,36 @@ static void set_idle_columns(int enable)
 {
 	enable_idle(enable);
 	enable_iowait(enable);
-	enable_cpuidle(enable);
+	if (enable)
+		enable_cpuidle(1);
+}
+
+static void set_idle_usage_columns(int enable)
+{
+	enable_idle_usage(enable);
+	if (enable)
+		enable_cpuidle(1);
+}
+
+static void set_core_columns(int enable)
+{
+	enable_core(enable);
+	if (enable)
+		enable_cpu(1);
+}
+
+static void set_numa_columns(int enable)
+{
+	enable_numa(enable);
+	if (enable)
+		enable_cpu(1);
 }
 
 static int option_matches_alias_group(const char *arg,
 				      const struct column_alias_group *group)
 {
 	for (int i = 0; i < group->alias_count; i++) {
-		if (strcmp(arg, group->aliases[i]) == 0)
+		if (strcasecmp(arg, group->aliases[i]) == 0)
 			return 1;
 	}
 
@@ -293,7 +328,9 @@ void set_all_columns_enabled(int enable)
 {
 	enable_cpu(enable);
 	enable_freq(enable);
+	enable_freq_config(enable);
 	set_idle_columns(enable);
+	set_idle_usage_columns(enable);
 	enable_power(enable);
 	enable_temp(enable);
 	enable_sysstat(enable);
@@ -317,6 +354,50 @@ void set_all_columns_enabled(int enable)
 		enable_pmu(0);
 		enable_ipc(0);
 	}
+}
+
+static void set_live_columns_enabled(void)
+{
+	set_all_columns_enabled(1);
+	enable_freq_config(0);
+	enable_idle_usage(0);
+	set_section_package_output(0);
+}
+
+static void select_view_fields(int live_only)
+{
+	struct field_desc *fields = get_all_fields();
+	int field_count = get_field_count();
+
+	/* Keep broad views explicit so later -s additions remain a union. */
+	for (int i = 0; i < field_count; i++) {
+		if ((fields[i].group_mask & FIELD_GROUP_IPC) && !is_ipc_enabled())
+			continue;
+		if (live_only && (fields[i].group_mask &
+		    (FIELD_GROUP_FREQ_CONFIG | FIELD_GROUP_IDLE_USAGE)))
+			continue;
+		set_field_override_by_index(i, 1, 1);
+	}
+}
+
+static int column_list_is_cpu_only(const char *arg)
+{
+	const char *start = arg;
+
+	while (start && *start) {
+		const char *end = strchr(start, ',');
+		const char *trim_end = end ? end : start + strlen(start);
+
+		while (*start == ' ' || *start == '\t')
+			start++;
+		while (trim_end > start &&
+		       (trim_end[-1] == ' ' || trim_end[-1] == '\t'))
+			trim_end--;
+		if (trim_end - start != 3 || strncasecmp(start, "cpu", 3))
+			return 0;
+		start = end ? end + 1 : NULL;
+	}
+	return 1;
 }
 
 static int parse_positive_double_arg(const char *option, const char *arg,
@@ -462,7 +543,9 @@ int parse_column_option(const char *arg, int enable)
 	static const char *const core_aliases[] = {"core"};
 	static const char *const numa_aliases[] = {"numa", "node"};
 	static const char *const freq_aliases[] = {"freq"};
+	static const char *const freq_config_aliases[] = {"freq-config"};
 	static const char *const idle_aliases[] = {"idle"};
+	static const char *const idle_usage_aliases[] = {"idle-usage"};
 	static const char *const power_aliases[] = {"power"};
 	static const char *const temp_aliases[] = {"temp"};
 	static const char *const pmu_aliases[] = {"pmu"};
@@ -476,13 +559,17 @@ int parse_column_option(const char *arg, int enable)
 		{package_aliases, ARRAY_SIZE(package_aliases),
 		 FIELD_GROUP_PACKAGE, enable_package},
 		{core_aliases, ARRAY_SIZE(core_aliases),
-		 FIELD_GROUP_CORE, enable_core},
+		 FIELD_GROUP_CORE, set_core_columns},
 		{numa_aliases, ARRAY_SIZE(numa_aliases),
-		 FIELD_GROUP_NUMA, enable_numa},
+		 FIELD_GROUP_NUMA, set_numa_columns},
 		{freq_aliases, ARRAY_SIZE(freq_aliases),
 		 FIELD_GROUP_FREQ, enable_freq},
+		{freq_config_aliases, ARRAY_SIZE(freq_config_aliases),
+		 FIELD_GROUP_FREQ_CONFIG, enable_freq_config},
 		{idle_aliases, ARRAY_SIZE(idle_aliases),
 		 FIELD_GROUP_IDLE, set_idle_columns},
+		{idle_usage_aliases, ARRAY_SIZE(idle_usage_aliases),
+		 FIELD_GROUP_IDLE_USAGE, set_idle_usage_columns},
 		{power_aliases, ARRAY_SIZE(power_aliases),
 		 FIELD_GROUP_POWER, enable_power},
 		{temp_aliases, ARRAY_SIZE(temp_aliases),
@@ -501,7 +588,6 @@ int parse_column_option(const char *arg, int enable)
 	char *arg_copy, *token, *saveptr = NULL;
 	struct field_desc *fields = get_all_fields();
 	int field_count = get_field_count();
-	int all_selected = 0;
 
 	if (!arg || !*arg || column_list_has_empty_token(arg)) {
 		fprintf(stderr, "Error: column list contains an empty token\n");
@@ -529,24 +615,27 @@ int parse_column_option(const char *arg, int enable)
 		if (*token == '\0')
 			continue;
 
-		if (strcmp(token, "all") == 0) {
+		if (strcasecmp(token, "all") == 0) {
 			set_all_columns_enabled(enable);
-			clear_field_overrides();
 			if (enable)
-				all_selected = 1;
+				select_view_fields(0);
+			else
+				clear_field_overrides();
 			continue;
 		}
 
-		if (strcmp(token, "idle") == 0)
+		if (strcasecmp(token, "idle") == 0)
 			clear_idle_state_overrides();
 
 		int matched = 0;
 		for (int i = 0; i < ARRAY_SIZE(groups); i++) {
 			if (option_matches_alias_group(token, &groups[i])) {
 				groups[i].set_visible(enable);
-				if (!(enable && all_selected))
-					set_group_field_overrides(groups[i].field_group_mask,
-								 enable, enable);
+				if (enable && (groups[i].field_group_mask &
+				    (FIELD_GROUP_FREQ_CONFIG | FIELD_GROUP_IDLE_USAGE)))
+					enable_cpu(1);
+				set_group_field_overrides(groups[i].field_group_mask,
+							 enable, enable);
 				matched = 1;
 				break;
 			}
@@ -555,8 +644,19 @@ int parse_column_option(const char *arg, int enable)
 		if (matched)
 			continue;
 
+		int exact_id = 0;
+		unsigned int alias_scopes = 0;
 		for (int i = 0; i < field_count; i++) {
-			if (!field_matches_token(&fields[i], token))
+			if (field_matches_token(&fields[i], token))
+				alias_scopes |= 1U << fields[i].scope;
+			if (fields[i].id && strcmp(fields[i].id, token) == 0) {
+				exact_id = 1;
+			}
+		}
+
+		for (int i = 0; i < field_count; i++) {
+			if (exact_id ? strcmp(fields[i].id, token) != 0 :
+			    !field_matches_token(&fields[i], token))
 				continue;
 
 			/*
@@ -567,24 +667,22 @@ int parse_column_option(const char *arg, int enable)
 			 *   data source gets sampled.
 			 * - Hide/blacklist mode must not clear the group flag, otherwise
 			 *   hiding a single field such as "uncore_freq" would also hide
-			 *   its siblings (Freq/Min/Max/Governor/Boost).
+			 *   its sibling current-frequency fields.
 			 */
 			if (enable)
 				*fields[i].enabled_ptr = 1;
-			if (enable && fields[i].scope == FIELD_SCOPE_PACKAGE)
+			if (enable && exact_id && fields[i].scope == FIELD_SCOPE_PACKAGE)
 				enable_package(1);
-			if (enable && fields[i].scope == FIELD_SCOPE_CPU)
+			if (enable && fields[i].scope == FIELD_SCOPE_CPU &&
+			    (exact_id || alias_scopes == (1U << FIELD_SCOPE_CPU)))
 				enable_cpu(1);
-			if (!(enable && all_selected))
-				set_field_override_by_index(i, enable, enable);
+			set_field_override_by_index(i, enable, enable);
 			matched = 1;
 
 			if (field_series_is_idle_state(fields[i].series) &&
 			    fields[i].series_index >= 0) {
 				if (enable)
 					enable_cpuidle(1);
-				set_idle_state_override(fields[i].series_index,
-							enable, enable);
 			}
 		}
 
@@ -610,6 +708,8 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 	int opt;
 	int energy_requested = 0;
 	int show_option_seen = 0;
+	int view_option_seen = 0;
+	int cpu_only_selection = 1;
 
 	set_cpu_inventory_filter(NULL);
 	set_section_summary_mode(0);
@@ -646,8 +746,11 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			set_section_summary_mode(1);
 			break;
 		case 'a':
-			set_all_columns_enabled(1);
+			cpu_only_selection = 0;
+			view_option_seen = 1;
+			set_live_columns_enabled();
 			clear_field_overrides();
+			select_view_fields(1);
 			set_section_default_summary_output(1);
 			break;
 		case 'c':
@@ -664,21 +767,28 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			opts->output_file = optarg;
 			break;
 		case 's':
+			if (!show_option_seen)
+				cpu_only_selection = column_list_is_cpu_only(optarg);
+			else
+				cpu_only_selection &= column_list_is_cpu_only(optarg);
 			if (apply_show_option(optarg, !show_option_seen) < 0)
 				return -1;
+			/* Only the first whitelist clears independent metric requests. */
+			if (!show_option_seen) {
+				if (opts->pmu_events)
+					enable_pmu(1);
+				if (opts->ipc_requested) {
+					enable_pmu(1);
+					enable_ipc(1);
+					set_group_field_overrides(FIELD_GROUP_IPC, 1, 1);
+				}
+				if (energy_requested) {
+					enable_energy(1);
+					set_group_field_overrides(FIELD_GROUP_ENERGY, 1, 1);
+				}
+			}
 			show_option_seen = 1;
-			/* Independent metric requests remain in the whitelist union. */
-			if (opts->pmu_events)
-				enable_pmu(1);
-			if (opts->ipc_requested) {
-				enable_pmu(1);
-				enable_ipc(1);
-				set_group_field_overrides(FIELD_GROUP_IPC, 1, 1);
-			}
-			if (energy_requested) {
-				enable_energy(1);
-				set_group_field_overrides(FIELD_GROUP_ENERGY, 1, 1);
-			}
+			view_option_seen = 1;
 			break;
 		case 'H':
 			if (apply_hide_option(optarg) < 0)
@@ -695,12 +805,12 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			energy_requested = 1;
 			reset_energy();
 			enable_energy(1);
-			if (show_option_seen)
+			if (view_option_seen)
 				set_group_field_overrides(FIELD_GROUP_ENERGY, 1, 1);
 			break;
 		case 'I':
 			apply_ipc_option(opts);
-			if (show_option_seen)
+			if (view_option_seen)
 				set_group_field_overrides(FIELD_GROUP_IPC, 1, 1);
 			break;
 		case 'P':
@@ -736,6 +846,17 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 	if (optind < argc) {
 		fprintf(stderr, "Error: unexpected argument: %s\n", argv[optind]);
 		return -1;
+	}
+
+	if (show_option_seen && cpu_only_selection && show_cpu) {
+		/* A row-only CPU request inherits useful live metrics, not just IDs. */
+		enable_freq(1);
+		enable_idle(1);
+		enable_iowait(1);
+		enable_temp(1);
+		select_default_cpu_fields();
+		set_section_default_summary_output(energy_requested ||
+					   opts->ipc_requested || opts->pmu_events);
 	}
 
 	return 0;  /* Continue execution */

@@ -69,7 +69,9 @@
 
 读取按字段和输出层级选择。只有 Busy/Idle/IOWait 或系统计数器需要时，才在该
 区间解析一次 `/proc/stat`；仅选择 LPI 不需要它。cpuidle 只读选中的状态和计数器：
-驻留统计不需要 usage，usage 也不需要 time。cpufreq/cpuidle 的 FD 缓存与 procstat
+驻留统计不需要 usage，usage 也不需要 time。没有 LPI 需求时不初始化 cpuidle，
+也不发出其可用性告警；`--probe` 的能力发现不受 `-s`/`-H` 限制。
+cpufreq/cpuidle 的 FD 缓存与 procstat
 流缓存减少重复打开和解析。不能输出的 CPU/插槽层级也不构造记录。采样前会尝试
 降低自身 nice 值，失败不影响继续运行。
 
@@ -159,6 +161,26 @@ JSON/CSV 与随附绘图加载器使用 **schema 第 9 版**。第 8 版 LPI 是
 不能按独立状态统计解释或与第 9 版混用。`--list` 来自序列化器共用的字段注册表。
 独立的 key-value 探测契约为 `probe_schema_version: 1`，PMU 探测仅覆盖首个 CPU 的 cycles。
 
+### 字段选择
+
+默认输出 SUM，`-a` 增加 CPU 动态指标和 Pkg/Core/Node 拓扑，省略插槽聚合行、
+频率配置与 LPI usage。`-s all` 补入这些列组；PMU/IPC 始终需要显式请求。
+`freq` 选择当前频率/UncoreFreq，`freq-config` 选择 Min/Max/Governor/Boost，
+`idle` 选择驻留与 Busy/Idle/IOWait，`idle-usage` 选择每 CPU 状态进入速率。
+
+列组不区分大小写，优先于精确稳定 ID；稳定 ID 又优先于文本/JSON 别名。
+重名别名选择字段但不展开行层级。稳定 CPU 字段 ID 及
+cpu/core/numa/freq-config/idle-usage 列组启用 CPU 行，插槽字段 ID 与 pkg/package
+启用插槽行。仅属 CPU 的 `Min`、`Governor`、`lpi0_usage` 等别名也启用 CPU 行。
+单独 `-s cpu` 提供常用 CPU 动态指标且不带 SUM，保留显式隐藏请求；组合选择
+按请求的字段与层级输出。独立 PMU/IPC/能量请求保留所需 SUM 输出。展开 CPU 行
+时，现有 CPU 过滤规则仍抑制隐式聚合层级。首个 `-s` 替换之前的视图：
+`-a -s cpu` 使用 CPU 快捷视图，`-s cpu -a` 使用扩展动态视图。
+重复 `-s` 扩展白名单，包括 `-s all` 的完整选择，不会恢复被 `-H` 隐藏的无关
+列组，包括此前显式请求的 PMU、IPC 或能量字段。
+若初始化后所选视图只剩 CPU 行标识而没有数据列，启动报错。已显示列的采样值
+不可用时，选择本身仍有效。
+
 ### 稳定区间元数据
 
 | 字段 | 含义 |
@@ -175,22 +197,25 @@ Duration 描述测量窗口，三个时间戳表示同一结束时刻。导出�
 
 ### 文本
 
-多行样本带区间编号、含时区的时间和实测秒数，样本间留空行。仅汇总行以时间
-开头。表头含单位，标签、选择或宽度变化时重印；行标识宽度适配稀疏 package ID。
-Quiet 模式省略标记、时间、表头和启动说明，机器字段 key 不变。
+仅 SUM 输出采用连续表格，每个区间一行带时间的数据，适用于默认、`-S` 和只选
+汇总字段的 `-s`。其他视图保留区间标记、实测秒数和空行分隔。文本时间保留
+日期/时区，含三位小数。表头含单位，标签、选择或宽度变化时重印；行标识宽度
+适配稀疏 package ID。Quiet 模式省略标记、时间、表头和启动说明，机器字段 key 不变。
 
 ### JSON
 
 顶层数组每区间一个对象，含元数据及所选的 `summary`、`packages`、`cpus` 层级。
-插槽使用 `package` 标识，CPU 使用真实 Linux `cpu` 编号。默认输出汇总/插槽，
-`-S` 仅汇总，`-a` 展开 CPU；显式选择决定层级。
+插槽使用 `package` 标识，CPU 使用真实 Linux `cpu` 编号。默认与 `-S` 仅输出汇总，
+`-a` 增加 CPU 层级，`-s all` 还增加插槽层级。显式选择决定层级：`-s pkg`（或
+`package`）和 `pkg_freq_mhz` 等精确字段按需输出插槽行。CPU 的 package 拓扑仍可
+用于身份识别与绘图分组。
 
 缺失数字/字符串与非有限值为 `null`，可用 Boost 为布尔值，字符串按 JSON 转义。
 正常退出时闭合数组；异常终止可能留下不完整文档。
 
 ### CSV
 
-首次表头定义布局：
+首次表头定义布局；默认输出使用仅汇总布局：
 
 | 所选层级 | 身份列 |
 |---|---|

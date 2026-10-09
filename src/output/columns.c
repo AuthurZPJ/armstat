@@ -18,6 +18,7 @@
 
 #include "columns.h"
 #include "formatter_fields.h"
+#include "formatter_section.h"
 #include "cpufreq.h"
 #include "cpuidle.h"
 #include "power.h"
@@ -31,7 +32,9 @@
 /* Column visibility flags - exposed to main for -s/-H options */
 int show_cpu = 0;
 int show_freq = 1;
+int show_freq_config = 0;
 int show_idle = 1;
+int show_idle_usage = 0;
 int show_iowait = 0;
 int show_power = 1;
 int show_temp = 1;
@@ -144,7 +147,7 @@ void set_idle_state_override(int state_idx, int enable, int whitelist)
 
 #define CPU_IDLE_USAGE_FIELD(idx)						\
 	{"idle_state_usage" #idx, idle_state_usage_labels[idx], "lpi" #idx "_usage", "/s", \
-	 FIELD_SCOPE_CPU, FIELD_TYPE_DOUBLE, 2, FIELD_GROUP_IDLE,	\
+	 FIELD_SCOPE_CPU, FIELD_TYPE_DOUBLE, 2, FIELD_GROUP_IDLE_USAGE,	\
 	 FIELD_SERIES_IDLE_STATE_USAGE, idx,					\
 	 &show_idle_state[idx],						\
 	 .getter.get_double = get_cpu_idle_state_usage##idx}
@@ -263,14 +266,14 @@ struct field_desc all_fields[] = {
 		      &show_numa, get_cpu_numa_node),
 	CPU_DOUBLE_FIELD("freq_mhz", "Freq", "freq", "MHz", 2, FIELD_GROUP_FREQ,
 			 &show_freq, get_cpu_freq_mhz),
-	CPU_DOUBLE_FIELD("min_freq_mhz", "Min", "min", "MHz", 2, FIELD_GROUP_FREQ,
-			 &show_freq, get_cpu_min_freq_mhz),
-	CPU_DOUBLE_FIELD("max_freq_mhz", "Max", "max", "MHz", 2, FIELD_GROUP_FREQ,
-			 &show_freq, get_cpu_max_freq_mhz),
-	CPU_STRING_FIELD("governor", "Governor", "governor", "", FIELD_GROUP_FREQ,
-			 &show_freq, get_cpu_governor),
-	CPU_BOOL_FIELD("boost", "Boost", "boost", FIELD_GROUP_FREQ,
-			 &show_freq, get_cpu_boost),
+	CPU_DOUBLE_FIELD("min_freq_mhz", "Min", "min", "MHz", 2, FIELD_GROUP_FREQ_CONFIG,
+			 &show_freq_config, get_cpu_min_freq_mhz),
+	CPU_DOUBLE_FIELD("max_freq_mhz", "Max", "max", "MHz", 2, FIELD_GROUP_FREQ_CONFIG,
+			 &show_freq_config, get_cpu_max_freq_mhz),
+	CPU_STRING_FIELD("governor", "Governor", "governor", "", FIELD_GROUP_FREQ_CONFIG,
+			 &show_freq_config, get_cpu_governor),
+	CPU_BOOL_FIELD("boost", "Boost", "boost", FIELD_GROUP_FREQ_CONFIG,
+			 &show_freq_config, get_cpu_boost),
 	/* Per-idle-state percentages - show before busy%/idle% */
 	CPU_IDLE_FIELD(0),
 	CPU_IDLE_FIELD(1),
@@ -375,6 +378,10 @@ static int field_is_effectively_enabled(int field_index)
 		return 1;
 	if (field_show_mask)
 		return 0;  /* whitelist: only explicitly shown fields */
+	if (field->series == FIELD_SERIES_IDLE_STATE_RESIDENCY)
+		return show_idle && *field->enabled_ptr;
+	if (field->series == FIELD_SERIES_IDLE_STATE_USAGE)
+		return show_idle_usage && *field->enabled_ptr;
 	return *field->enabled_ptr;
 }
 
@@ -399,6 +406,19 @@ void set_field_override_by_index(int field_index, int enable, int whitelist)
 	} else {
 		field_hide_mask |= bit;
 		field_show_mask &= ~bit;
+	}
+}
+
+void select_default_cpu_fields(void)
+{
+	for (int i = 0; i < NUM_FIELDS; i++) {
+		const struct field_desc *field = &all_fields[i];
+		uint64_t bit = 1ULL << i;
+
+		if (field->scope == FIELD_SCOPE_CPU &&
+		    (field->group_mask & (FIELD_GROUP_FREQ | FIELD_GROUP_IDLE |
+				  FIELD_GROUP_TEMP)) && !(field_hide_mask & bit))
+			field_show_mask |= bit;
 	}
 }
 
@@ -469,6 +489,34 @@ unsigned int get_enabled_series_mask(enum field_scope scope,
 	return mask;
 }
 
+unsigned int get_requested_series_mask(enum field_scope scope,
+				       enum field_series series)
+{
+	unsigned int mask = 0;
+
+	if (!field_series_is_idle_state(series))
+		return 0;
+	for (int i = 0; i < NUM_FIELDS; i++) {
+		const struct field_desc *field = &all_fields[i];
+		uint64_t bit = 1ULL << i;
+		unsigned int state_bit;
+		int inherited;
+
+		if (field->scope != scope || field->series != series ||
+		    field->series_index < 0 || field->series_index >= 8)
+			continue;
+		state_bit = 1U << field->series_index;
+		if ((field_hide_mask & bit) || (idle_hide_mask & state_bit) ||
+		    (idle_show_mask && !(idle_show_mask & state_bit)))
+			continue;
+		inherited = series == FIELD_SERIES_IDLE_STATE_USAGE ?
+			show_idle_usage : show_idle;
+		if ((field_show_mask & bit) || (!field_show_mask && inherited))
+			mask |= state_bit;
+	}
+	return mask;
+}
+
 int field_is_scope_identity(const struct field_desc *field)
 {
 	return field && field->scope == FIELD_SCOPE_PACKAGE && field->id &&
@@ -529,14 +577,13 @@ void update_idle_state_visibility(void)
 
 void enable_cpu(int e)    { show_cpu    = e; }
 void enable_freq(int e)   { show_freq   = e; }
+void enable_freq_config(int e) { show_freq_config = e; }
 void enable_idle(int e)
 {
 	show_idle = e;
-	if (e)
-		update_idle_state_visibility();
-	else
-		clear_idle_state_columns();
+	update_idle_state_visibility();
 }
+void enable_idle_usage(int e) { show_idle_usage = e; }
 void enable_iowait(int e) { show_iowait = e; }
 void enable_power(int e)  { show_power  = e; }
 void enable_temp(int e)   { show_temp   = e; }
@@ -544,7 +591,11 @@ void enable_pmu(int e)    { show_pmu    = e; }
 void enable_sysstat(int e){ show_sysstat = e; }
 void enable_membw(int e)  { show_membw  = e; }
 void enable_numa(int e)   { show_numa   = e; }
-void enable_package(int e){ show_package = e; }
+void enable_package(int e)
+{
+	show_package = e;
+	set_section_package_output(e);
+}
 void enable_core(int e)   { show_core   = e; }
 void enable_ipc(int e)    { show_ipc    = e; }
 void enable_energy(int e) { show_energy = e; }
@@ -558,7 +609,9 @@ static void set_all_show_flags(int val)
 {
 	show_cpu    = val;
 	show_freq   = val;
+	show_freq_config = 0;
 	show_idle   = val;
+	show_idle_usage = 0;
 	show_iowait = 0;
 	show_power  = val;
 	show_temp   = val;
@@ -575,9 +628,10 @@ static void set_all_show_flags(int val)
 void reset_columns(void)
 {
 	set_all_show_flags(1);
-	/* The basic view is concise: SUM + package rows.  -a expands CPU rows. */
+	/* Default to SUM; retain package identity for any later CPU-row request. */
 	show_cpu = 0;
 	show_package = 1;
+	set_section_package_output(0);
 	update_temp_field_visibility();
 	clear_field_overrides();
 	reset_idle_state_overrides_internal();
@@ -587,6 +641,7 @@ void reset_columns(void)
 void clear_columns(void)
 {
 	set_all_show_flags(0);
+	set_section_package_output(0);
 	update_temp_field_visibility();
 	clear_field_overrides();
 	reset_idle_state_overrides_internal();

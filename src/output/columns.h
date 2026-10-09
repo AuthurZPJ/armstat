@@ -62,6 +62,8 @@ enum field_group_mask {
 	FIELD_GROUP_MEMBW   = 1U << 8,
 	FIELD_GROUP_IPC     = 1U << 9,
 	FIELD_GROUP_ENERGY  = 1U << 10,
+	FIELD_GROUP_FREQ_CONFIG = 1U << 11,
+	FIELD_GROUP_IDLE_USAGE = 1U << 12,
 };
 
 /*
@@ -148,7 +150,9 @@ struct field_desc {
  */
 extern int show_cpu;
 extern int show_freq;
+extern int show_freq_config;
 extern int show_idle;
+extern int show_idle_usage;
 extern int show_iowait;
 extern int show_power;
 extern int show_temp;
@@ -162,7 +166,7 @@ extern int show_ipc;
 extern int show_energy;
 
 /* Convenience getters for demand-driven sampling decisions. */
-static inline int is_freq_enabled(void)    { return show_freq; }
+static inline int is_freq_enabled(void)    { return show_freq || show_freq_config; }
 static inline int is_idle_enabled(void)    { return show_idle; }
 static inline int is_iowait_enabled(void)  { return show_iowait; }
 static inline int is_power_enabled(void)   { return show_power; }
@@ -194,9 +198,14 @@ int any_fields_enabled(enum field_scope scope);
 void get_enabled_fields(enum field_scope scope, struct field_desc **fields, int *count);
 unsigned int get_enabled_series_mask(enum field_scope scope,
 				     enum field_series series);
+/* Selection before platform discovery, independent of runtime availability. */
+unsigned int get_requested_series_mask(enum field_scope scope,
+				       enum field_series series);
 int field_is_scope_identity(const struct field_desc *field);
 void clear_field_overrides(void);
 void set_field_override_by_index(int field_index, int enable, int whitelist);
+/* Fill a CPU-only view without overriding explicit hide requests. */
+void select_default_cpu_fields(void);
 
 /*
  * Idle-state series visibility + overrides.
@@ -210,7 +219,9 @@ void set_idle_state_override(int state_idx, int enable, int whitelist);
  */
 void enable_cpu(int enable);
 void enable_freq(int enable);
+void enable_freq_config(int enable);
 void enable_idle(int enable);
+void enable_idle_usage(int enable);
 void enable_iowait(int enable);
 void enable_power(int enable);
 void enable_temp(int enable);

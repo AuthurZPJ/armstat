@@ -376,9 +376,110 @@ assert len(samples) == 1
 sample = samples[0]
 assert sample.get("schema_version") == 9
 assert isinstance(sample.get("summary"), dict)
-assert isinstance(sample.get("packages"), list) and sample["packages"]
+assert "packages" not in sample
 assert "cpus" not in sample
 PY
+
+python3 "$src_dir/scripts/plot_sum.py" "$tmp_dir/default.json" \
+	--list-fields >/dev/null
+
+"$armstat_bin" -f csv -i "$sample_interval" -n 1 \
+	>"$tmp_dir/default.csv"
+python3 - "$tmp_dir/default.csv" <<'PY'
+import csv
+import sys
+
+with open(sys.argv[1], newline="", encoding="utf-8") as stream:
+    rows = list(csv.reader(stream))
+
+assert len(rows) == 2
+assert rows[0][:7] == [
+    "schema_version", "interval", "duration_us", "timestamp", "timestamp_ns",
+    "timestamp_iso", "Scope",
+]
+assert "CPU" not in rows[0] and "Package" not in rows[0]
+assert not any(column.startswith(("summary.", "package.", "cpu."))
+               for column in rows[0])
+assert rows[1][0] == "9" and rows[1][6] == "SUM"
+assert len(rows[0]) == len(rows[1])
+PY
+
+python3 "$src_dir/scripts/plot_sum.py" "$tmp_dir/default.csv" \
+	--list-fields >/dev/null
+
+# Unselected LPI reporting must not generate an unrelated cpuidle warning.
+"$armstat_bin" -s summary_freq_mhz -f json -i "$sample_interval" -n 1 \
+	>"$tmp_dir/frequency-only.json" 2>"$tmp_dir/frequency-only.stderr"
+if grep -F 'cpuidle' "$tmp_dir/frequency-only.stderr" >/dev/null; then
+	echo "target-test frequency-only selection produced a cpuidle diagnostic" >&2
+	exit 1
+fi
+
+# Probe describes the platform even when all display fields are hidden.
+"$armstat_bin" --probe -H all >"$tmp_dir/hidden-probe.txt"
+python3 - "$tmp_dir/probe.txt" "$tmp_dir/hidden-probe.txt" <<'PY'
+import sys
+
+def fields(path):
+    result = {}
+    with open(path, encoding="utf-8") as stream:
+        for line in stream:
+            if ":" in line:
+                key, value = line.strip().split(":", 1)
+                result[key] = value.strip()
+    return result
+
+full, hidden = map(fields, sys.argv[1:])
+for key in ["probe_schema_version", "tracked_cpus", "idle_states",
+            "numa_temp_sensors", "mem_bw_supported", "uncore_freq_supported"]:
+    assert hidden[key] == full[key], (key, full.get(key), hidden.get(key))
+for state in range(min(int(full["idle_states"]), 8)):
+    key = f"idle_state_{state}_name"
+    assert hidden[key] == full[key], (key, full.get(key), hidden.get(key))
+PY
+
+"$armstat_bin" -i "$sample_interval" -n 2 >"$tmp_dir/default.txt"
+python3 - "$tmp_dir/default.txt" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    output = stream.read()
+assert "--- interval" not in output
+lines = output.splitlines()
+header = next(i for i, line in enumerate(lines) if line.startswith("Timestamp"))
+rows = lines[header:]
+assert len(rows) == 3 and all(rows), rows
+assert all(re.match(r"\d{4}-\d{2}-\d{2}T.*\.\d{3}[+-]\d{2}:\d{2}\s+SUM", row)
+           for row in rows[1:]), rows
+PY
+
+if [ "$idle_states" -eq 0 ]; then
+	for selector in idle-usage lpi0_usage; do
+		for format in text json csv; do
+			if "$armstat_bin" -s "$selector" -f "$format" \
+				-i "$sample_interval" -n 1 \
+				>"$tmp_dir/empty-cpu.stdout" 2>"$tmp_dir/empty-cpu.stderr"; then
+				echo "target-test unavailable usage-only view unexpectedly succeeded" >&2
+				exit 1
+			fi
+			test ! -s "$tmp_dir/empty-cpu.stdout"
+			grep -F 'cannot produce data' "$tmp_dir/empty-cpu.stderr" >/dev/null
+		done
+	done
+
+	"$armstat_bin" -s idle-usage,summary_freq_mhz -f json \
+		-i "$sample_interval" -n 1 >"$tmp_dir/usage-with-summary.json"
+	python3 - "$tmp_dir/usage-with-summary.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    samples = json.load(stream)
+assert len(samples) == 1
+assert "freq" in samples[0]["summary"]
+PY
+fi
 
 printf '%s\n' 'previous-valid-export' >"$tmp_dir/existing.out"
 if "$armstat_bin" -S -s cpu -o "$tmp_dir/existing.out" -i "$sample_interval" \
@@ -657,7 +758,24 @@ PY
 python3 "$src_dir/scripts/plot_sum.py" "$tmp_dir/samples.csv" \
 	--list-fields >/dev/null
 
+# Daily CPU output omits package aggregates and slowly changing configuration.
 "$armstat_bin" -a -f csv -i "$sample_interval" -n 1 \
+	>"$tmp_dir/live.csv"
+python3 - "$tmp_dir/live.csv" <<'PY'
+import csv
+import sys
+
+with open(sys.argv[1], newline="", encoding="utf-8") as stream:
+    rows = list(csv.reader(stream))
+header = rows[0]
+assert {row[header.index("Scope")] for row in rows[1:]} == {"SUM", "CPU"}
+assert {"cpu.package", "cpu.core", "cpu.node", "cpu.freq"}.issubset(header)
+assert not {"cpu.min", "cpu.max", "cpu.governor", "cpu.boost"}.intersection(header)
+assert not any("_usage" in column or column.startswith("package.") for column in header)
+assert len({len(row) for row in rows}) == 1
+PY
+
+"$armstat_bin" -s all -f csv -i "$sample_interval" -n 1 \
 	>"$tmp_dir/mixed.csv"
 python3 - "$tmp_dir/mixed.csv" <<'PY'
 import csv
@@ -674,6 +792,7 @@ assert header[:9] == [
 assert len({len(row) for row in rows}) == 1
 scopes = {row[6] for row in rows[1:]}
 assert {"SUM", "PKG", "CPU"}.issubset(scopes), scopes
+assert {"cpu.min", "cpu.max", "cpu.governor", "cpu.boost"}.issubset(header)
 for row in rows[1:]:
     assert row[0] == "9"
     assert int(row[2]) > 0

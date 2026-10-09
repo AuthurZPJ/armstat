@@ -26,6 +26,7 @@
 #include "sampling_deadline.h"
 #include "aggregator.h"
 #include "formatter.h"
+#include "formatter_section.h"
 #include "sysstat.h"
 
 static unsigned long long prev_collector_time_us;
@@ -90,6 +91,33 @@ static void disable_cpuidle_with_warning(const char *reason)
 	enable_cpuidle(0);
 }
 
+static int cpuidle_output_requested(void)
+{
+	unsigned int requested = 0;
+	int summary_mode = section_is_summary_mode();
+	int emit_cpu = !summary_mode && section_emit_cpu();
+	int emit_summary = summary_mode ||
+		(section_default_summary_output() &&
+		 (!cpu_inventory_filter_is_active() || !emit_cpu));
+
+	/*
+	 * Selection precedes state discovery. Effective field visibility cannot
+	 * decide whether to initialize cpuidle: an explicitly selected state may
+	 * be hidden until its sysfs state directory has been discovered.
+	 */
+	if (emit_summary)
+		requested |= get_requested_series_mask(
+			FIELD_SCOPE_SYSTEM, FIELD_SERIES_IDLE_STATE_RESIDENCY);
+	if (emit_cpu) {
+		requested |= get_requested_series_mask(
+			FIELD_SCOPE_CPU, FIELD_SERIES_IDLE_STATE_RESIDENCY);
+		requested |= get_requested_series_mask(
+			FIELD_SCOPE_CPU, FIELD_SERIES_IDLE_STATE_USAGE);
+	}
+
+	return requested != 0;
+}
+
 static void sync_cpuidle_runtime_state(int hotplug_rebuild)
 {
 	/*
@@ -97,6 +125,13 @@ static void sync_cpuidle_runtime_state(int hotplug_rebuild)
 	 * lifecycle tied to the collector so split-LPI reporting is either fully
 	 * available or explicitly disabled, never half-initialized.
 	 */
+	if (!cpuidle_output_requested()) {
+		/* Free old descriptors without changing the user's backend policy. */
+		close_cpuidle();
+		update_idle_state_visibility();
+		return;
+	}
+
 	if (!is_cpuidle_enabled())
 		return;
 

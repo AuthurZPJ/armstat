@@ -11,8 +11,10 @@ and IPC through Linux procfs, sysfs, hwmon, and perf interfaces.
 The initial target is Huawei Kunpeng; each deployment model needs physical
 hardware acceptance testing.
 .PP
-Default output contains one \fBSUM\fR row and one row per package.
-\fB-a\fR adds CPU rows and all supported base column groups.
+Default output contains one \fBSUM\fR row.
+\fB-a\fR adds CPU rows and live metrics, including CPU topology.
+\fB-s all\fR selects the full base view with package rows, configuration,
+and idle-state usage rates.
 \fB-S\fR emits only the summary. Explicit \fB-s\fR selection determines
 which scopes are emitted. PMU and IPC require an explicit request.
 .SH OPTIONS
@@ -53,16 +55,18 @@ Measure one complete interval and exit. Text retains headers unless
 Emit one SUM row or object per interval.
 .TP
 .B \-a, \-\-all
-Enable supported base groups and expand the default view with CPU rows.
-Does not enable PMU or IPC.
+Expand live metrics with CPU rows and Pkg/Core/Node topology. Omit package
+aggregate rows, Min/Max/Governor/Boost, and LPI usage rates; use \fB-s all\fR
+for the full base view. Neither view enables PMU or IPC.
 .TP
 .BI \-f ", " \-\-format " format"
 Output format: \fBtext\fR (default), \fBjson\fR, or \fBcsv\fR.
 .TP
 .BI \-s ", " \-\-show " items"
-Select comma-separated groups or exact fields. Repeated options form a union;
-explicit \fB-p\fR, \fB-I\fR, and \fB-J\fR requests remain enabled regardless
-of their position relative to \fB-s\fR.
+Select comma-separated groups or exact fields. The first option starts a
+whitelist, retaining explicit \fB-p\fR, \fB-I\fR, and \fB-J\fR requests.
+Repeated options form a union, including the full \fB-s all\fR selection,
+without restoring unrelated groups hidden by \fB-H\fR.
 .TP
 .BI \-H ", " \-\-hide " items"
 Hide comma-separated groups or exact fields.
@@ -86,6 +90,7 @@ Report topology, data sources, candidate counts, Busy/Idle policy, idle-state
 names, and basic PMU availability. The key-value contract has
 \fBprobe_schema_version: 1\fR. The PMU check opens cycles on the first selected
 CPU only; it does not verify every event on every CPU.
+Discovery is independent of \fB-s\fR/\fB-H\fR selection.
 .TP
 .B \-d, \-\-debug
 Show initialization and runtime diagnostics.
@@ -97,16 +102,38 @@ Print the version and exit.
 Print command-line help and exit.
 .SH COLUMN SELECTION
 Groups are \fBcpu\fR, \fBpkg/package\fR, \fBcore\fR, \fBnuma/node\fR,
-\fBfreq\fR, \fBidle\fR, \fBpower\fR, \fBtemp\fR, \fBpmu\fR,
+\fBfreq\fR, \fBfreq-config\fR, \fBidle\fR, \fBidle-usage\fR,
+\fBpower\fR, \fBtemp\fR, \fBpmu\fR,
 \fBsysstat/irq\fR, \fBmembw/mem\fR, \fBipc\fR, \fBenergy/joules\fR,
 and \fBall\fR. A slash separates aliases, not literal option syntax.
-Exact fields include \fBIdle%\fR, \fBIOWait%\fR, \fBLPI-0\fR,
-\fBPower\fR, and \fBpkg_freq_mhz\fR. Use \fB--list\fR for the complete registry.
+Group names are case-insensitive and take precedence. Other stable field IDs
+match one field before text/JSON aliases; shared aliases do not expand row
+scopes. CPU-only aliases such as \fBMin\fR and \fBlpi0_usage\fR enable CPU rows.
+Use \fB--list\fR for the complete registry and stable IDs such as
+\fBfreq_mhz\fR, \fBsummary_freq_mhz\fR, and \fBpkg_freq_mhz\fR.
+.PP
+\fBfreq\fR selects current frequency and UncoreFreq; \fBfreq-config\fR selects
+Min/Max/Governor/Boost. \fBidle\fR selects LPI residency and Busy/Idle/IOWait;
+\fBidle-usage\fR selects state-entry rates. Core, numa, freq-config, and
+idle-usage automatically enable CPU rows.
+\fB-s cpu\fR alone supplies common per-CPU frequency, utilization, LPI residency,
+and temperature without SUM. Combined selections use the requested fields and
+scopes. These defaults preserve explicit \fB-H\fR exclusions.
+Independent \fB-p\fR, \fB-I\fR, and \fB-J\fR requests retain required SUM
+output, subject to CPU-filter rules.
+The first \fB-s\fR replaces earlier view settings: \fB-a -s cpu\fR selects
+the CPU shortcut; \fB-s cpu -a\fR selects the expanded live view.
+.PP
+Package rows are hidden by default; select \fBpkg\fR, \fBpackage\fR,
+or an exact field such as \fBpkg_freq_mhz\fR to request them. CPU package
+topology remains available for identification and plotting.
 Unknown items and selections that cannot emit any row fail at startup.
+If capability discovery leaves the selected view with only CPU row IDs and
+no data columns, startup fails.
 .PP
 \fB--cpu\fR filters collection and CPU-derived aggregates, including perf
 resources. Global counters and platform sensors retain their own scope.
-Default aggregate rows use the filtered CPUs. Explicitly expanding CPU rows
+The default summary uses the filtered CPUs. Explicitly expanding CPU rows
 with a CPU filter suppresses implicit aggregate sections; use
 \fB-S --cpu\fR for a filtered summary. Explicit aggregate-only selections
 remain available.
@@ -116,9 +143,11 @@ clock deadlines; an overrun skips missed deadlines instead of issuing catch-up
 bursts. CPU hotplug rebuilds dependent state and establishes a new baseline
 before output resumes.
 .PP
-Multi-row text marks each interval with its number, timezone-qualified
-sample-end timestamp, and measured duration. Summary-only rows start with a
-timestamp. Headers include units; \fB/int\fR means a count per interval.
+When only SUM is emitted, text uses one timestamped data row per interval.
+Other views retain interval blocks with sample number, timezone-qualified
+sample-end timestamp, and measured duration. Text timestamps keep the date
+and timezone at millisecond precision. Headers include units; \fB/int\fR means
+a count per interval.
 Headers repeat when columns or widths change, including sparse package IDs.
 .PP
 CPU rows use real Linux IDs and are sorted by ID. Package rows group selected
@@ -205,11 +234,15 @@ the sample end; timestamp_iso is local RFC 3339 with nine fractional digits.
 Use duration_us for the measured monotonic window.
 .PP
 JSON is an array of interval objects with selected summary, packages, and cpus
-sections. Package and CPU objects use package and cpu identity keys.
+sections. Default output includes only summary; \fB-a\fR adds cpus.
+\fB-s all\fR also includes packages. Machine timestamps retain nine fractional
+digits and duration_us retains the measured window.
+Package and CPU objects use package and cpu identity keys.
 Unavailable values are null; available Boost is boolean. Strings are escaped
 and non-finite numbers become null.
 .PP
-CSV has one header. Summary-only uses Scope=SUM; package-only uses Package;
+CSV has one header. Default and summary-only output use Scope=SUM;
+package-only uses Package;
 CPU-only uses CPU. Mixed output uses Scope,CPU,Package with SUM, PKG, and CPU
 rows. Mixed data columns are qualified with summary., package., or cpu.;
 compact columns use JSON keys. Unavailable and out-of-scope cells are empty.
@@ -249,7 +282,11 @@ armstat --probe
 armstat -i 1 -n 5
 armstat -S -a -i 1 -n 10
 armstat -a --cpu 0-3
+armstat -s cpu
 armstat -s cpu,freq,idle
+armstat -s freq-config
+armstat -s idle-usage
+armstat -s all
 armstat -s pkg_freq_mhz
 armstat -I
 armstat -S -a -f json -O summary.json -i 1 -n 60

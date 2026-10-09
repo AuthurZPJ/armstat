@@ -91,6 +91,16 @@ static int output_line_contains(const char *output, const char *line_key,
 	return 0;
 }
 
+static int count_output_matches(const char *output, const char *needle)
+{
+	int count = 0;
+
+	for (const char *match = strstr(output, needle); match;
+	     match = strstr(match + strlen(needle), needle))
+		count++;
+	return count;
+}
+
 static void reset_test_state(void)
 {
 	reset_columns();
@@ -477,6 +487,7 @@ static void test_quiet_modes_suppress_startup_header(void)
 	args.rec = &rec;
 	output = capture_stdout(emit_text_record, &args);
 	assert(strstr(output, "CPU") == NULL);
+	assert(strstr(output, "Freq[MHz]") == NULL);
 	assert(strstr(output, "armstat") == NULL);
 	free(output);
 
@@ -489,7 +500,7 @@ static void test_quiet_modes_suppress_startup_header(void)
 	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
 	args.rec = &rec;
 	output = capture_stdout(emit_text_record, &args);
-	assert(strstr(output, "CPU") != NULL);
+	assert(strstr(output, "Freq[MHz]") != NULL);
 	free(output);
 
 	assert(parse_test_args_result(4, quiet_header_argv, &opts) == 0);
@@ -642,12 +653,47 @@ static void test_parse_summary_all_keeps_base_groups_only(void)
 static void test_parse_all_ipc_enables_default_pmu_pair(void)
 {
 	char *argv[] = {"armstat", "-a", "-I", NULL};
+	char *reverse[] = {"armstat", "-I", "-a", NULL};
+	char *default_ipc[] = {"armstat", "-I", NULL};
+	struct field_desc *expected_cpu[64], *expected_sum[64], *actual[64];
+	int cpu_count, sum_count, actual_count;
 	struct armstat_options opts = parse_test_args(3, argv);
 
 	assert(show_pmu == 1);
 	assert(show_ipc == 1);
 	assert(opts.pmu_events != NULL);
 	assert(strcmp(opts.pmu_events, "cycles,instructions") == 0);
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "power_mw"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "ctx_switches"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_ipc"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "governor"));
+	assert(section_emit_package() == 0);
+	get_enabled_fields(FIELD_SCOPE_CPU, expected_cpu, &cpu_count);
+	get_enabled_fields(FIELD_SCOPE_SYSTEM, expected_sum, &sum_count);
+
+	opts = parse_test_args(3, reverse);
+	assert(strcmp(opts.pmu_events, "cycles,instructions") == 0);
+	get_enabled_fields(FIELD_SCOPE_CPU, actual, &actual_count);
+	assert(actual_count == cpu_count);
+	assert(memcmp(actual, expected_cpu, cpu_count * sizeof(*actual)) == 0);
+	get_enabled_fields(FIELD_SCOPE_SYSTEM, actual, &actual_count);
+	assert(actual_count == sum_count);
+	assert(memcmp(actual, expected_sum, sum_count * sizeof(*actual)) == 0);
+	assert(section_emit_package() == 0);
+
+	parse_test_args(2, default_ipc);
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "summary_freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "power_mw"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "busy_percent"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "idle_percent"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "ipc"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_ipc"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "governor"));
+	assert(show_sysstat == 0);
 }
 
 static void test_independent_metric_options_are_order_independent(void)
@@ -692,6 +738,69 @@ static void test_repeated_show_options_form_a_union(void)
 	assert(any_fields_enabled(FIELD_SCOPE_CPU));
 }
 
+static void test_repeated_show_does_not_restore_hidden_independent_requests(void)
+{
+	char *ipc[] = {"armstat", "-s", "cpu", "-I", "-H", "ipc", "-s", "freq", NULL};
+	char *pmu[] = {"armstat", "-s", "cpu", "-p", "cycles", "-H", "pmu", "-s", "freq", NULL};
+	char *energy[] = {"armstat", "-s", "cpu", "-J", "-H", "energy", "-s", "freq", NULL};
+
+	parse_test_args(8, ipc);
+	assert(show_pmu == 1);
+	assert(show_ipc == 0);
+	assert(!scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "ipc"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_ipc"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+
+	parse_test_args(9, pmu);
+	assert(show_pmu == 0);
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+
+	parse_test_args(8, energy);
+	assert(show_energy == 0);
+	assert(!scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "energy_joules"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+}
+
+static void test_full_and_live_views_survive_repeated_show_options(void)
+{
+	char *full[] = {"armstat", "-s", "all", "-s", "freq", NULL};
+	char *hide_config[] = {"armstat", "-s", "all", "-H", "freq-config", "-s", "idle", NULL};
+	char *restore_freq[] = {"armstat", "-s", "all", "-H", "freq", "-s", "freq", NULL};
+	char *live[] = {"armstat", "-s", "freq", "-a", "-s", "idle", NULL};
+
+	parse_test_args(5, full);
+	assert(section_emit_package() == 1);
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "power_mw"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "ctx_switches"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "governor"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+	assert(show_idle_usage == 1);
+
+	parse_test_args(7, hide_config);
+	assert(section_emit_package() == 1);
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "power_mw"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "governor"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "min_freq_mhz"));
+
+	parse_test_args(7, restore_freq);
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "power_mw"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "governor"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+
+	parse_test_args(6, live);
+	assert(section_emit_package() == 0);
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "ctx_switches"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "numa_node"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "governor"));
+	assert(show_idle_usage == 0);
+}
+
 static void test_parse_probe_and_busy_source(void)
 {
 	char *argv[] = {"armstat", "--probe", "--busy-source", "task-clock", NULL};
@@ -699,6 +808,109 @@ static void test_parse_probe_and_busy_source(void)
 
 	assert(opts.probe_only == 1);
 	assert(get_busy_source_mode() == BUSY_SOURCE_TASK_CLOCK);
+}
+
+static void test_live_and_full_selection_have_distinct_data_surfaces(void)
+{
+	char *live[] = {"armstat", "-a", NULL};
+	char *full[] = {"armstat", "-s", "ALL", NULL};
+	char *core[] = {"armstat", "-s", "core", NULL};
+	char *node[] = {"armstat", "-s", "numa", NULL};
+
+	parse_test_args(2, live);
+	assert(section_emit_cpu() == 1);
+	assert(section_emit_default_summary() == 1);
+	assert(section_emit_package() == 0);
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "package"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "core"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "numa_node"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "min_freq_mhz"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "governor"));
+	assert(show_idle_usage == 0);
+	assert(show_pmu == 0 && show_ipc == 0);
+
+	parse_test_args(3, full);
+	assert(section_emit_cpu() == 1);
+	assert(section_emit_default_summary() == 1);
+	assert(section_emit_package() == 1);
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "min_freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "governor"));
+	assert(show_idle_usage == 1);
+	assert(show_pmu == 0 && show_ipc == 0);
+
+	parse_test_args(3, core);
+	assert(section_emit_cpu() == 1);
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "core"));
+	assert(section_has_output() == 1);
+
+	parse_test_args(3, node);
+	assert(section_emit_cpu() == 1);
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "numa_node"));
+	assert(section_has_output() == 1);
+}
+
+static void test_cpu_shortcut_retains_hidden_fields_and_independent_requests(void)
+{
+	char *cpu[] = {"armstat", "-s", "cpu", NULL};
+	char *hide_freq[] = {"armstat", "-s", "cpu", "-H", "freq", NULL};
+	char *hide_idle[] = {"armstat", "-s", "cpu", "-H", "idle", NULL};
+	char *energy[] = {"armstat", "-s", "cpu", "-J", NULL};
+	char *ipc[] = {"armstat", "-s", "cpu", "-I", NULL};
+	char *pmu[] = {"armstat", "-s", "cpu", "-p", "cycles", NULL};
+	char *pmu_first[] = {"armstat", "-p", "cycles", "-s", "cpu", NULL};
+	char *hide_ipc[] = {"armstat", "-s", "cpu", "-I", "-H", "ipc", NULL};
+	char *expand[] = {"armstat", "-s", "cpu", "-a", NULL};
+	char *narrow[] = {"armstat", "-a", "-s", "cpu", NULL};
+
+	parse_test_args(3, cpu);
+	assert(section_emit_cpu() == 1);
+	assert(section_emit_default_summary() == 0);
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_iowait_percent"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "min_freq_mhz"));
+
+	parse_test_args(5, hide_freq);
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+	assert(section_emit_default_summary() == 0);
+
+	parse_test_args(5, hide_idle);
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "freq_mhz"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+	assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_iowait_percent"));
+	assert(get_requested_series_mask(FIELD_SCOPE_CPU,
+		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0U);
+
+	parse_test_args(4, energy);
+	assert(section_emit_default_summary() == 1);
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "energy_joules"));
+
+	parse_test_args(4, ipc);
+	assert(section_emit_default_summary() == 1);
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "ipc"));
+
+	parse_test_args(5, pmu);
+	assert(section_emit_default_summary() == 1);
+	assert(show_pmu == 1);
+
+	parse_test_args(5, pmu_first);
+	assert(section_emit_default_summary() == 1);
+	assert(show_pmu == 1);
+
+	parse_test_args(6, hide_ipc);
+	assert(section_emit_default_summary() == 1);
+	assert(show_pmu == 1);
+	assert(!scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "ipc"));
+
+	parse_test_args(4, expand);
+	assert(section_emit_default_summary() == 1);
+	assert(show_sysstat == 1);
+	assert(section_emit_package() == 0);
+
+	parse_test_args(4, narrow);
+	assert(section_emit_default_summary() == 0);
+	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
 }
 
 static void test_mixed_scope_csv_serializer_uses_scoped_headers(void)
@@ -848,7 +1060,82 @@ static void test_machine_string_and_boolean_semantics(void)
 	free(output);
 }
 
-static void test_default_json_package_has_unique_package_key(void)
+static void test_default_machine_output_emits_summary_only(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[1];
+	struct cpu_freq_info freqs[1];
+	struct serializer_args args;
+	char *output;
+
+	reset_test_state();
+	reset_machine_state();
+	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	rec.package_count = 1;
+	rec.packages[0].package_id = 7;
+	rec.packages[0].cpu_count = 1;
+	args.rec = &rec;
+
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, "\"schema_version\": 9") != NULL);
+	assert(strstr(output, "\"summary\": {") != NULL);
+	assert(strstr(output, "\"packages\": [") == NULL);
+	assert(strstr(output, "\"cpus\": [") == NULL);
+	free(output);
+
+	output = capture_stdout(emit_csv_mixed_scope, &args);
+	assert(strstr(output, "timestamp_iso,Scope,freq") != NULL);
+	assert(strstr(output, ",SUM,") != NULL);
+	assert(strstr(output, "Package") == NULL);
+	assert(strstr(output, "CPU") == NULL);
+	assert(strstr(output, "summary.") == NULL);
+	assert(strstr(output, ",PKG,") == NULL);
+	assert_csv_rows_are_rectangular(output);
+	free(output);
+}
+
+static void test_default_pmu_cpu_output_retains_package_topology(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[1];
+	struct cpu_freq_info freqs[1];
+	struct cpu_inventory_seed cpus[1] = {
+		{0, 1, 1, 7, 0, 0},
+	};
+	struct serializer_args args;
+	char *output;
+	char *argv[] = {"armstat", "-I", "-f", "json", NULL};
+
+	parse_test_args(4, argv);
+	reset_machine_state();
+	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	assert(cpu_inventory_seed(cpus, 1) == 0);
+	rec.package_count = 1;
+	rec.packages[0].package_id = 7;
+	args.rec = &rec;
+
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, "\"summary\": {") != NULL);
+	assert(strstr(output, "\"cpus\": [") != NULL);
+	assert(strstr(output, "\"cpu\": 0, \"package\": 7") != NULL);
+	assert(strstr(output, "\"packages\": [") == NULL);
+	free(output);
+
+	/* Explicit hiding still removes topology without removing CPU rows. */
+	assert(parse_column_option("pkg", 0) == 0);
+	reset_machine_state();
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, "\"cpus\": [") != NULL);
+	assert(strstr(output, "\"package\":") == NULL);
+	assert(strstr(output, "\"packages\": [") == NULL);
+	free(output);
+}
+
+static void test_selected_json_package_has_unique_package_key(void)
 {
 	struct interval_record rec;
 	struct sys_snapshot raw;
@@ -984,6 +1271,50 @@ static void test_text_header_interval_counts_complete_data_rows(void)
 	set_text_header_interval(0);
 }
 
+static void test_compact_pmu_only_summary_headers_quiet_and_refresh(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[1];
+	struct cpu_freq_info freqs[1];
+	struct serializer_args args;
+	char *argv[] = {"armstat", "-S", "-s", "pmu", "-p", "cycles", NULL};
+	char *output;
+
+	parse_test_args(6, argv);
+	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	args.rec = &rec;
+	/* Event metadata survives unavailable perf access on the host/VM. */
+	(void)init_pmu_events("cycles");
+	assert(get_pmu_event_count() == 1);
+	assert(!any_fields_enabled(FIELD_SCOPE_SYSTEM));
+	output = capture_stdout(emit_two_text_records, &args);
+	assert(count_output_matches(output, "Timestamp") == 1);
+	assert(count_output_matches(output, "cycles[/int]") == 1);
+	assert(count_output_matches(output, "\n") == 3);
+	assert(strstr(output, "--- interval") == NULL);
+	assert(strstr(output, "\n\n") == NULL);
+	free(output);
+
+	set_text_quiet(0);
+	set_text_header_interval(1);
+	output = capture_stdout(emit_two_text_records, &args);
+	assert(count_output_matches(output, "cycles[/int]") == 2);
+	assert(count_output_matches(output, "\n") == 4);
+	free(output);
+
+	set_text_quiet(1);
+	output = capture_stdout(emit_two_text_records, &args);
+	assert(strstr(output, "Timestamp") == NULL);
+	assert(strstr(output, "cycles[/int]") == NULL);
+	assert(strstr(output, ".123+00:00") == NULL);
+	assert(count_output_matches(output, "\n") == 2);
+	free(output);
+	close_pmu_events();
+	reset_test_state();
+}
+
 static void test_changed_columns_reprint_text_and_reject_csv(void)
 {
 	struct interval_record rec;
@@ -1025,7 +1356,7 @@ static void test_changed_columns_reprint_text_and_reject_csv(void)
 	free(output);
 }
 
-static void test_default_text_emits_summary_and_package_rows(void)
+static void test_default_live_and_full_text_views(void)
 {
 	struct interval_record rec;
 	struct sys_snapshot raw;
@@ -1034,6 +1365,8 @@ static void test_default_text_emits_summary_and_package_rows(void)
 	struct cpu_freq_info freqs[1];
 	struct serializer_args args;
 	char *output;
+	char *live_argv[] = {"armstat", "-a", NULL};
+	char *full_argv[] = {"armstat", "-s", "all", NULL};
 
 	reset_test_state();
 	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
@@ -1042,19 +1375,32 @@ static void test_default_text_emits_summary_and_package_rows(void)
 	rec.packages[0].cpu_count = 1;
 	args.rec = &rec;
 
-	/* Default mode: concise SUM + package rows, without per-CPU expansion. */
+	/* Default mode: SUM only, even when package data is available. */
 	output = capture_stdout(emit_text_record, &args);
-	assert(strstr(output, "Pkg0") != NULL);
+	assert(strstr(output, "Pkg0") == NULL);
 	assert(strstr(output, "SUM") != NULL);
 	assert(section_emit_cpu() == 0);
 	free(output);
 
-	/* -a enables the package and SUM sections alongside per-CPU rows. */
-	set_all_columns_enabled(1);
-	set_section_default_summary_output(1);
+	/* The daily CPU view keeps dynamic data and topology without duplicates. */
+	parse_test_args(2, live_argv);
+	output = capture_stdout(emit_text_record, &args);
+	assert(strstr(output, "Pkg0") == NULL);
+	assert(strstr(output, "CPU") != NULL);
+	assert(strstr(output, "SUM") != NULL);
+	assert(strstr(output, "Freq[MHz]") != NULL);
+	assert(strstr(output, "Min[MHz]") == NULL);
+	assert(strstr(output, "Governor") == NULL);
+	assert(strstr(output, "_usage") == NULL);
+	free(output);
+
+	/* The explicit full view preserves configuration and package sections. */
+	parse_test_args(3, full_argv);
 	output = capture_stdout(emit_text_record, &args);
 	assert(strstr(output, "Pkg0") != NULL);
 	assert(strstr(output, "SUM") != NULL);
+	assert(strstr(output, "Min[MHz]") != NULL);
+	assert(strstr(output, "Governor") != NULL);
 	assert(section_emit_cpu() == 1);
 	/* The SUM, Pkg, and CPU sections are separated by blank lines. */
 	assert(strstr(output, "\n\n") != NULL);
@@ -1078,6 +1424,7 @@ static void test_text_package_rows_align_large_sparse_ids(void)
 	char *large_row;
 
 	reset_test_state();
+	enable_package(1);
 	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
 	rec.package_count = 2;
 	rec.packages[0].package_id = 0;
@@ -1123,10 +1470,23 @@ static void test_text_sample_blocks_have_visible_interval_boundaries(void)
 	args.rec = &rec;
 
 	output = capture_stdout(emit_two_text_records, &args);
+	assert(strstr(output, "--- interval") == NULL);
+	assert(strstr(output, "\n\n") == NULL);
+	assert(count_output_matches(output, "Timestamp") == 1);
+	assert(count_output_matches(output, "\n") == 3);
+	assert(strstr(output, ".123+00:00") != NULL);
+	assert(strstr(output, ".123456789") == NULL);
+	free(output);
+
+	/* Multiple rows need a boundary identifying their complete interval. */
+	enable_cpu(1);
+	set_text_quiet(0);
+	output = capture_stdout(emit_two_text_records, &args);
 	assert(strstr(output, "--- interval 1 | ") != NULL);
 	assert(strstr(output, "\n\n--- interval 2 | ") != NULL);
 	assert(strstr(output, "duration 1.000000 s ---\n") != NULL);
-	assert(strstr(output, ".123456789") != NULL);
+	assert(strstr(output, ".123+00:00") != NULL);
+	assert(strstr(output, ".123456789") == NULL);
 	free(output);
 
 	set_text_quiet(1);
@@ -1140,7 +1500,13 @@ static void test_text_sample_blocks_have_visible_interval_boundaries(void)
 	output = capture_stdout(emit_two_text_records, &args);
 	assert(strstr(output, "--- interval") == NULL);
 	assert(strstr(output, "Timestamp") != NULL);
-	assert(strstr(output, ".123456789") != NULL);
+	assert(strstr(output, ".123+00:00") != NULL);
+	free(output);
+
+	/* Machine timestamps retain the independent nanosecond contract. */
+	reset_machine_state();
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, ".123456789+00:00") != NULL);
 	free(output);
 }
 
@@ -1319,9 +1685,9 @@ static void test_all_scope_csv_serializer_emits_package_rows(void)
 	struct cpu_freq_info freqs[1];
 	struct serializer_args args;
 	char *output;
-	char *argv[] = {"armstat", "-a", "-f", "csv", NULL};
+	char *argv[] = {"armstat", "-s", "all", "-f", "csv", NULL};
 
-	parse_test_args(4, argv);
+	parse_test_args(5, argv);
 	reset_machine_state();
 	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
 	rec.package_count = 1;
@@ -1412,6 +1778,7 @@ static void test_interval_record_materializes_owned_values(void)
 
 	reset_test_state();
 	enable_cpu(1);
+	enable_package(1);
 	seed_single_cpu_inventory();
 	cleanup_formatter_pool();
 	assert(setup_formatter_pool(-1) < 0);
@@ -1664,17 +2031,24 @@ int main(void)
 	test_parse_all_ipc_enables_default_pmu_pair();
 	test_independent_metric_options_are_order_independent();
 	test_repeated_show_options_form_a_union();
+	test_repeated_show_does_not_restore_hidden_independent_requests();
+	test_full_and_live_views_survive_repeated_show_options();
 	test_parse_probe_and_busy_source();
+	test_live_and_full_selection_have_distinct_data_surfaces();
+	test_cpu_shortcut_retains_hidden_fields_and_independent_requests();
 	test_mixed_scope_csv_serializer_uses_scoped_headers();
 	test_summary_json_serializer_emits_schema_and_summary_only();
 	test_unavailable_sensor_values_are_not_fake_zeroes();
 	test_machine_string_and_boolean_semantics();
-	test_default_json_package_has_unique_package_key();
+	test_default_machine_output_emits_summary_only();
+	test_default_pmu_cpu_output_retains_package_topology();
+	test_selected_json_package_has_unique_package_key();
 	test_empty_json_selection_has_no_dangling_comma();
 	test_empty_json_stream_closes_as_empty_array();
 	test_text_serializer_emits_column_headers_and_values();
 	test_text_header_interval_counts_complete_data_rows();
-	test_default_text_emits_summary_and_package_rows();
+	test_compact_pmu_only_summary_headers_quiet_and_refresh();
+	test_default_live_and_full_text_views();
 	test_text_package_rows_align_large_sparse_ids();
 	test_changed_columns_reprint_text_and_reject_csv();
 	test_text_sample_blocks_have_visible_interval_boundaries();

@@ -43,9 +43,11 @@ the collector itself has no Python dependency. See the reference for
 
 | Mode | Rows per interval |
 |---|---|
-| Default | One `SUM` row and one row per package |
-| `-a` | Aggregate rows plus per-CPU rows; all supported base groups |
+| Default | One `SUM` row |
+| `-a` | `SUM` and per-CPU live metrics, including CPU topology |
 | `-S` | One `SUM` row |
+| `-s cpu` | Per-CPU frequency, Busy/Idle/IOWait, LPI residency, and temperature |
+| `-s all` | Full base view, including package rows, configuration, and LPI usage |
 | Explicit `-s` | Scopes requested by the selected groups or fields |
 
 The first result follows one complete interval. `-D` measures one interval and
@@ -53,9 +55,10 @@ exits; `-n 0` runs until interrupted. The default interval is one second;
 the accepted range is `0.000001`–`31536000` seconds. Rate formulas use the
 measured window, which can differ from the requested interval.
 
-Multi-row text starts each sample with its timestamp, timezone, and duration.
-Summary-only text puts the timestamp at the start of each row. Headers include
-units; `CtxSw[/int]`, for example, means a count over the interval. `-q` omits
+When only `SUM` is emitted, text uses one timestamped data row per interval.
+Other views use interval blocks with timestamps and measured duration. Text
+timestamps retain the date and timezone at millisecond precision. Headers
+include units; `CtxSw[/int]`, for example, means a count over the interval. `-q` omits
 the banner, headers, timestamps, and interval markers. `-N N` repeats headers
 every N samples; layout changes also trigger a new header.
 
@@ -69,8 +72,11 @@ every N samples; layout changes also trigger a new header.
 | System counters | Global interval counts |
 | Power, temperature, memory bandwidth | Platform sources with their own sensor scope |
 
-Package rows group selected CPUs by physical package ID. CPU rows use real
-Linux CPU IDs and are sorted by ID.
+Package rows are hidden by default; request them with `-s pkg` (or `package`),
+an exact field such as `pkg_freq_mhz`, or `-s all`. They group selected CPUs by
+physical package ID.
+CPU rows use real Linux CPU IDs and are sorted by ID; package topology remains
+available for CPU identification and plotting.
 
 ### Important measurements
 
@@ -119,6 +125,8 @@ A missing, disabled, failed, or reset state is unavailable independently.
 A recovered cumulative counter needs a new baseline before its next interval.
 Unavailable values are `-` in text, `null` in JSON, and empty CSV cells. With
 no cpuidle support, LPI columns are hidden and Busy/Idle remains usable.
+If the selected view leaves only CPU row IDs without data columns after
+discovery, startup fails.
 
 ## Common Commands
 
@@ -126,7 +134,11 @@ no cpuidle support, LPI columns are hidden and Busy/Idle remains usable.
 armstat -D                              # One complete interval
 armstat -S -a -i 1 -n 10                # Expanded summary
 armstat -a -c 0,1,4-7                   # Selected CPUs
-armstat -s cpu,freq,idle                # CPU rows and chosen metrics
+armstat -s cpu                         # Useful CPU metrics without SUM
+armstat -s cpu,freq,idle                # SUM and CPU rows for chosen metrics
+armstat -s freq-config                 # CPU frequency limits, governor, boost
+armstat -s idle-usage                  # CPU idle-state entries per second
+armstat -s all                         # Full base view
 armstat -s pkg_freq_mhz                 # Package frequency only
 armstat -s power,temp                   # Power and temperature
 armstat -H temp                         # Hide temperature
@@ -135,14 +147,34 @@ armstat -J                             # Interval energy
 ```
 
 `--cpu` filters sampling, including PMU resources and CPU-derived aggregates.
-Platform sensors and global counters retain their own scope. Default aggregate
-rows remain available for the selected CPUs. When CPU rows are explicitly
+Platform sensors and global counters retain their own scope. The default
+summary covers the selected CPUs. When CPU rows are explicitly
 expanded with a CPU filter, implicit aggregate rows are suppressed; use
 `-S --cpu ...` for a filtered summary.
 
-`-s` and `-H` accept groups or exact fields. Repeated `-s` options form a union;
-explicit `-p`, `-I`, and `-J` requests remain enabled regardless of their
-position relative to `-s`. Unknown tokens, malformed CPU lists, empty CPU
+`freq` selects current frequency and UncoreFreq; `idle` selects LPI residency
+and Busy/Idle/IOWait. `freq-config` and `idle-usage` separately select CPU
+configuration and state-entry rates. `-a` omits those two groups and package
+rows; its CPU `Pkg`, `Core`, and `Node` columns support identification and grouping.
+
+Group names are case-insensitive: `Freq` and `freq` select the same group.
+Groups take precedence, then exact stable field IDs, then text/JSON aliases.
+Shared aliases do not expand row scopes; request CPU rows with `cpu`, `core`,
+`numa`, a stable CPU field ID, or a CPU-only alias such as `Min` or `lpi0_usage`.
+`core`, `numa`, `freq-config`, and `idle-usage`
+automatically enable CPU rows. `-s cpu` alone supplies the usual live metrics
+without SUM; combined selections use the requested fields and scopes. Its
+defaults preserve explicit `-H` exclusions. Independent `-p`, `-I`, and `-J`
+requests retain their required SUM output, subject to CPU filtering.
+
+The first `-s` replaces earlier view settings: `-a -s cpu` selects the CPU
+shortcut, while `-s cpu -a` selects the expanded live view.
+
+`-s` and `-H` accept groups or fields. The first `-s` starts a whitelist,
+retaining explicit `-p`, `-I`, and `-J` requests. Repeated `-s` options form a
+union, including the full `-s all` selection, without restoring unrelated
+groups hidden by `-H`.
+Unknown tokens, malformed CPU lists, empty CPU
 matches, and selections that cannot emit any row are startup errors.
 
 Use `armstat --list` for field IDs, scopes, units, text labels, JSON keys,
@@ -159,7 +191,7 @@ armstat -p 0x11
 
 `-p` selects event counts without automatically adding IPC; `-I` selects
 `cycles,instructions` and IPC. An explicit PMU/IPC request without an event
-list defaults to those two events. `-a` does not enable PMU/IPC.
+list defaults to those two events. Neither `-a` nor `-s all` enables PMU/IPC.
 
 Raw events require a `0x` or `0X` prefix and hexadecimal digits within 64 bits.
 Unknown or duplicate names and lists over 16 events are rejected. Known events
@@ -182,6 +214,8 @@ armstat-plot-cpu cpus.csv --group-by node --y busy
 summary, package, CPU, or mixed rows according to the selected scopes. Both
 carry `schema_version=9`, interval number, measured duration, and timestamps.
 The bundled plot loaders accept version 9 only.
+Default JSON includes only `summary`; default CSV uses the summary layout with
+`Scope=SUM`. Package rows remain available through explicit selection or `-s all`.
 
 CSV requires a fixed column layout. A capability change that alters columns
 stops capture before the affected interval with a nonzero exit. Restart CSV
@@ -222,7 +256,8 @@ armstat -d -i 1 -n 2
 
 `--probe` reports source paths, candidate counts, CPU topology, Busy/Idle policy,
 and `probe_schema_version: 1`. Its PMU check opens `cycles` on the first selected
-CPU only; actual event-by-CPU availability must be tested in a capture.
+CPU only; actual event-by-CPU availability must be tested in a capture. Discovery
+in `--probe` is independent of `-s`/`-H` selection.
 
 ## Development and Documentation
 
