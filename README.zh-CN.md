@@ -305,6 +305,9 @@ make analyze
 make target-test    # ARM64 Linux 运行检查
 ```
 
+目标机稳定性测试按 CPU 数和可用频率/空闲源计算文件描述符上限，并检查预热后的
+持续增长。
+
 - [综合参考](docs/REFERENCE.zh-CN.md)：架构、公式、导出、绘图、构建、安装与目标机验收。
 - `man armstat`：安装后的命令行手册。
 - 源码目录中的 `AGENTS.md`：代码与文档维护规则。

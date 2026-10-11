@@ -26,16 +26,24 @@ require_membw=${ARMSTAT_REQUIRE_MEMBW:-0}
 require_uncore=${ARMSTAT_REQUIRE_UNCORE:-0}
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/armstat-target.XXXXXX")
 child_pid=
+monitor_pid=
 
 cleanup()
 {
+	if [ -n "$monitor_pid" ]; then
+		kill -TERM "$monitor_pid" 2>/dev/null || true
+		wait "$monitor_pid" 2>/dev/null || true
+	fi
 	if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
 		kill -TERM "$child_pid" 2>/dev/null || true
 		wait "$child_pid" 2>/dev/null || true
 	fi
 	rm -rf "$tmp_dir"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 require_positive_integer()
 {
@@ -102,6 +110,9 @@ case $soak_iterations in
 esac
 require_positive_integer ARMSTAT_TARGET_SAMPLES "$sample_count"
 require_positive_integer ARMSTAT_MAX_RSS_KIB "$max_rss_kib"
+if [ "$max_open_fds_explicit" -eq 1 ]; then
+	require_positive_integer ARMSTAT_MAX_OPEN_FDS "$max_open_fds"
+fi
 require_positive_integer ARMSTAT_MAX_DIAGNOSTIC_LINES "$max_diagnostic_lines"
 require_percentage ARMSTAT_MIN_VALID_PERCENT "$min_valid_percent"
 require_boolean ARMSTAT_REQUIRE_FREQ "$require_freq"
@@ -392,20 +403,6 @@ assert "pmu_cycles: no" in probe.stdout
 assert "pmu_note: disabled by --no-perf; perf was not probed" in probe.stdout
 PY
 
-# Two explicitly required IPC events need two perf fds per tracked CPU.
-# Automatic IPC receives this budget only after the default capture shows IPC.
-# An explicit ARMSTAT_MAX_OPEN_FDS always wins.
-if [ -z "$max_open_fds" ]; then
-	max_open_fds=256
-	if [ "$require_pmu" -eq 1 ]; then
-		pmu_fd_budget=$((tracked_cpus * 2 + 64))
-		if [ "$pmu_fd_budget" -gt "$max_open_fds" ]; then
-			max_open_fds=$pmu_fd_budget
-		fi
-	fi
-fi
-require_positive_integer ARMSTAT_MAX_OPEN_FDS "$max_open_fds"
-
 printf '%s\n' 'previous-valid-probe' >"$tmp_dir/temp-policy.out"
 if ARMSTAT_TEMP_POLICY=invalid "$armstat_bin" --probe \
 	-o "$tmp_dir/temp-policy.out" 2>"$tmp_dir/temp-policy.stderr"; then
@@ -563,7 +560,7 @@ grep -F 'failed to finalize output' "$tmp_dir/probe-full.stderr" >/dev/null
 
 "$armstat_bin" -f json -i "$sample_interval" -n 1 \
 	>"$tmp_dir/default.json" 2>"$tmp_dir/default.stderr"
-default_ipc_visible=$(python3 - "$tmp_dir/default.json" <<'PY'
+python3 - "$tmp_dir/default.json" <<'PY'
 import json
 import sys
 
@@ -578,21 +575,12 @@ assert "pmu" not in sample["summary"]
 assert "mem_bw" not in sample["summary"]
 assert "packages" not in sample
 assert "cpus" not in sample
-print(int("ipc" in sample["summary"]))
 PY
-)
 if grep -E 'perf_event_open|PMU init failed|Failed to start PMU|PMU needs' \
 	"$tmp_dir/default.stderr" >/dev/null; then
 	echo "target-test automatic IPC produced a PMU failure diagnostic" >&2
 	exit 1
 fi
-if [ "$max_open_fds_explicit" -eq 0 ] && [ "$default_ipc_visible" -eq 1 ]; then
-	pmu_fd_budget=$((tracked_cpus * 2 + 64))
-	if [ "$pmu_fd_budget" -gt "$max_open_fds" ]; then
-		max_open_fds=$pmu_fd_budget
-	fi
-fi
-
 python3 "$src_dir/scripts/plot_sum.py" "$tmp_dir/default.json" \
 	--list-fields >/dev/null
 
@@ -1155,29 +1143,26 @@ if [ "$soak_iterations" -gt 0 ]; then
 	if [ "$require_pmu" -eq 1 ]; then
 		set -- "$@" -I
 	fi
+	# Budget expected sources before starting armstat; never infer a ceiling
+	# from the observed peak. Shared policies still need one current fd/CPU.
+	python3 "$src_dir/tests/target_resources.py" prepare --parent "$$" \
+		>"$tmp_dir/soak-resource-plan.json"
 	"$@" >"$tmp_dir/soak.json" 2>"$tmp_dir/soak.stderr" &
 	child_pid=$!
-	peak_rss_kib=0
-	peak_open_fds=0
-	while kill -0 "$child_pid" 2>/dev/null; do
-		current_rss_kib=$(awk '/^VmRSS:/ { print $2 }' \
-			"/proc/$child_pid/status" 2>/dev/null || true)
-		current_open_fds=$(find "/proc/$child_pid/fd" -mindepth 1 \
-			-maxdepth 1 2>/dev/null | wc -l | tr -d ' ')
-		case $current_rss_kib in
-		''|*[!0-9]*)
-			;;
-		*)
-			if [ "$current_rss_kib" -gt "$peak_rss_kib" ]; then
-				peak_rss_kib=$current_rss_kib
-			fi
-			;;
-		esac
-		if [ "$current_open_fds" -gt "$peak_open_fds" ]; then
-			peak_open_fds=$current_open_fds
-		fi
-		sleep 0.1
-	done
+	set -- python3 "$src_dir/tests/target_resources.py" monitor \
+		--pid "$child_pid" --plan "$tmp_dir/soak-resource-plan.json" \
+		--max-rss-kib "$max_rss_kib" --sample-interval "$soak_interval"
+	if [ "$max_open_fds_explicit" -eq 1 ]; then
+		set -- "$@" --max-open-fds "$max_open_fds"
+	fi
+	"$@" &
+	monitor_pid=$!
+	if ! wait "$monitor_pid"; then
+		monitor_pid=
+		echo "target-test soak resource monitoring failed" >&2
+		exit 1
+	fi
+	monitor_pid=
 	if ! wait "$child_pid"; then
 		child_pid=
 		echo "target-test soak capture failed" >&2
@@ -1193,14 +1178,6 @@ if [ "$soak_iterations" -gt 0 ]; then
 	if [ "$diagnostic_lines" -gt 0 ]; then
 		echo "target-test: soak emitted $diagnostic_lines bounded diagnostic line(s):" >&2
 		sed -n '1,20p' "$tmp_dir/soak.stderr" >&2
-	fi
-	if [ "$peak_rss_kib" -gt "$max_rss_kib" ]; then
-		echo "target-test soak exceeded RSS limit: $peak_rss_kib KiB > $max_rss_kib KiB" >&2
-		exit 1
-	fi
-	if [ "$peak_open_fds" -gt "$max_open_fds" ]; then
-		echo "target-test soak exceeded fd limit: $peak_open_fds > $max_open_fds" >&2
-		exit 1
 	fi
 	python3 - "$tmp_dir/soak.json" "$soak_iterations" \
 		"$min_valid_percent" "$require_freq" "$require_pmu" \
@@ -1302,7 +1279,6 @@ if require_uncore:
         summary["uncore_freq"] > 0,
     )
 PY
-	echo "target-test: soak peak RSS ${peak_rss_kib} KiB, peak fds ${peak_open_fds}"
 fi
 
 echo "target-test: ARM64 Linux runtime checks passed"

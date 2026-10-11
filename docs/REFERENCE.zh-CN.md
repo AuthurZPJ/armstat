@@ -90,8 +90,8 @@ policy 目录的 CPU 共用 Min/Max/Governor 读取与缓存；当前频率仍�
 配置读取失败会使相关值失效；超过 `max(2 × 目标轮询周期, 2 × 采样区间)`
 未成功刷新的缓存也变为不可用。刷新发生在快速快照之后，更新或读取失败通常在
 下一样本可见；复制快照时检查年龄。`-d` 描述刷新后的缓存，报告单元数、实际耗时
-与预算、最近完整
-轮询时长、最大配置年龄和过期/不可用 CPU 数。运行中修改 disable 标志随游标推进生效。
+与预算、最近完整轮询时长、最大配置年龄和过期/不可用 CPU 数。运行中修改
+disable 标志随游标推进生效。
 
 读取按字段和输出层级选择。只有 Busy/Idle/IOWait 或系统计数器需要时，才在该
 区间解析一次 `/proc/stat`；仅选择 LPI 不需要它。cpuidle 只读选中的状态和计数器：
@@ -435,10 +435,28 @@ ARMSTAT_SOAK_ITERATIONS=1000 ARMSTAT_SOAK_INTERVAL=1 make target-test
 目标测试还检查选项、输出失败、探测结构、文本、JSON/CSV、时间戳、缺失值与
 资源用量。稳定性采样检查 Busy/Idle 和所有强制能力的有效样本比例，默认至少 95%。
 可调整 `ARMSTAT_MIN_VALID_PERCENT`、`ARMSTAT_MAX_RSS_KIB`、`ARMSTAT_MAX_OPEN_FDS`
-和 `ARMSTAT_MAX_DIAGNOSTIC_LINES`。未设 FD 上限时默认为 256；强制 PMU 或首次
-默认采样实际包含 IPC 时，使用 `max(256, tracked_cpus * 2 + 64)`，覆盖事件对
-及其他运行 FD。未强制 PMU 且自动 IPC 不可用时仍保留 256，显式
-`ARMSTAT_MAX_OPEN_FDS` 始终优先。
+和 `ARMSTAT_MAX_DIAGNOSTIC_LINES`。汇总稳定性采样按独立的源库存计算 FD 上限：
+
+```text
+max(256, 继承 FD 数 + 64 + 2 × 可表示的 present CPU 数
+         + 已存在的各 CPU cpuinfo_cur_freq 路径数
+         + 已存在的各 CPU state0..7/time 路径数)
+```
+
+即使 perf 当前不可用，也为每个 CPU 预留两个事件 FD。共享 cpufreq policy 的当前
+频率仍按每 CPU 一个 FD 计算；汇总 LPI 只缓存 `time`，不缓存 `usage`。额外 64
+个位置覆盖 procfs、传感器、uncore、带宽和临时读取。测试期间定期刷新源库存，
+超过自动预算时也会先重新探测，允许热插拔与源恢复；显式
+`ARMSTAT_MAX_OPEN_FDS` 始终优先。上限不裁剪至启动时的软 `RLIMIT_NOFILE`，
+因为 PMU 初始化可以提高它；采集器已在实际限制较低时
+缩减 sysfs 缓存。
+
+监控器在 `/proc/stat` 打开并预热一秒后，扣除预期源缓存、perf、标准输入输出和
+继承描述符，检查其余 FD 的持续增长。同一缓存源的重复打开计入额外 FD，其总数
+始终不得超过预留的 64 个位置；每秒窗口取最小值以忽略临时读取，至少三个完整
+窗口才判断持续增长。源库存变化时
+重新开始观察，并为旧缓存保留至少一秒或两个采样区间的过渡期，取两者较长值。
+短采样会明确提示尚未检查增长，仍检查观测到的 RSS 和 FD 峰值。
 
 发布验收要求主机测试、静态分析、ASan/UBSan 检查、真实绘图、能力强制目标测试、人工
 检视文本/汇总/JSON/CSV，以及物理服务器上的持续运行。VM/容器只能证明可移植性

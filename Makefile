@@ -219,6 +219,7 @@ test: $(TARGET) $(TEST_BINS)
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_loaders.py
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_render.py
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_csv_streaming.py
+	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_target_resources.py
 	sh $(SRC_DIR)/tests/test_build.sh
 
 .PHONY: target-test

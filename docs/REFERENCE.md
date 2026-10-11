@@ -106,9 +106,9 @@ Failed configuration reads invalidate the affected values. Cached values also
 expire after `max(2 × target sweep, 2 × sample interval)` without a successful
 refresh. Since refresh follows the fast snapshot, updated or failed reads
 usually appear in the next sample; age is checked while copying each snapshot.
-`-d` describes the cache after refresh and reports units, work/budget time, the last completed sweep
-duration, maximum configuration age, and stale/unavailable CPU counts. Runtime disable
-changes take effect as the cursor advances.
+`-d` describes the cache after refresh and reports units, work/budget time,
+the last completed sweep duration, maximum configuration age, and
+stale/unavailable CPU counts. Runtime disable changes take effect as the cursor advances.
 
 Reads follow selected fields and scopes. `/proc/stat` is parsed once when
 Busy/Idle/IOWait or system counters need it; LPI-only output does not need it.
@@ -527,11 +527,35 @@ The target test also checks options, output failures, probe structure, text,
 JSON/CSV, timestamps, missing values, and resources. A soak checks Busy/Idle and
 every required capability's valid-sample ratio, defaulting to at least 95%.
 Tune `ARMSTAT_MIN_VALID_PERCENT`, `ARMSTAT_MAX_RSS_KIB`, `ARMSTAT_MAX_OPEN_FDS`,
-and `ARMSTAT_MAX_DIAGNOSTIC_LINES` as needed. Without an explicit FD ceiling,
-the default is 256. If PMU is required or the initial default capture contains
-IPC, it becomes `max(256, tracked_cpus * 2 + 64)`, covering the event pair and
-other runtime FDs. When PMU is not required and automatic IPC is unavailable,
-the limit stays at 256; an explicit `ARMSTAT_MAX_OPEN_FDS` always takes precedence.
+and `ARMSTAT_MAX_DIAGNOSTIC_LINES` as needed. The summary soak computes its FD
+ceiling independently of observed usage:
+
+```text
+max(256, inherited FDs + 64 + 2 * representable present CPUs
+         + existing per-CPU cpuinfo_cur_freq paths
+         + existing per-CPU state0..7/time paths)
+```
+
+The event pair reserves two perf descriptors per CPU even if perf is currently
+unavailable. Shared cpufreq policies still need one current-frequency descriptor
+per CPU; summary LPI reads retain `time` descriptors, without `usage`. The 64
+extra slots cover procfs, sensors, uncore, bandwidth, and temporary reads.
+Source discovery refreshes during the soak and before rejecting an exceeded
+automatic budget to allow hotplug and recovery; an explicit
+`ARMSTAT_MAX_OPEN_FDS` always takes precedence. The ceiling is not
+clipped to the launch-time soft `RLIMIT_NOFILE`: PMU initialization can raise it,
+and the collector already reduces sysfs caching when the actual limit is low.
+
+After `/proc/stat` is open and a one-second warmup completes, the monitor checks
+FDs left after accounting for expected source caches, perf, stdio, and inherited
+descriptors. Duplicate opens of a cached source count as extra FDs; these
+unaccounted descriptors may never exceed the 64-slot runtime reserve. It uses
+one-second window minima to ignore temporary reads and requires at least three
+complete windows to assess sustained growth. Source-inventory changes restart
+that observation and allow old caches a transition period of at least one second
+or two sample intervals, whichever is longer. Short captures explicitly report
+that growth was not checked; they still check sampled peak RSS and FD usage
+against the ceilings.
 
 Release acceptance requires host tests, analysis, sanitizer tests, real plots,
 capability-enforced target tests, inspected text/summary/JSON/CSV samples, and a

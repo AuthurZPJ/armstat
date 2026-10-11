@@ -355,6 +355,9 @@ make analyze
 make target-test    # ARM64 Linux runtime checks
 ```
 
+Target soak tests budget file descriptors for the CPU count and available
+frequency/idle sources, and check for sustained growth after warmup.
+
 - [Reference](docs/REFERENCE.md): architecture, formulas, exports, plotting,
   builds, installation, and target acceptance.
 - `man armstat`: installed command-line manual.

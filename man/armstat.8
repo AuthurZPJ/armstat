@@ -360,6 +360,10 @@ CPU IDs above 1023 are unrepresentable. Armstat warns and continues with
 representable online IDs. Dedicated core aggregate rows are not implemented.
 Hardware telemetry and sustained behavior require validation on the actual
 server; VM execution verifies portability and contracts only.
+.PP
+Frequency and idle counters may retain descriptors per CPU and state.
+Resource acceptance must include these caches as well as perf descriptors;
+the source-tree reference describes target soak tests and limits.
 .SH EXIT STATUS
 Without a command, zero means the operation and checked output flush succeeded.
 One means invalid arguments, initialization or collection failure, an unusable
