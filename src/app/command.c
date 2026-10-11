@@ -36,6 +36,7 @@ static int cloexec_pipe(int fds[2])
 
 		close(fds[0]);
 		close(fds[1]);
+		fds[0] = fds[1] = -1;
 		errno = saved_errno;
 		return -1;
 	}
@@ -129,8 +130,16 @@ int run_monitored_command(char *const argv[], int child_stdout_fd,
 		    sigaction(SIGTTOU, &old_ttou, NULL) < 0)
 			child_error(errors[1], errno);
 		if (child_stdout_fd >= 0 && child_stdout_fd != STDOUT_FILENO) {
+			/* stdout deliberately retains fd 1 across exec or _exit. */
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 13
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wanalyzer-fd-leak"
+#endif
 			if (dup2(child_stdout_fd, STDOUT_FILENO) < 0)
 				child_error(errors[1], errno);
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 13
+#pragma GCC diagnostic pop
+#endif
 			close(child_stdout_fd);
 		}
 		do {

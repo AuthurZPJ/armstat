@@ -389,12 +389,23 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	/* Preserve an existing output file unless initialization fully succeeds. */
 	if (open_output_stream(opts->output_file) < 0)
 		return -1;
+	/*
+	 * dup2 replaces fd 1, still owned by stdout until process exit. GCC's
+	 * FD analyzer does not associate the replacement with that FILE owner.
+	 */
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 13
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wanalyzer-fd-leak"
+#endif
 	if (opts->command_argv && !opts->output_file &&
 	    dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
 		fprintf(stderr, "Error: cannot direct command statistics to stderr: %s\n",
 			strerror(errno));
 		return -1;
 	}
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 13
+#pragma GCC diagnostic pop
+#endif
 
 	/* Print interval header only after stdout is on its final destination. */
 	if (!opts->command_argv)

@@ -13,6 +13,77 @@
 
 #include "command.h"
 
+/* Keep real pipes, but fail each CLOEXEC operation before any child starts. */
+static int fault_fds[4];
+static int fault_close_calls[4];
+static int fault_fd_count;
+static int fault_pipe_calls;
+static int fault_fcntl_calls;
+static int fault_fcntl_fail_at;
+static int fault_fork_calls;
+
+static int fault_pipe(int fds[2])
+{
+	int result = pipe(fds);
+
+	assert(result == 0);
+	assert(fault_fd_count + 2 <= 4);
+	fault_pipe_calls++;
+	fault_fds[fault_fd_count++] = fds[0];
+	fault_fds[fault_fd_count++] = fds[1];
+	return result;
+}
+
+static int fault_fcntl(int fd, int operation, int value)
+{
+	assert(operation == F_SETFD && value == FD_CLOEXEC);
+	if (++fault_fcntl_calls == fault_fcntl_fail_at) {
+		errno = EIO;
+		return -1;
+	}
+	return fcntl(fd, operation, value);
+}
+
+static int fault_close(int fd)
+{
+	int result;
+	int index;
+
+	for (index = 0; index < fault_fd_count; index++) {
+		if (fault_fds[index] == fd)
+			break;
+	}
+	assert(index < fault_fd_count);
+	fault_close_calls[index]++;
+	result = close(fd);
+	/* A successful close need not preserve errno: retain the fcntl error. */
+	errno = ENOSPC;
+	return result;
+}
+
+static pid_t fault_fork(void)
+{
+	fault_fork_calls++;
+	errno = EAGAIN;
+	return -1;
+}
+
+static int fault_run_monitored_command(char *const argv[], int child_stdout_fd,
+				       int (*start_measurement)(void *),
+				       void *context);
+
+#define pipe fault_pipe
+#define fcntl fault_fcntl
+#define close fault_close
+#define fork fault_fork
+#define run_monitored_command fault_run_monitored_command
+#include "../src/app/command.c"
+#undef run_monitored_command
+#undef fork
+#undef close
+#undef fcntl
+#undef pipe
+
 static const char *self_path;
 static int tree_signal_fd;
 
@@ -33,6 +104,63 @@ static int begin_interrupt(void *context)
 	(void)context;
 	assert(kill(getpid(), SIGINT) == 0);
 	return 0;
+}
+
+static int count_measurement(void *context)
+{
+	int *calls = context;
+
+	(*calls)++;
+	return 0;
+}
+
+static void test_pipe_cloexec_failure_cleanup(void)
+{
+	char *argv[] = { "/bin/sh", "-c", "exit 0", NULL };
+	int failure;
+
+	/* gate read/write, followed by errors read/write. */
+	for (failure = 1; failure <= 4; failure++) {
+		FILE *diagnostic = tmpfile();
+		char output[256] = {0};
+		int saved_stderr;
+		int measurement_calls = 0;
+		int index;
+
+		assert(diagnostic);
+		assert(fflush(stderr) == 0);
+		saved_stderr = dup(STDERR_FILENO);
+		assert(saved_stderr >= 0);
+		assert(dup2(fileno(diagnostic), STDERR_FILENO) >= 0);
+		memset(fault_close_calls, 0, sizeof(fault_close_calls));
+		fault_fd_count = 0;
+		fault_pipe_calls = 0;
+		fault_fcntl_calls = 0;
+		fault_fcntl_fail_at = failure;
+		fault_fork_calls = 0;
+
+		assert(fault_run_monitored_command(argv, -1, count_measurement,
+						   &measurement_calls) == -1);
+		assert(fflush(stderr) == 0);
+		assert(dup2(saved_stderr, STDERR_FILENO) >= 0);
+		close(saved_stderr);
+		rewind(diagnostic);
+		assert(fread(output, 1, sizeof(output) - 1, diagnostic) > 0);
+		fclose(diagnostic);
+
+		/* Error reporting must retain the original fcntl errno after close. */
+		assert(strstr(output, strerror(EIO)));
+		assert(!strstr(output, strerror(ENOSPC)));
+		assert(fault_fcntl_calls == failure);
+		assert(fault_pipe_calls == (failure + 1) / 2);
+		assert(fault_fd_count == 2 * fault_pipe_calls);
+		assert(fault_fork_calls == 0 && measurement_calls == 0);
+		for (index = 0; index < fault_fd_count; index++) {
+			assert(fault_close_calls[index] == 1);
+			errno = 0;
+			assert(fcntl(fault_fds[index], F_GETFD) < 0 && errno == EBADF);
+		}
+	}
 }
 
 static void test_exit_and_stdout(void)
@@ -246,12 +374,13 @@ int main(int argc, char **argv)
 			result, (int)tcgetpgrp(STDIN_FILENO), (int)getpgrp());
 		return result < 0 ? 1 : result;
 	}
+	run_case(test_pipe_cloexec_failure_cleanup);
 	run_case(test_exit_and_stdout);
 	run_case(test_exec_failures);
 	run_case(test_failed_baseline_does_not_execute);
 	run_case(test_signal_status_and_gate_interrupt);
 	run_case(test_descriptor_ownership);
 	run_case(test_signal_forwarding_reaches_descendants);
-	puts("command lifecycle tests: PASS (6 cases)");
+	puts("command lifecycle tests: PASS (7 cases)");
 	return 0;
 }

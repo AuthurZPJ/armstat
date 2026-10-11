@@ -248,6 +248,38 @@ assert "command-stderr\n" in text.stderr
 assert "Timestamp" in text.stderr and "SUM" in text.stderr, text.stderr
 assert "ARM Server Performance Monitor" not in text.stderr, text.stderr
 
+# Machine statistics also default to stderr without mixing into child stdout.
+quiet_child = ["/bin/sh", "-c", "printf 'command-stdout\\n'; sleep 0.02"]
+for fmt in ("json", "csv"):
+    result = run(["-P", "-q", "-c", str(cpu), "-s", "busy_percent", "-f", fmt],
+                 quiet_child)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "command-stdout\n", result.stdout
+    if fmt == "json":
+        sample, = json.loads(result.stderr)
+        assert sample["schema_version"] == 9 and sample["interval"] == 1
+        assert sample["duration_us"] > 0 and "busy_percent" in sample["summary"]
+    else:
+        row, = csv.DictReader(result.stderr.splitlines())
+        assert row["Scope"] == "SUM" and row["interval"] == "1", row
+        assert int(row["duration_us"]) > 0 and "busy_percent" in row
+
+# Replacing stdout's FD must preserve a regular stderr file and its position.
+stderr_path = root / "command-stderr.out"
+with stderr_path.open("w") as stream:
+    stream.write("existing-stderr\n")
+    stream.flush()
+    result = subprocess.run(
+        [binary, "-P", "-q", "-c", str(cpu), "-s", "busy_percent", "--", *child],
+        stdout=subprocess.PIPE, stderr=stream, text=True, timeout=30,
+    )
+assert result.returncode == 0
+assert result.stdout == "command-stdout\n", result.stdout
+stderr_text = stderr_path.read_text()
+assert stderr_text.startswith("existing-stderr\n"), stderr_text
+assert "command-stderr\n" in stderr_text, stderr_text
+assert "Timestamp" in stderr_text and "SUM" in stderr_text, stderr_text
+
 fd_check = """
 import os
 import sys
