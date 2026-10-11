@@ -17,20 +17,23 @@ import struct
 import subprocess
 import termios
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 TEST_BIN = os.environ.get(
     "ARMSTAT_TEST_BIN", str(Path(__file__).with_name("test_runtime_smoke"))
 )
 TIMEOUT = 5.0
+SAMPLE_END = b"\x1earmstat-fixture-end\n"
 CPU_FIELDS = ["-s", "freq_mhz,cpu_busy_percent,cpu_idle_percent"]
 SUMMARY_FIELDS = ["-s", "summary_freq_mhz"]
 MIXED_FIELDS = ["-s", "summary_freq_mhz,pkg_freq_mhz,freq_mhz"]
 
 
 class Fixture:
-    """Keep stdout on a PTY or pipe, while commands and acknowledgments use pipes."""
+    """Frame samples on stdout, with commands and diagnostics on separate pipes."""
 
     def __init__(self, count, args, size=None):
         self.selector = selectors.DefaultSelector()
@@ -131,23 +134,23 @@ class Fixture:
         return output
 
     def emit(self):
-        expected_ready = self.ready + 1
         self.proc.stdin.write(b"emit\n")
         self.proc.stdin.flush()
         deadline = time.monotonic() + TIMEOUT
-        while self.ready < expected_ready:
+        while True:
+            end = self.output.find(SAMPLE_END)
+            if end >= 0:
+                output = self.output[:end].decode("utf-8")
+                del self.output[:end + len(SAMPLE_END)]
+                return output
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise AssertionError(f"fixture emit timed out: {self.diagnostics}")
             self._pump(min(remaining, 0.1))
-            if self.proc.poll() is not None and self.ready < expected_ready:
+            if self.proc.poll() is not None and SAMPLE_END not in self.output:
                 raise AssertionError(
                     f"fixture exited {self.proc.returncode}: {self.diagnostics}"
                 )
-        # ready follows fflush(stdout), so all data for this sample is queued.
-        while self._pump(0):
-            pass
-        return self._take_output()
 
     def finish(self):
         if self.finished:
@@ -177,6 +180,58 @@ def cpu_headers(output):
 
 def summary_headers(output):
     return sum(line.startswith("Timestamp") for line in output.splitlines())
+
+
+class FixtureProtocolTests(unittest.TestCase):
+    def make_fixture(self):
+        fixture = Fixture.__new__(Fixture)
+        fixture.output = bytearray()
+        fixture.stderr = bytearray()
+        fixture.diagnostics = []
+        fixture.ready = 0
+        fixture.proc = SimpleNamespace(stdin=io.BytesIO(), poll=lambda: None)
+        return fixture
+
+    def test_emit_waits_for_stdout_frame_after_early_stderr_ready(self):
+        fixture = self.make_fixture()
+        payload = "CPU Freq\n0 2200\n".encode()
+        steps = [
+            ("stderr", b"ready\n"),
+            None,  # PTY data can be temporarily absent after the pipe ack.
+            ("stdout", payload[:5]),
+            ("stdout", payload[5:] + SAMPLE_END[:1]),
+            ("stdout", SAMPLE_END[1:8]),
+            ("stdout", SAMPLE_END[8:]),
+        ]
+        read_data = []
+
+        def select(timeout):
+            self.assertTrue(steps, "emit read beyond its completed frame")
+            step = steps.pop(0)
+            if step is None:
+                return []
+            name, data = step
+            read_data.append(data)
+            return [(SimpleNamespace(fd=101, data=name), selectors.EVENT_READ)]
+
+        fixture.selector = SimpleNamespace(select=select)
+        with patch.object(os, "read", side_effect=lambda fd, size: read_data.pop(0)):
+            self.assertEqual(fixture.emit(), payload.decode())
+        self.assertEqual(fixture.ready, 1)
+        self.assertEqual(fixture.proc.stdin.getvalue(), b"emit\n")
+        self.assertEqual(fixture.output, b"")
+        self.assertEqual(steps, [])
+        self.assertEqual(read_data, [])
+
+    def test_emit_removes_only_one_frame_and_preserves_following_bytes(self):
+        fixture = self.make_fixture()
+        fixture.output.extend(b"first\n" + SAMPLE_END + b"second\n" + SAMPLE_END)
+        fixture._pump = lambda timeout: self.fail("complete frames need no reads")
+        self.assertEqual(fixture.emit(), "first\n")
+        self.assertEqual(fixture.output, b"second\n" + SAMPLE_END)
+        self.assertEqual(fixture.emit(), "second\n")
+        self.assertEqual(fixture.output, b"")
+        self.assertEqual(fixture.proc.stdin.getvalue(), b"emit\nemit\n")
 
 
 class TextTerminalTests(unittest.TestCase):

@@ -2696,6 +2696,8 @@ static int run_text_fixture(int argc, char **argv)
 		default:
 			return 2;
 		}
+		/* Frame completion on stdout: a stderr ack can overtake PTY data. */
+		fputs("\036armstat-fixture-end\n", stdout);
 		assert(fflush(stdout) == 0);
 		fputs("ready\n", stderr);
 		assert(fflush(stderr) == 0);
