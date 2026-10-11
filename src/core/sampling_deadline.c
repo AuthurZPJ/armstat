@@ -2,6 +2,7 @@
 /* Sampling cadence and interval arithmetic, kept independent of clock I/O. */
 
 #include <limits.h>
+#include <stddef.h>
 
 #include "sampling_deadline.h"
 
@@ -31,8 +32,17 @@ int sampling_deadline_advance(unsigned long long *deadline_ns,
 			      unsigned long long interval_ns,
 			      unsigned long long now_ns)
 {
+	return sampling_deadline_advance_counted(deadline_ns, interval_ns,
+					 now_ns, NULL);
+}
+
+int sampling_deadline_advance_counted(unsigned long long *deadline_ns,
+				      unsigned long long interval_ns,
+				      unsigned long long now_ns,
+				      unsigned long long *skipped_intervals)
+{
 	unsigned long long next_ns;
-	unsigned long long skipped;
+	unsigned long long skipped = 0;
 
 	if (!deadline_ns || interval_ns == 0 ||
 	    *deadline_ns > ULLONG_MAX - interval_ns)
@@ -47,5 +57,7 @@ int sampling_deadline_advance(unsigned long long *deadline_ns,
 	}
 
 	*deadline_ns = next_ns;
+	if (skipped_intervals)
+		*skipped_intervals = skipped;
 	return 0;
 }

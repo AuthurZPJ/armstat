@@ -23,6 +23,15 @@ int read_cpu_freq(int tracked_idx, unsigned int *freq);
 int read_cpu_min_max_freq_checked(int tracked_idx,
 				  unsigned int *min, int *min_valid,
 				  unsigned int *max, int *max_valid);
+int read_cpu_min_max_freq_selected(int tracked_idx,
+				 unsigned int *min, int *min_valid,
+				 unsigned int *max, int *max_valid,
+				 int read_min, int read_max);
+
+/* Set the persistent current-frequency cache share; existing fds may shrink. */
+void configure_cpufreq_fd_cache(int fd_cap, int collect_current);
+int get_cpufreq_cached_fd_count(void);
+void cpufreq_begin_sample(void);
 
 /* Read CPU governor (tracked_idx) */
 int read_cpu_governor(int tracked_idx, char *governor, size_t len);

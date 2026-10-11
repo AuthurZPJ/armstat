@@ -8,6 +8,7 @@
  */
 
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <time.h>
 #include <math.h>
@@ -61,7 +62,10 @@ static struct interval_record *allocate_interval_record(int tracked_count)
 
 	if (pool_initialized && rec_pool) {
 		rec = rec_pool;
-		memset(rec, 0, sizeof(*rec));
+		/* Only published rows need initialization; package slots are copied. */
+		memset(rec, 0, offsetof(struct interval_record, packages));
+		memset(&rec->cpu_rows, 0,
+		       sizeof(*rec) - offsetof(struct interval_record, cpu_rows));
 
 		if (tracked_count <= cpu_rows_pool_size) {
 			rec->cpu_rows = cpu_rows_pool;
@@ -171,7 +175,7 @@ static double compute_cpu_temp_c(const struct sys_snapshot *raw,
 	int cpu_id;
 	int numa;
 
-	if (!raw || tracked_idx < 0)
+	if (!raw || tracked_idx < 0 || !raw->numa_temp_valid_mask)
 		return NAN;
 
 	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
@@ -377,6 +381,7 @@ int setup_formatter_pool(int max_cpus)
 
 void cleanup_formatter_pool(void)
 {
+	cleanup_text_values();
 	if (rec_pool) {
 		free(rec_pool);
 		rec_pool = NULL;

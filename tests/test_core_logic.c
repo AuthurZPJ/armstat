@@ -687,6 +687,53 @@ static void test_sampling_time_arithmetic(void)
 	assert(deadline == ULLONG_MAX - 50);
 }
 
+
+static void test_sampling_deadline_reports_skipped_intervals(void)
+{
+	unsigned long long deadline = 1100;
+	unsigned long long skipped = 99;
+
+	assert(sampling_deadline_advance_counted(&deadline, 100, 1150,
+						 &skipped) == 0);
+	assert(deadline == 1200 && skipped == 0);
+	assert(sampling_deadline_advance_counted(&deadline, 100, 1300,
+						 &skipped) == 0);
+	assert(deadline == 1400 && skipped == 1);
+	assert(sampling_deadline_advance_counted(&deadline, 100, 1755,
+						 &skipped) == 0);
+	assert(deadline == 1800 && skipped == 3);
+
+	/* The last representable future deadline is valid. */
+	deadline = ULLONG_MAX - 100;
+	assert(sampling_deadline_advance_counted(&deadline, 50,
+						 ULLONG_MAX - 1, &skipped) == 0);
+	assert(deadline == ULLONG_MAX && skipped == 1);
+
+	/* Invalid/overflow paths leave both output arguments unchanged. */
+	skipped = 77;
+	assert(sampling_deadline_advance_counted(&deadline, 1, 0,
+						 &skipped) < 0);
+	assert(deadline == ULLONG_MAX && skipped == 77);
+	deadline = ULLONG_MAX - 100;
+	assert(sampling_deadline_advance_counted(&deadline, 50,
+						 ULLONG_MAX, &skipped) < 0);
+	assert(deadline == ULLONG_MAX - 100 && skipped == 77);
+	assert(sampling_deadline_advance_counted(&deadline, 0, 0,
+						 &skipped) < 0);
+	assert(deadline == ULLONG_MAX - 100 && skipped == 77);
+	assert(sampling_deadline_advance_counted(NULL, 100, 0,
+						 &skipped) < 0);
+	assert(skipped == 77);
+
+	deadline = 0;
+	assert(sampling_deadline_advance_counted(&deadline, 1,
+						 ULLONG_MAX, &skipped) < 0);
+	assert(deadline == 0 && skipped == 77);
+	assert(sampling_deadline_advance_counted(&deadline, 100, 150,
+						 NULL) == 0);
+	assert(deadline == 200);
+}
+
 static void test_sysstat_failure_is_unavailable_and_rebaselines(void)
 {
 	struct sys_snapshot snap;
@@ -968,6 +1015,125 @@ static void test_pmu_raises_soft_fd_limit_for_large_tracked_set(void)
 	assert(WEXITSTATUS(status) == 0);
 }
 
+
+static void test_package_mapping_refreshes_topology_and_output_selection(void)
+{
+	struct cpu_inventory_seed cpus[4] = {
+		{20, 1, 1, INT_MAX, 0, 0},
+		{0, 1, 1, 90, 0, 0},
+		{4, 1, 1, INT_MAX, 0, 0},
+		{8, 1, 1, -1, 0, 0},
+	};
+	struct cpu_freq_info freqs[4];
+	struct sys_snapshot snap;
+	struct interval_stats stats;
+	struct cpu_inventory_seed replacement = {4, 1, 1, 100, 0, 0};
+
+	assert(set_cpu_inventory_filter(NULL) == 0);
+	assert(cpu_inventory_seed(cpus, 4) == 0);
+	set_aggregator_package_output(1);
+	init_aggregator();
+	memset(&snap, 0, sizeof(snap));
+	memset(freqs, 0, sizeof(freqs));
+	snap.cpu_count = 4;
+	snap.effective_cpu_count = 4;
+	snap.freqs = freqs;
+	for (int i = 0; i < 4; i++) {
+		freqs[i].cur_freq = (unsigned int)(i + 1) * 1000000U;
+		freqs[i].cur_freq_valid = 1;
+	}
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.package_count == 2);
+	assert(stats.packages[0].package_id == 90);
+	assert(stats.packages[0].cpu_count == 1);
+	assert(stats.packages[0].avg_mhz == 1000.0);
+	assert(stats.packages[1].package_id == INT_MAX);
+	assert(stats.packages[1].cpu_count == 2);
+	assert(stats.packages[1].avg_mhz == 3000.0);
+	assert(isnan(stats.packages[0].idle_percent));
+	assert(isnan(stats.packages[1].busy_percent));
+
+	/* A changed assignment must refresh the map even at the same CPU count. */
+	cpu_catalog_get_by_id(0)->package_id = 5;
+	cpu_catalog_get_by_id(8)->package_id = INT_MAX;
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.package_count == 2);
+	assert(stats.packages[0].package_id == 5);
+	assert(stats.packages[1].package_id == INT_MAX);
+	assert(stats.packages[1].cpu_count == 3);
+	assert(stats.packages[1].avg_mhz == 3000.0);
+
+	set_aggregator_package_output(0);
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.package_count == 0);
+	assert(stats.avg_mhz == 2500.0);
+	assert(stats.per_cpu_mhz[3] == 4000.0);
+	set_aggregator_package_output(1);
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.package_count == 2);
+	assert(stats.packages[1].cpu_count == 3);
+
+	/* A replacement catalog and missing source must not expose stale values. */
+	assert(cpu_inventory_seed(&replacement, 1) == 0);
+	snap.cpu_count = 1;
+	snap.effective_cpu_count = 1;
+	freqs[0].cur_freq_valid = 0;
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.package_count == 1);
+	assert(stats.packages[0].package_id == 100);
+	assert(stats.packages[0].cpu_count == 1);
+	assert(isnan(stats.packages[0].avg_mhz));
+	assert(isnan(stats.per_cpu_mhz[0]));
+	assert(!stats.per_cpu_pmu_valid[0] && !stats.pmu_valid);
+
+	snap.effective_cpu_count = 0;
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.package_count == 0);
+	assert(isnan(stats.avg_mhz));
+	cleanup_aggregator();
+}
+
+static void test_package_mapping_at_full_filtered_cpu_limit(void)
+{
+	struct cpu_inventory_seed cpus[MAX_CPUS];
+	struct cpu_freq_info freqs[MAX_CPUS];
+	struct sys_snapshot snap;
+	struct interval_stats stats;
+
+	for (int i = 0; i < MAX_CPUS; i++) {
+		int cpu_id = MAX_CPUS - i - 1;
+
+		cpus[i] = (struct cpu_inventory_seed){
+			cpu_id, 1, 1, INT_MAX - cpu_id * 1000, 0, 0,
+		};
+	}
+	assert(set_cpu_inventory_filter("0-1023") == 0);
+	assert(cpu_inventory_seed(cpus, MAX_CPUS) == 0);
+	init_aggregator();
+	memset(&snap, 0, sizeof(snap));
+	memset(freqs, 0, sizeof(freqs));
+	snap.cpu_count = MAX_CPUS;
+	snap.effective_cpu_count = MAX_CPUS;
+	snap.freqs = freqs;
+	for (int i = 0; i < MAX_CPUS; i++) {
+		freqs[i].cur_freq = 1000000U + (unsigned int)i * 1000U;
+		freqs[i].cur_freq_valid = 1;
+	}
+	calculate_interval_stats(&snap, &stats);
+	assert(stats.package_count == MAX_CPUS);
+	for (int i = 0; i < MAX_CPUS; i++) {
+		assert(stats.packages[i].package_id == INT_MAX - i * 1000);
+		assert(stats.packages[i].cpu_count == 1);
+		assert(stats.packages[i].avg_mhz == 1000.0 + i);
+		freqs[i].cur_freq_valid = 0;
+	}
+	calculate_interval_stats(&snap, &stats);
+	for (int i = 0; i < MAX_CPUS; i++)
+		assert(isnan(stats.packages[i].avg_mhz));
+	assert(set_cpu_inventory_filter(NULL) == 0);
+	cleanup_aggregator();
+}
+
 /* ============================================================================
  * Main
  * ============================================================================ */
@@ -985,6 +1151,8 @@ int main(void)
 	test_aggregator_schedstat_clamp();
 	test_aggregator_sparse_package_ids();
 	test_package_aggregation_does_not_silently_stop_at_sixteen();
+	test_package_mapping_refreshes_topology_and_output_selection();
+	test_package_mapping_at_full_filtered_cpu_limit();
 	test_procstat_failure_is_unavailable_and_rebaselines();
 	test_procstat_jiffy_conversion_overflow_is_unavailable();
 	test_proc_stat_idle_includes_iowait();
@@ -993,6 +1161,7 @@ int main(void)
 	test_power_failure_is_unavailable_and_rebaselines();
 	test_membw_failure_is_unavailable_and_rebaselines();
 	test_sampling_time_arithmetic();
+	test_sampling_deadline_reports_skipped_intervals();
 	test_sysstat_failure_is_unavailable_and_rebaselines();
 	test_pmu_failure_and_counter_reset_are_unavailable();
 	test_pmu_scaling_is_exact_and_overflow_recovers();

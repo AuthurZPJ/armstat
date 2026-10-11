@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import subprocess
 import sys
@@ -157,6 +158,82 @@ def main() -> int:
             )
         finally:
             plot_sum.save_figure = original_save
+
+        # Inspect the actual rendered series, not just the decimator helper.
+        # A single-sample peak must survive summary, CPU and grouped plotting;
+        # unavailable intervals must still break the line after decimation.
+        import plot_cpu
+        from plot_utils import DEFAULT_PLOT_POINTS
+
+        count = 12000
+        x_values = list(range(count))
+        frequency = [2200.0] * count
+        temperature = [40.0] * count
+        frequency[1734], frequency[8657] = 9000.0, -9000.0
+        temperature[2717], temperature[6553] = 120.0, 0.0
+        for index in range(3000, 3050):
+            frequency[index] = temperature[index] = math.nan
+        large_summary = plot_sum.SeriesData(
+            x_values=x_values, x_label="sample",
+            rows=[{"freq": frequency[i], "temp": temperature[i]} for i in range(count)],
+            numeric_fields=["freq", "temp"],
+        )
+        large_cpus = plot_cpu.CpuSeriesData(
+            x_values=x_values, x_label="sample",
+            samples=[{0: {"freq": frequency[i], "temp": temperature[i]}} for i in range(count)],
+            cpu_ids=[0], numeric_fields=["freq", "temp"],
+        )
+        expected = {"freq": (frequency, (1734, 8657)),
+                    "temp": (temperature, (2717, 6553))}
+        checked_lines = []
+
+        def inspect_decimated_lines(fig, path):
+            for axis in fig.axes:
+                for line in axis.lines:
+                    field = line.get_label().rsplit(":", 1)[-1]
+                    source, extrema = expected[field]
+                    xs = [int(value) for value in line.get_xdata()]
+                    ys = list(line.get_ydata())
+                    assert len(xs) <= DEFAULT_PLOT_POINTS + 4
+                    assert len(xs) < count // 2
+                    assert xs[0] == 0 and xs[-1] == count - 1
+                    for index in (*extrema, 2999, 3000, 3049, 3050):
+                        assert index in xs
+                    for index in extrema:
+                        assert ys[xs.index(index)] == source[index]
+                    assert math.isnan(ys[xs.index(3000)])
+                    checked_lines.append(line.get_label())
+            original_save(fig, path)
+
+        original_cpu_save = plot_cpu.save_figure
+        plot_sum.save_figure = plot_cpu.save_figure = inspect_decimated_lines
+        try:
+            plot_sum.plot_summary(
+                large_summary, ["freq"], ["temp"], output_dir / "plots" / "large-summary.svg",
+                "large summary", 1,
+            )
+            plot_cpu.plot_cpu_series(
+                large_cpus, [0], "freq", "temp", output_dir / "plots" / "large-cpu.png",
+                "large CPU", 1,
+            )
+            plot_cpu.plot_group_series(
+                large_cpus, {(0, 0): [0]}, "core", "freq", "temp",
+                output_dir / "plots" / "large-group.svg", "large group", 1, "avg",
+            )
+        finally:
+            plot_sum.save_figure = original_save
+            plot_cpu.save_figure = original_cpu_save
+        assert len(checked_lines) == 6
+        for name in ("large-summary.svg", "large-cpu.png", "large-group.svg"):
+            assert (output_dir / "plots" / name).stat().st_size > 1000
+
+        filtered_output = output_dir / "plots" / "cpu64-window.svg"
+        run_plot([
+            "scripts/plot_cpu.py", str(cpu_path), "--preset", "freq",
+            "--cpu-filter", "64", "--sample-range", "2:3", "-o", str(filtered_output),
+        ])
+        filtered_svg = filtered_output.read_text(encoding="utf-8")
+        assert "cpu64:freq" in filtered_svg and "cpu0:freq" not in filtered_svg
 
     print("plot render tests: PASS")
     return 0

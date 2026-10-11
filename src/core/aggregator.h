@@ -34,6 +34,8 @@ struct package_row {
 
 /*
  * Aggregated statistics for one interval
+ * Per-CPU arrays are initialized only through the snapshot's effective CPU
+ * count; package rows are valid only through package_count.
  */
 struct interval_stats {
 	/* System-wide frequency statistics */
@@ -82,6 +84,9 @@ struct interval_stats {
  * Returns: 0 on success
  */
 int init_aggregator(void);
+
+/* Skip package calculations when the selected output has no package rows. */
+void set_aggregator_package_output(int enabled);
 
 /*
  * Calculate interval statistics from raw snapshot

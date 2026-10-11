@@ -24,6 +24,7 @@
 #include "idle_backend.h"
 #include "columns.h"
 #include "formatter_section.h"
+#include "sysfs_util.h"
 
 /* MAX_CPUS is defined in collector.h — single source of truth */
 
@@ -39,6 +40,97 @@ static unsigned char *pmu_valid_pool;
 
 static int cache_initialized;
 static int diagnostic_counter_collection;
+
+enum freq_collection {
+	COLLECT_FREQ_CURRENT = 1U << 0,
+	COLLECT_FREQ_UNCORE = 1U << 1,
+	COLLECT_FREQ_MIN = 1U << 2,
+	COLLECT_FREQ_MAX = 1U << 3,
+	COLLECT_FREQ_GOVERNOR = 1U << 4,
+	COLLECT_FREQ_BOOST = 1U << 5,
+};
+
+#define COLLECT_FREQ_CONFIG (COLLECT_FREQ_MIN | COLLECT_FREQ_MAX | \
+			     COLLECT_FREQ_GOVERNOR | COLLECT_FREQ_BOOST)
+#define COLLECT_FREQ_ALL (COLLECT_FREQ_CONFIG | COLLECT_FREQ_CURRENT | \
+			 COLLECT_FREQ_UNCORE)
+
+static unsigned int freq_collection_mask;
+static unsigned int cached_residency_mask;
+static unsigned int cached_usage_mask;
+static int cached_pmu_event_count = -1;
+static int fd_budget_ready;
+
+static unsigned int selected_frequency_fields(void)
+{
+	unsigned int mask = 0;
+	struct field_desc *fields[64];
+	int count;
+
+	if (diagnostic_counter_collection)
+		return COLLECT_FREQ_ALL;
+	for (int scope = FIELD_SCOPE_SYSTEM; scope <= FIELD_SCOPE_CPU; scope++) {
+		if ((scope == FIELD_SCOPE_SYSTEM &&
+		     !section_is_summary_mode() && !section_emit_default_summary()) ||
+		    (scope == FIELD_SCOPE_PACKAGE &&
+		     (section_is_summary_mode() || !section_emit_package())) ||
+		    (scope == FIELD_SCOPE_CPU &&
+		     (section_is_summary_mode() || !section_emit_cpu())))
+			continue;
+		get_enabled_fields(scope, fields, &count);
+		for (int i = 0; i < count; i++) {
+			const char *id = fields[i]->id;
+
+			if (!strcmp(id, "freq_mhz") || !strcmp(id, "summary_freq_mhz") ||
+			    !strcmp(id, "pkg_freq_mhz"))
+				mask |= COLLECT_FREQ_CURRENT;
+			else if (!strcmp(id, "uncore_freq"))
+				mask |= COLLECT_FREQ_UNCORE;
+			else if (!strcmp(id, "min_freq_mhz"))
+				mask |= COLLECT_FREQ_MIN;
+			else if (!strcmp(id, "max_freq_mhz"))
+				mask |= COLLECT_FREQ_MAX;
+			else if (!strcmp(id, "governor"))
+				mask |= COLLECT_FREQ_GOVERNOR;
+			else if (!strcmp(id, "boost"))
+				mask |= COLLECT_FREQ_BOOST;
+		}
+	}
+	return mask;
+}
+
+static void configure_counter_fd_budget(int tracked, unsigned int residency_mask,
+					unsigned int usage_mask)
+{
+	int state_count = get_global_idle_state_count();
+	int current_demand = freq_collection_mask & COLLECT_FREQ_CURRENT ? tracked : 0;
+	int idle_demand = 0;
+	int pmu_count = pmu_is_active() ? get_pmu_event_count() : 0;
+	int total;
+	int budget;
+	int current_budget;
+
+	if (fd_budget_ready && cached_residency_mask == residency_mask &&
+	    cached_usage_mask == usage_mask && cached_pmu_event_count == pmu_count)
+		return;
+	for (int state = 0; state < state_count; state++) {
+		if (residency_mask & (1U << state))
+			idle_demand += tracked;
+		if (usage_mask & (1U << state))
+			idle_demand += tracked;
+	}
+	total = current_demand + idle_demand;
+	/* Existing PMU and inherited fds are counted, with 64 free runtime slots. */
+	budget = sysfs_counter_fd_budget(total,
+		get_cpufreq_cached_fd_count() + get_cpuidle_cached_fd_count());
+	current_budget = total ? (int)((long long)budget * current_demand / total) : 0;
+	configure_cpufreq_fd_cache(current_budget, current_demand != 0);
+	configure_cpuidle_fd_cache(budget - current_budget, residency_mask, usage_mask);
+	cached_residency_mask = residency_mask;
+	cached_usage_mask = usage_mask;
+	cached_pmu_event_count = pmu_count;
+	fd_budget_ready = 1;
+}
 
 void set_diagnostic_counter_collection(int enable)
 {
@@ -109,8 +201,9 @@ static void pool_free(void)
 static int slow_layer_initialized;
 static int slow_cursor;
 static int slow_full_refresh_done;
+static unsigned long long slow_budget_credit;
 
-struct slow_data {
+static struct slow_data {
 	unsigned int *min_freq;
 	unsigned char *min_freq_valid;
 	unsigned int *max_freq;
@@ -122,7 +215,6 @@ struct slow_data {
 
 #define SLOW_TARGET_SWEEP_MS_DEFAULT 5000
 #define SLOW_MAX_CPU_BUDGET 32
-#define SLOW_MIN_CPU_BUDGET 1
 static int slow_target_sweep_ms = SLOW_TARGET_SWEEP_MS_DEFAULT;
 
 static int slow_init(int count)
@@ -151,6 +243,7 @@ static int slow_init(int count)
 	slow_data.last_cpu_count = count;
 	slow_cursor = 0;
 	slow_full_refresh_done = 0;
+	slow_budget_credit = 0;
 
 	{
 		const char *env = getenv("ARMSTAT_SLOW_SWEEP_MS");
@@ -188,6 +281,7 @@ static void slow_free(void)
 	memset(&slow_data, 0, sizeof(slow_data));
 	slow_cursor = 0;
 	slow_full_refresh_done = 0;
+	slow_budget_credit = 0;
 	slow_layer_initialized = 0;
 }
 
@@ -199,20 +293,24 @@ static int slow_budget_for_interval(int tracked, unsigned long long delta_us)
 	if (tracked <= 0)
 		return 0;
 	if (delta_us == 0)
-		return tracked;
+		return 0;
 
 	/*
 	 * Spread slow-path refreshes over roughly SLOW_TARGET_SWEEP_MS instead of
 	 * rescanning every tracked CPU in one burst. This keeps short sampling
 	 * intervals from showing periodic CPU spikes caused by housekeeping work.
 	 */
-	budget = ((unsigned long long)tracked * delta_us + target_us - 1) / target_us;
-	if (budget < SLOW_MIN_CPU_BUDGET)
-		budget = SLOW_MIN_CPU_BUDGET;
+	if (delta_us > target_us)
+		delta_us = target_us;
+	slow_budget_credit += (unsigned long long)tracked * delta_us;
+	if (slow_budget_credit > (unsigned long long)tracked * target_us)
+		slow_budget_credit = (unsigned long long)tracked * target_us;
+	budget = slow_budget_credit / target_us;
 	if (budget > SLOW_MAX_CPU_BUDGET)
 		budget = SLOW_MAX_CPU_BUDGET;
 	if (budget > (unsigned long long)tracked)
 		budget = tracked;
+	slow_budget_credit -= budget * target_us;
 	return (int)budget;
 }
 
@@ -223,12 +321,14 @@ static void slow_refresh_cpu(int tracked_idx)
 	int min_valid;
 	int max_valid;
 
-	if (!is_freq_enabled() || tracked_idx < 0 ||
+	if (!(freq_collection_mask & COLLECT_FREQ_CONFIG) || tracked_idx < 0 ||
 	    tracked_idx >= get_tracked_cpu_count())
 		return;
 
-	read_cpu_min_max_freq_checked(tracked_idx, &min_freq, &min_valid,
-				      &max_freq, &max_valid);
+	read_cpu_min_max_freq_selected(tracked_idx, &min_freq, &min_valid,
+				     &max_freq, &max_valid,
+				     freq_collection_mask & COLLECT_FREQ_MIN,
+				     freq_collection_mask & COLLECT_FREQ_MAX);
 	if (min_valid) {
 		slow_data.min_freq[tracked_idx] = min_freq;
 		slow_data.min_freq_valid[tracked_idx] = 1;
@@ -246,11 +346,13 @@ static void slow_refresh_cpu(int tracked_idx)
 	{
 		int boost;
 
-		if (read_cpu_boost(tracked_idx, &boost) == 0)
+		if ((freq_collection_mask & COLLECT_FREQ_BOOST) &&
+		    read_cpu_boost(tracked_idx, &boost) == 0)
 			slow_data.boost[tracked_idx] = boost;
 	}
 
-	read_cpu_governor(tracked_idx, slow_data.governors[tracked_idx], 32);
+	if (freq_collection_mask & COLLECT_FREQ_GOVERNOR)
+		read_cpu_governor(tracked_idx, slow_data.governors[tracked_idx], 32);
 }
 
 static void slow_update_all(int tracked)
@@ -262,9 +364,8 @@ static void slow_update_all(int tracked)
 	slow_full_refresh_done = 1;
 }
 
-static void slow_update_budgeted(int tracked, unsigned long long delta_us)
+static void slow_update_budgeted(int tracked, int budget)
 {
-	int budget;
 
 	if (tracked <= 0)
 		return;
@@ -274,7 +375,6 @@ static void slow_update_budgeted(int tracked, unsigned long long delta_us)
 		return;
 	}
 
-	budget = slow_budget_for_interval(tracked, delta_us);
 	for (int refreshed = 0; refreshed < budget; refreshed++) {
 		if (slow_cursor >= tracked)
 			slow_cursor = 0;
@@ -284,28 +384,17 @@ static void slow_update_budgeted(int tracked, unsigned long long delta_us)
 
 }
 
-static void maybe_refresh_cpuidle_disable_cache(int tracked, unsigned long long delta_us)
+static void maybe_run_slow_refresh(int tracked, unsigned long long delta_us)
 {
 	int budget;
 
-	if (!is_cpuidle_enabled())
-		return;
-
-	budget = slow_budget_for_interval(tracked, delta_us);
-	if (budget <= 0)
-		return;
-
-	refresh_idle_state_disable_cache_budgeted(budget);
-}
-
-static void maybe_run_slow_refresh(int tracked, unsigned long long delta_us)
-{
 	if (!slow_layer_initialized)
 		return;
 
 	if (!slow_full_refresh_done) {
 		slow_update_all(tracked);
-		maybe_refresh_cpuidle_disable_cache(tracked, 0);
+		if (is_cpuidle_enabled() && (cached_residency_mask || cached_usage_mask))
+			refresh_idle_state_disable_cache_budgeted(tracked);
 		return;
 	}
 
@@ -314,8 +403,11 @@ static void maybe_run_slow_refresh(int tracked, unsigned long long delta_us)
 	 * interval-critical data collection deterministic while spreading
 	 * low-frequency configuration refreshes across samples.
 	 */
-	slow_update_budgeted(tracked, delta_us);
-	maybe_refresh_cpuidle_disable_cache(tracked, delta_us);
+	budget = slow_budget_for_interval(tracked, delta_us);
+	if (freq_collection_mask & COLLECT_FREQ_CONFIG)
+		slow_update_budgeted(tracked, budget);
+	if (is_cpuidle_enabled() && (cached_residency_mask || cached_usage_mask))
+		refresh_idle_state_disable_cache_budgeted(budget);
 }
 
 /*
@@ -324,10 +416,11 @@ static void maybe_run_slow_refresh(int tracked, unsigned long long delta_us)
  */
 static void collect_freq_snapshot(struct sys_snapshot *snapshot, int tracked)
 {
-	snapshot->freqs = freqs_pool;
+	snapshot->freqs = (freq_collection_mask &
+		(COLLECT_FREQ_CURRENT | COLLECT_FREQ_CONFIG)) ? freqs_pool : NULL;
 	snapshot->uncore_freq_hz = 0;
 	snapshot->uncore_freq_valid = 0;
-	if (!is_freq_enabled())
+	if (!freq_collection_mask)
 		return;
 
 	/*
@@ -335,7 +428,8 @@ static void collect_freq_snapshot(struct sys_snapshot *snapshot, int tracked)
 	 * independent from the per-CPU cpufreq array so the code reads as
 	 * "summary frequency + per-CPU frequencies", not as one monolithic block.
 	 */
-	if (read_uncore_freq(&snapshot->uncore_freq_hz) == 0)
+	if ((freq_collection_mask & COLLECT_FREQ_UNCORE) &&
+	    read_uncore_freq(&snapshot->uncore_freq_hz) == 0)
 		snapshot->uncore_freq_valid = 1;
 
 	if (!snapshot->freqs)
@@ -343,6 +437,7 @@ static void collect_freq_snapshot(struct sys_snapshot *snapshot, int tracked)
 
 	for (int i = 0; i < tracked; i++) {
 		snapshot->freqs[i].cur_freq_valid =
+			(freq_collection_mask & COLLECT_FREQ_CURRENT) &&
 			read_cpu_freq(i, &snapshot->freqs[i].cur_freq) == 0;
 		if (!snapshot->freqs[i].cur_freq_valid)
 			snapshot->freqs[i].cur_freq = 0;
@@ -445,6 +540,7 @@ static void collect_system_counter_snapshot(struct sys_snapshot *snapshot)
 	static unsigned char schedstat_valid[MAX_CPUS];
 	int procstat_limit;
 	int schedstat_limit = -1;
+	int schedstat_attempted = 0;
 	int tracked = get_tracked_cpu_count();
 	int need_idle = is_idle_enabled() || is_iowait_enabled();
 
@@ -505,7 +601,8 @@ static void collect_system_counter_snapshot(struct sys_snapshot *snapshot)
 		    (!need_idle || !busy_source_uses_schedstat_cpu(cpu_id)))
 			continue;
 
-		if (schedstat_limit < 0) {
+		if (!schedstat_attempted) {
+			schedstat_attempted = 1;
 			schedstat_limit =
 				read_all_schedstat_cpu_runtime_checked(schedstat_runtime,
 									   schedstat_valid,
@@ -585,6 +682,14 @@ static void collect_sample_data(struct sys_snapshot *snapshot)
 	unsigned int idle_residency_mask = 0;
 	unsigned int idle_usage_mask = 0;
 	int tracked = get_tracked_cpu_count();
+	unsigned int selected_freq = selected_frequency_fields();
+
+	if (selected_freq != freq_collection_mask) {
+		freq_collection_mask = selected_freq;
+		fd_budget_ready = 0;
+		slow_full_refresh_done = 0;
+		slow_budget_credit = 0;
+	}
 
 	section_get_idle_collection_masks(&idle_residency_mask,
 					  &idle_usage_mask);
@@ -592,6 +697,9 @@ static void collect_sample_data(struct sys_snapshot *snapshot)
 		idle_residency_mask = (1U << MAX_IDLE_STATES) - 1U;
 		idle_usage_mask = idle_residency_mask;
 	}
+	configure_counter_fd_budget(tracked, idle_residency_mask, idle_usage_mask);
+	if (!slow_full_refresh_done)
+		slow_update_all(tracked);
 
 	collect_freq_snapshot(snapshot, tracked);
 	collect_idle_snapshot(snapshot, tracked, snapshot->interval_delta_us,
@@ -611,7 +719,12 @@ int init_sample_cache(int cpu_count)
 		pool_free();
 		return -1;
 	}
+	freq_collection_mask = selected_frequency_fields();
+	fd_budget_ready = 0;
+	sysfs_counter_begin_sample();
+	cpufreq_begin_sample();
 	slow_update_all(cpu_count);
+	sysfs_counter_end_sample();
 	cache_initialized = 1;
 	return 0;
 }
@@ -635,15 +748,20 @@ void free_sample_cache(void)
 	pool_free();
 	slow_free();
 	cache_initialized = 0;
+	fd_budget_ready = 0;
+	freq_collection_mask = 0;
 }
 
 void collect_per_interval_data(struct sys_snapshot *snapshot, unsigned long long delta_us)
 {
+	sysfs_counter_begin_sample();
+	cpufreq_begin_sample();
 	/* Collect fast-path data */
 	collect_sample_data(snapshot);
 
 	/* Spread slow-changing refreshes across intervals to avoid spikes. */
 	maybe_run_slow_refresh(get_tracked_cpu_count(), delta_us);
+	sysfs_counter_end_sample();
 }
 
 int is_sample_cache_initialized(void)

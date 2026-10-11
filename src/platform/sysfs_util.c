@@ -13,8 +13,167 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
+#include <time.h>
+#include <dirent.h>
+#include <sys/resource.h>
 
 #include "sysfs_util.h"
+
+#define SYSFS_FD_RESERVE 64
+#define SYSFS_RETRY_INITIAL_US 250000ULL
+#define SYSFS_RETRY_MAX_US 5000000ULL
+
+static uint64_t sample_time_us;
+
+static uint64_t counter_time_us(void)
+{
+	struct timespec now;
+
+	if (sample_time_us)
+		return sample_time_us;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+		return 0;
+	return (uint64_t)now.tv_sec * 1000000ULL + now.tv_nsec / 1000;
+}
+
+void sysfs_counter_begin_sample(void)
+{
+	sample_time_us = 0;
+	sample_time_us = counter_time_us();
+}
+
+void sysfs_counter_end_sample(void)
+{
+	sample_time_us = 0;
+}
+
+int sysfs_counter_sample_active(void)
+{
+	return sample_time_us != 0;
+}
+
+void sysfs_counter_init(struct sysfs_counter_cache *cache)
+{
+	memset(cache, 0, sizeof(*cache));
+	cache->fd = -1;
+}
+
+static void counter_drop_fd(struct sysfs_counter_cache *cache, int *open_count)
+{
+	if (cache->fd >= 0) {
+		close(cache->fd);
+		cache->fd = -1;
+		if (open_count && *open_count > 0)
+			(*open_count)--;
+	}
+}
+
+void sysfs_counter_close(struct sysfs_counter_cache *cache, int *open_count)
+{
+	counter_drop_fd(cache, open_count);
+	sysfs_counter_init(cache);
+}
+
+static void counter_record_failure(struct sysfs_counter_cache *cache,
+				    uint64_t now, int error)
+{
+	uint64_t delay;
+
+	/* Transient errors and malformed values are retried at the next sample. */
+	if (error != ENOENT && error != ENODEV && error != ENXIO &&
+	    error != EACCES && error != EPERM && error != ESTALE)
+		return;
+	if (cache->failures < 6)
+		cache->failures++;
+	delay = SYSFS_RETRY_INITIAL_US << (cache->failures - 1);
+	if (delay > SYSFS_RETRY_MAX_US)
+		delay = SYSFS_RETRY_MAX_US;
+	cache->retry_after_us = UINT64_MAX - now < delay ? UINT64_MAX : now + delay;
+}
+
+int sysfs_counter_read(struct sysfs_counter_cache *cache, const char *path,
+			unsigned long long *out, int *open_count, int fd_cap)
+{
+	uint64_t now = counter_time_us();
+	int fd;
+	int cached;
+	int error;
+
+	if (!cache || !out || (!path && cache->fd < 0))
+		return -1;
+	*out = 0;
+	if (now && now < cache->retry_after_us)
+		return -1;
+	fd = cache->fd;
+	cached = fd >= 0;
+	if (fd < 0) {
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0) {
+			counter_record_failure(cache, now, errno);
+			return -1;
+		}
+	}
+	errno = 0;
+	if (fd_read_ull_checked(fd, out) < 0) {
+		error = errno;
+		if (cached)
+			counter_drop_fd(cache, open_count);
+		else
+			close(fd);
+		counter_record_failure(cache, now, error);
+		return -1;
+	}
+	cache->failures = 0;
+	cache->retry_after_us = 0;
+	if (!cached) {
+		if (open_count && *open_count < fd_cap) {
+			cache->fd = fd;
+			(*open_count)++;
+		} else {
+			close(fd);
+		}
+	}
+	return 0;
+}
+
+int sysfs_counter_fd_budget(int requested, int cached_fds)
+{
+	struct rlimit limit;
+	struct dirent *entry;
+	DIR *dir;
+	unsigned long long used = 0;
+	unsigned long long available;
+
+	if (requested <= 0 || getrlimit(RLIMIT_NOFILE, &limit) < 0)
+		return 0;
+	if (limit.rlim_cur == RLIM_INFINITY)
+		return requested;
+	dir = opendir("/proc/self/fd");
+	if (!dir)
+		dir = opendir("/dev/fd");
+	if (!dir)
+		return 0;
+	while ((entry = readdir(dir)) != NULL) {
+		char *end;
+		long fd;
+
+		if (entry->d_name[0] == '.')
+			continue;
+		errno = 0;
+		fd = strtol(entry->d_name, &end, 10);
+		if (!errno && end != entry->d_name && !*end &&
+		    fd >= 0 && fd != dirfd(dir))
+			used++;
+	}
+	closedir(dir);
+	if (cached_fds > 0 && (unsigned long long)cached_fds <= used)
+		used -= cached_fds;
+	if ((unsigned long long)limit.rlim_cur <= used + SYSFS_FD_RESERVE)
+		return 0;
+	available = (unsigned long long)limit.rlim_cur - used - SYSFS_FD_RESERVE;
+	return available < (unsigned long long)requested ? (int)available : requested;
+}
 
 static int parse_int_value(const char *text, int *out)
 {

@@ -118,7 +118,10 @@ CPU only; it does not verify every event on every CPU.
 Discovery is independent of \fB-s\fR/\fB-H\fR selection.
 .TP
 .B \-d, \-\-debug
-Show initialization and runtime diagnostics.
+Show initialization and runtime diagnostics on stderr. Interval mode reports
+collection, aggregation, and output time in milliseconds, plus the number of
+deadlines skipped before the next sample. Output time includes record building,
+serialization, and flushing; a slow terminal or pipe can delay sampling.
 .TP
 .B \-v, \-\-version
 Print the version and exit.

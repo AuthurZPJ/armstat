@@ -14,12 +14,13 @@ import stat
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 
 SUPPORTED_SCHEMA_VERSION = 9
 SUPPORTED_SCHEMA_VERSIONS = {SUPPORTED_SCHEMA_VERSION}
 SUPPORTED_PLOT_SUFFIXES = {".pdf", ".png", ".svg"}
+DEFAULT_PLOT_POINTS = 4000
 
 FIELD_UNITS = {
     "freq": "MHz",
@@ -206,20 +207,108 @@ def smooth_series(values: Sequence[float], window: int) -> List[float]:
         return finite_values
 
     smoothed: List[float] = []
-    for end in range(len(finite_values)):
-        if not math.isfinite(finite_values[end]):
-            smoothed.append(math.nan)
-            continue
-        start = max(0, end - window + 1)
-        bucket = [
-            value for value in finite_values[start:end + 1]
-            if math.isfinite(value)
-        ]
-        if not bucket:
-            smoothed.append(math.nan)
+    total = 0.0
+    correction = 0.0
+    count = 0
+    exact_total = None
+    # A finite input can overflow a float sum. Switch once to an exact binary
+    # accumulator in that exceptional case so later windows can recover;
+    # rebuilding every overflowing window would reintroduce O(samples*window).
+    scale = 1 << 1074
+
+    def binary_units(value: float) -> int:
+        numerator, denominator = value.as_integer_ratio()
+        return numerator << (1074 - (denominator.bit_length() - 1))
+
+    def add(delta: float) -> None:
+        nonlocal total, correction
+        updated = total + delta
+        if abs(total) >= abs(delta):
+            correction += (total - updated) + delta
         else:
-            smoothed.append(sum(bucket) / len(bucket))
+            correction += (delta - updated) + total
+        total = updated
+
+    for index, value in enumerate(finite_values):
+        expired = finite_values[index - window] if index >= window else math.nan
+        if math.isfinite(expired):
+            count -= 1
+            if exact_total is None:
+                add(-expired)
+            else:
+                exact_total -= binary_units(expired)
+        if math.isfinite(value):
+            count += 1
+            if exact_total is None:
+                add(value)
+            else:
+                exact_total += binary_units(value)
+
+        if exact_total is None:
+            # Rebase once per window to bound cancellation drift. The total
+            # work of these disjoint window scans is linear in sample count.
+            if (index + 1) % window == 0:
+                total = correction = 0.0
+                for entry in finite_values[index - window + 1:index + 1]:
+                    if math.isfinite(entry):
+                        add(entry)
+            if not math.isfinite(total + correction):
+                exact_total = sum(binary_units(v)
+                                  for v in finite_values[max(0, index - window + 1):index + 1]
+                                  if math.isfinite(v))
+            elif count == 0:
+                total = correction = 0.0
+        if not math.isfinite(value) or not count:
+            smoothed.append(math.nan)
+        elif exact_total is not None:
+            # Divide before converting back to float: a window sum can
+            # overflow even though its average is within the finite inputs.
+            smoothed.append(exact_total / (scale * count))
+        else:
+            smoothed.append((total + correction) / count)
     return smoothed
+
+
+def downsample_series(x_values: Sequence[object], values: Sequence[float],
+                      max_points: int = DEFAULT_PLOT_POINTS
+                      ) -> Tuple[Sequence[object], Sequence[float]]:
+    """Bound render work while keeping each bucket's extrema and gap edges.
+
+    Ranking and smoothing use the complete selected samples. Decimation only
+    changes the points sent to the renderer. Missing-data boundaries may add
+    points beyond the target so an unavailable interval never becomes a line.
+    """
+    if len(x_values) != len(values):
+        raise ValueError("Plot x/y series have different lengths.")
+    if max_points < 4:
+        raise ValueError("max_points must be at least 4.")
+    if len(values) <= max_points:
+        return x_values, values
+
+    buckets = max_points // 4
+    width = (len(values) + buckets - 1) // buckets
+    selected: Set[int] = set()
+    previous_finite = None
+    for start in range(0, len(values), width):
+        end = min(start + width, len(values))
+        selected.update((start, end - 1))
+        minimum = maximum = None
+        for index in range(start, end):
+            finite = math.isfinite(values[index])
+            if previous_finite is not None and finite != previous_finite:
+                selected.update((index - 1, index))
+            previous_finite = finite
+            if not finite:
+                continue
+            if minimum is None or values[index] < values[minimum]:
+                minimum = index
+            if maximum is None or values[index] > values[maximum]:
+                maximum = index
+        if minimum is not None:
+            selected.update((minimum, maximum))
+    indices = sorted(selected)
+    return ([x_values[index] for index in indices],
+            [values[index] for index in indices])
 
 
 def configure_time_axis(axis, x_values: Sequence[object], mdates) -> None:

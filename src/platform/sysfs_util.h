@@ -24,6 +24,28 @@
 #define ARMSTAT_SYSFS_UTIL_H
 
 #include <stddef.h>
+#include <stdint.h>
+
+/* A counter may keep its fd; stable unavailable sources retry with backoff. */
+struct sysfs_counter_cache {
+	int fd;
+	unsigned char failures;
+	uint64_t retry_after_us;
+};
+
+void sysfs_counter_init(struct sysfs_counter_cache *cache);
+void sysfs_counter_close(struct sysfs_counter_cache *cache, int *open_count);
+/* path may be NULL when this counter already has an open cached fd. */
+int sysfs_counter_read(struct sysfs_counter_cache *cache, const char *path,
+			unsigned long long *out, int *open_count, int fd_cap);
+
+/* Share one monotonic timestamp across all counters in a sampling cycle. */
+void sysfs_counter_begin_sample(void);
+void sysfs_counter_end_sample(void);
+int sysfs_counter_sample_active(void);
+
+/* Available persistent fds after existing descriptors and a runtime reserve. */
+int sysfs_counter_fd_budget(int requested, int cached_fds);
 
 /*
  * Read a single int from a sysfs/procfs file.

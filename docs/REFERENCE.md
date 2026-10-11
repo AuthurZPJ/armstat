@@ -50,6 +50,9 @@ bypassing interval aggregation and the selected display fields.
 The first snapshot establishes a baseline. Later samples use monotonic deadlines
 anchored to it; collection/output time reduces the next wait. Fully missed
 deadlines are skipped, and formulas always use measured `interval_delta_us`.
+With `-d`, each emitted interval reports collection, aggregation, output time
+(including record construction and flushing), and skipped deadlines on stderr.
+Output remains synchronous; backpressure increases measured intervals.
 
 Command mode (`armstat [options] -- command [args...]`) completes initialization
 before launch, then establishes a fresh baseline immediately before releasing
@@ -68,6 +71,8 @@ Statistics still describe selected CPU/platform activity, not per-process work.
 `cpu_id` is the real Linux ID used in paths and output. `tracked_idx` is the
 dense index into the selected online set. `cpu_inventory.c` owns present,
 online, and selected membership; use `for_each_tracked_cpu` for traversal.
+ID and tracked-index lookups and filter membership take constant time. Package
+aggregation runs only when package rows can be emitted.
 `--cpu` filters collection and CPU-derived aggregates, while global counters
 and platform sensors keep their own scope. IDs `0..1023` are representable;
 larger inventories are reported as truncated.
@@ -87,8 +92,9 @@ from the next measurement.
 | Per interval | Selected frequency, Busy/Idle, LPI, power, temperature, bandwidth, PMU inputs |
 
 Slow data starts with a full refresh, then advances a rolling CPU cursor after
-the fast snapshot. The default budget is `ceil(selected_cpus * interval / 5s)`,
-clamped to 1–32 CPUs; this cap can lengthen a complete sweep beyond five seconds.
+the fast snapshot. Credits accumulate at `selected_cpus / 5s`, permitting zero
+refreshes in a short interval, with at most 32 CPUs refreshed per sample. The
+cap can lengthen a complete sweep beyond five seconds.
 Runtime disable changes therefore take effect gradually.
 
 Reads follow selected fields and scopes. `/proc/stat` is parsed once when
@@ -97,7 +103,12 @@ cpuidle reads only selected states and counter families: residency does not
 require usage, and usage alone does not require time. With no LPI demand,
 collection skips cpuidle initialization and its availability warnings;
 `--probe` discovers capabilities independently of `-s`/`-H`. Cached cpufreq/cpuidle
-FDs and a cached procstat stream reduce repeated opens and parsing. Output
+FDs and a cached procstat stream reduce repeated opens and parsing. Frequency
+reads distinguish current frequency, uncore, and each selected configuration
+field. Counter FD budgets account for the open PMU/inherited descriptors and
+leave 64 runtime slots; excess counters use temporary descriptors. Missing or
+denied counter paths retry with a 250 ms to 5 s backoff and reset on CPU rebuild.
+Schedstat is attempted once per sample even when unavailable. Output
 likewise skips CPU/package record construction when those scopes cannot emit.
 A best-effort nice-value reduction before sampling is nonfatal if denied.
 
@@ -394,7 +405,7 @@ contain their required scope. Use their `--help` and input `--list-fields`.
 | Options | Use |
 |---|---|
 | `--preset`, or `--y` / `--y2` | Choose a metric preset or fields; do not combine them |
-| `--sample-range START:END` | One-based sample window; CSV retains only that window, JSON loads fully |
+| `--sample-range START:END` | One-based sample window; JSON and CSV retain only that window |
 | `--smooth N` | Rolling mean over N samples, preserving current missing samples |
 | `--cpu-filter`, `--top`, `--group-by node/core` | Limit CPU lines or group them |
 | `--aggregate avg/max/min`, `--rank-by avg/max/last` | CPU group aggregation and top-N ranking |
@@ -403,6 +414,13 @@ contain their required scope. Use their `--help` and input `--list-fields`.
 Core grouping uses `(package, core)` identity. Average ranking is the arithmetic
 mean of visible samples, not duration weighted. Entities with no primary data
 are reported and skipped; a missing secondary field skips only that line.
+Both formats are scanned completely for validation, decoding JSON one sample
+at a time. Loaders retain only the selected window, CPU filter, and requested
+fields; `--top` ranks the retained CPU series rather than limiting loading.
+Rolling smoothing takes linear work in the sample count. After smoothing,
+large series target about 4000 rendered points per line, retaining first/last
+points and extrema of each bucket plus every gap boundary. Numerous gaps can
+exceed that target. Ranking and aggregation still use all selected samples.
 
 Loaders reject unsupported/fractional schema versions, duplicate JSON keys or
 CPU IDs, malformed sections, nonstandard numeric constants, noncontiguous

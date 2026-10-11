@@ -291,10 +291,17 @@ after initialization and baseline collection succeed; later failures retain
 the already written prefix.
 
 Plotting preserves timestamps and unavailable-data gaps. Use `--list-fields`
-on an input to find usable series. From the source tree, use
+on an input to find usable series. `--sample-range START:END` limits retained
+samples for both JSON and CSV; `--cpu-filter` also limits retained CPU series.
+Large plots reduce rendering points while preserving bucket extrema and gap
+boundaries; ranking and smoothing use the full selected samples. From the source tree, use
 `scripts/plot_sum.py` and `scripts/plot_cpu.py` in place of the installed
 commands. See [plotting options and behavior](docs/REFERENCE.md#plotting-exports)
 and the [export contract](docs/REFERENCE.md#output-contract).
+
+For sampling overhead, `-d` reports collection, aggregation, output time, and
+skipped deadlines on stderr. A slow terminal or pipe can delay sampling;
+`duration_us` always records the measured interval.
 
 ## Platform Limits and Troubleshooting
 

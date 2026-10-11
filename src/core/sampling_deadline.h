@@ -11,5 +11,9 @@ int sampling_deadline_init(unsigned long long sample_ns,
 int sampling_deadline_advance(unsigned long long *deadline_ns,
 			      unsigned long long interval_ns,
 			      unsigned long long now_ns);
+int sampling_deadline_advance_counted(unsigned long long *deadline_ns,
+				      unsigned long long interval_ns,
+				      unsigned long long now_ns,
+				      unsigned long long *skipped_intervals);
 
 #endif /* ARMSTAT_SAMPLING_DEADLINE_H */

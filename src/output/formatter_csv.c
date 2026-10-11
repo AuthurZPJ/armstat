@@ -22,6 +22,16 @@ struct csv_layout {
 };
 
 static struct csv_layout initial_csv_layout;
+static struct csv_layout active_csv_layout;
+static char active_csv_timestamp_iso[64];
+
+static void csv_get_cached_fields(enum field_scope scope,
+				  struct field_desc **fields, int *count)
+{
+	*count = active_csv_layout.counts[scope];
+	memcpy(fields, active_csv_layout.fields[scope],
+	       (size_t)*count * sizeof(*fields));
+}
 
 static void get_csv_layout(struct csv_layout *layout)
 {
@@ -129,9 +139,7 @@ static void print_csv_metadata_header(void)
 
 static void print_csv_metadata_prefix(const struct interval_record *rec)
 {
-	char timestamp_iso[64];
-
-	machine_format_timestamp_iso(rec, timestamp_iso, sizeof(timestamp_iso));
+	const char *timestamp_iso = active_csv_timestamp_iso;
 	printf("%d,%llu,%llu,%ld,%llu,", MACHINE_SCHEMA_VERSION, rec->interval,
 	       rec->duration_us, (long)rec->timestamp,
 	       machine_record_timestamp_ns(rec));
@@ -167,13 +175,13 @@ static void serialize_csv_mixed_header(int summary_section,
 	int cpu_count = 0;
 
 	if (summary_section)
-		machine_get_serialized_fields(FIELD_SCOPE_SYSTEM, system_fields,
+		csv_get_cached_fields(FIELD_SCOPE_SYSTEM, system_fields,
 					      &system_count);
 	if (package_section)
-		machine_get_serialized_fields(FIELD_SCOPE_PACKAGE, package_fields,
+		csv_get_cached_fields(FIELD_SCOPE_PACKAGE, package_fields,
 					      &package_count);
 	if (cpu_section)
-		machine_get_serialized_fields(FIELD_SCOPE_CPU, cpu_fields,
+		csv_get_cached_fields(FIELD_SCOPE_CPU, cpu_fields,
 					      &cpu_count);
 
 	print_csv_metadata_header();
@@ -221,7 +229,7 @@ static void serialize_csv_header(void)
 
 	print_csv_metadata_header();
 	if (summary_section) {
-		machine_get_serialized_fields(FIELD_SCOPE_SYSTEM, system_fields,
+		csv_get_cached_fields(FIELD_SCOPE_SYSTEM, system_fields,
 					      &system_count);
 		printf("Scope");
 		for (int i = 0; i < system_count; i++) {
@@ -229,7 +237,7 @@ static void serialize_csv_header(void)
 			print_csv_cell(system_fields[i]->json_label);
 		}
 	} else if (package_section) {
-		machine_get_serialized_fields(FIELD_SCOPE_PACKAGE, package_fields,
+		csv_get_cached_fields(FIELD_SCOPE_PACKAGE, package_fields,
 					      &package_count);
 		printf("Package");
 		for (int i = 0; i < package_count; i++) {
@@ -237,7 +245,7 @@ static void serialize_csv_header(void)
 			print_csv_cell(package_fields[i]->json_label);
 		}
 	} else if (cpu_section && section_emit_cpu_identity()) {
-		machine_get_serialized_fields(FIELD_SCOPE_CPU, cpu_fields,
+		csv_get_cached_fields(FIELD_SCOPE_CPU, cpu_fields,
 					      &cpu_count);
 		printf("CPU");
 		for (int i = 0; i < cpu_count; i++) {
@@ -265,7 +273,7 @@ static void serialize_csv_cpu_row(const struct interval_record *rec,
 		first = 0;
 	}
 
-	machine_get_serialized_fields(FIELD_SCOPE_CPU, fields, &count);
+	csv_get_cached_fields(FIELD_SCOPE_CPU, fields, &count);
 	for (int i = 0; i < count; i++) {
 		char value[64];
 
@@ -287,7 +295,7 @@ static void serialize_csv_package_row(const struct interval_record *rec,
 	struct field_desc *fields[MACHINE_FIELD_CAPACITY];
 	int count;
 
-	machine_get_serialized_fields(FIELD_SCOPE_PACKAGE, fields, &count);
+	csv_get_cached_fields(FIELD_SCOPE_PACKAGE, fields, &count);
 	print_csv_metadata_prefix(rec);
 	printf("%d", rec->packages[package_idx].package_id);
 	for (int i = 0; i < count; i++) {
@@ -306,7 +314,7 @@ static void serialize_csv_summary_row(const struct interval_record *rec)
 	struct field_desc *fields[MACHINE_FIELD_CAPACITY];
 	int count;
 
-	machine_get_serialized_fields(FIELD_SCOPE_SYSTEM, fields, &count);
+	csv_get_cached_fields(FIELD_SCOPE_SYSTEM, fields, &count);
 	print_csv_metadata_prefix(rec);
 	printf("SUM");
 	for (int i = 0; i < count; i++) {
@@ -334,7 +342,7 @@ static void serialize_csv_mixed_cpu_row(const struct interval_record *rec,
 	print_empty_csv_cells(system_count);
 	print_empty_csv_cells(package_count);
 
-	machine_get_serialized_fields(FIELD_SCOPE_CPU, cpu_fields, &cpu_count);
+	csv_get_cached_fields(FIELD_SCOPE_CPU, cpu_fields, &cpu_count);
 	for (int i = 0; i < cpu_count; i++) {
 		char value[64];
 
@@ -360,7 +368,7 @@ static void serialize_csv_mixed_package_row(const struct interval_record *rec,
 	struct field_desc *package_fields[MACHINE_FIELD_CAPACITY];
 	int package_count;
 
-	machine_get_serialized_fields(FIELD_SCOPE_PACKAGE, package_fields,
+	csv_get_cached_fields(FIELD_SCOPE_PACKAGE, package_fields,
 				      &package_count);
 	print_csv_metadata_prefix(rec);
 	printf("PKG,,%d", rec->packages[package_idx].package_id);
@@ -389,7 +397,7 @@ static void serialize_csv_mixed_summary_row(const struct interval_record *rec,
 	struct field_desc *system_fields[MACHINE_FIELD_CAPACITY];
 	int system_count;
 
-	machine_get_serialized_fields(FIELD_SCOPE_SYSTEM, system_fields,
+	csv_get_cached_fields(FIELD_SCOPE_SYSTEM, system_fields,
 				      &system_count);
 	print_csv_metadata_prefix(rec);
 	printf("SUM,,");
@@ -421,13 +429,13 @@ static void serialize_csv_mixed_rows(const struct interval_record *rec,
 	int cpu_count = 0;
 
 	if (summary_section)
-		machine_get_serialized_fields(FIELD_SCOPE_SYSTEM, fields,
+		csv_get_cached_fields(FIELD_SCOPE_SYSTEM, fields,
 					      &system_count);
 	if (package_section)
-		machine_get_serialized_fields(FIELD_SCOPE_PACKAGE, fields,
+		csv_get_cached_fields(FIELD_SCOPE_PACKAGE, fields,
 					      &package_count);
 	if (cpu_section)
-		machine_get_serialized_fields(FIELD_SCOPE_CPU, fields, &cpu_count);
+		csv_get_cached_fields(FIELD_SCOPE_CPU, fields, &cpu_count);
 
 	if (summary_section)
 		serialize_csv_mixed_summary_row(rec, package_count, cpu_count,
@@ -465,6 +473,9 @@ int serialize_csv(const struct interval_record *rec)
 			"for changing column sets.\n");
 		return -1;
 	}
+	active_csv_layout = layout;
+	machine_format_timestamp_iso(rec, active_csv_timestamp_iso,
+				      sizeof(active_csv_timestamp_iso));
 	if (!csv_header_printed) {
 		initial_csv_layout = layout;
 		serialize_csv_header();

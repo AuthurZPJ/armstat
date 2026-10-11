@@ -250,9 +250,15 @@ CSV 要求列布局固定。运行中能力变化导致列改变时，采集会�
 已有输出文件只在初始化和基线采集成功后打开；后续失败保留已经写入的前缀。
 
 绘图保留时间戳和不可用数据造成的空缺。使用输入文件的 `--list-fields` 查询
-可用曲线。从源码运行时，以 `scripts/plot_sum.py`、`scripts/plot_cpu.py` 替代
+可用曲线。JSON 和 CSV 的 `--sample-range START:END` 都只保留所选样本，
+`--cpu-filter` 还可减少保留的 CPU 曲线。大图会减少渲染点，保留分桶峰谷和缺失
+区间边界；排名和平滑仍使用全部所选样本。从源码运行时，以
+`scripts/plot_sum.py`、`scripts/plot_cpu.py` 替代
 安装后的命令。详细规则见[绘图参考](docs/REFERENCE.zh-CN.md#导出画图)和
 [导出契约](docs/REFERENCE.zh-CN.md#输出契约)。
+
+排查采样开销时，`-d` 在 stderr 报告采集、聚合、输出耗时及跳过的采样时点数。
+终端或管道读取过慢会延迟采样，`duration_us` 始终记录实测区间。
 
 ## 平台限制与排查
 

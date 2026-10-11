@@ -318,6 +318,8 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	if (opts->debug) fprintf(stderr, "Initializing formatter...\n");
 	update_idle_state_visibility();
 	update_temp_field_visibility();
+	set_aggregator_package_output(!section_is_summary_mode() &&
+				      section_emit_package());
 
 	initialize_selected_pmu(opts, init_pmu_events);
 
@@ -462,13 +464,15 @@ static int safe_sleep_until(unsigned long long deadline_ns)
 }
 
 static int advance_sampling_deadline(unsigned long long *deadline_ns,
-				     unsigned long long interval_ns)
+				     unsigned long long interval_ns,
+				     unsigned long long *skipped)
 {
 	unsigned long long now_ns;
 
 	if (monotonic_now_ns(&now_ns) < 0)
 		return -1;
-	if (sampling_deadline_advance(deadline_ns, interval_ns, now_ns) < 0) {
+	if (sampling_deadline_advance_counted(deadline_ns, interval_ns, now_ns,
+					      skipped) < 0) {
 		fprintf(stderr, "Error: sampling deadline overflow\n");
 		return -1;
 	}
@@ -503,12 +507,24 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 	}
 
 	while (!done) {
+		unsigned long long stage_start_ns = 0;
+		unsigned long long collected_ns = 0;
+		unsigned long long aggregated_ns = 0;
+		unsigned long long output_ns = 0;
+		unsigned long long skipped = 0;
+		int last_interval = opts->iterations > 0 &&
+			iteration >= (unsigned int)opts->iterations;
+
+		if (opts->debug)
+			monotonic_now_ns(&stage_start_ns);
 		/* Collect raw data */
 		if (collect_snapshot(snapshot) < 0) {
 			fprintf(stderr, "Error: sampling stopped after collector failure\n");
 			status = -1;
 			break;
 		}
+		if (opts->debug)
+			monotonic_now_ns(&collected_ns);
 
 		/*
 		 * A zero-length interval means we are still on the initial baseline
@@ -522,7 +538,7 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 			calculate_interval_stats(snapshot, &stats);
 			next_deadline_ns = snapshot->sample_monotonic_ns;
 			if (advance_sampling_deadline(&next_deadline_ns,
-						      interval_ns) < 0) {
+						      interval_ns, NULL) < 0) {
 				status = -1;
 				break;
 			}
@@ -537,6 +553,8 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 
 		/* Calculate interval statistics */
 		calculate_interval_stats(snapshot, &stats);
+		if (opts->debug)
+			monotonic_now_ns(&aggregated_ns);
 
 		/* Output — dispatch directly to the serializer for this format */
 		rec = build_interval_record(snapshot, &stats, iteration);
@@ -567,9 +585,25 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 			break;
 		}
 
+		if (opts->debug)
+			monotonic_now_ns(&output_ns);
+		/* Hold an absolute cadence, skipping slots passed during output. */
+		if (!last_interval &&
+		    advance_sampling_deadline(&next_deadline_ns, interval_ns,
+					      &skipped) < 0) {
+			status = -1;
+			break;
+		}
+		if (opts->debug && stage_start_ns && collected_ns >= stage_start_ns &&
+		    aggregated_ns >= collected_ns && output_ns >= aggregated_ns)
+			fprintf(stderr, "Debug: interval %llu collect=%.3f ms "
+				"aggregate=%.3f ms output=%.3f ms skipped=%llu\n",
+				iteration, (collected_ns - stage_start_ns) / 1000000.0,
+				(aggregated_ns - collected_ns) / 1000000.0,
+				(output_ns - aggregated_ns) / 1000000.0, skipped);
+
 		/* Check exit condition */
-		if (opts->iterations > 0 &&
-		    iteration >= (unsigned int)opts->iterations)
+		if (last_interval)
 			break;
 		if (iteration == ULLONG_MAX) {
 			fprintf(stderr, "Error: interval sequence exhausted\n");
@@ -577,11 +611,6 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 			break;
 		}
 
-		/* Hold an absolute cadence instead of accumulating output overhead. */
-		if (advance_sampling_deadline(&next_deadline_ns, interval_ns) < 0) {
-			status = -1;
-			break;
-		}
 		sleep_result = safe_sleep_until(next_deadline_ns);
 		if (sleep_result != 0) {
 			if (sleep_result < 0)

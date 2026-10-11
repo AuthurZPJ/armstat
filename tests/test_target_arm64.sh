@@ -151,6 +151,27 @@ esac
 
 test -x "$armstat_bin"
 
+python3 - "$armstat_bin" <<'PY'
+import json
+import re
+import subprocess
+import sys
+
+result = subprocess.run(
+    [sys.argv[1], "-P", "-q", "-d", "-i", ".01", "-n", "3", "-f", "json"],
+    capture_output=True, text=True, check=True,
+)
+samples = json.loads(result.stdout)
+assert len(samples) == 3
+timings = re.findall(
+    r"^Debug: interval (\d+) collect=(\d+\.\d+) ms "
+    r"aggregate=(\d+\.\d+) ms output=(\d+\.\d+) ms skipped=(\d+)$",
+    result.stderr, re.MULTILINE,
+)
+assert [int(row[0]) for row in timings] == [1, 2, 3], result.stderr
+assert int(timings[-1][-1]) == 0
+PY
+
 for early_option in --help --version --list; do
 	if "$armstat_bin" "$early_option" >/dev/full 2>"$tmp_dir/full.stderr"; then
 		echo "target-test $early_option ignored an output write failure" >&2

@@ -4,6 +4,7 @@
 
 import sys
 import os
+import json
 import tempfile
 import tracemalloc
 from pathlib import Path
@@ -80,10 +81,8 @@ def test_summary_csv_streaming():
         reduction = (mem1 - mem2) / mem1 * 100
         print(f"Memory reduction: {reduction:.1f}%")
         
-        if reduction > 50:
-            print("✓ Streaming significantly reduces memory usage")
-        else:
-            print("⚠ Streaming memory reduction is less than expected")
+        assert reduction > 50, "Summary range must reduce peak retained memory"
+        print("✓ Streaming significantly reduces memory usage")
             
     finally:
         csv_path.unlink()
@@ -115,22 +114,30 @@ def test_cpu_csv_streaming():
         reduction = (mem1 - mem2) / mem1 * 100
         print(f"Memory reduction: {reduction:.1f}%")
         
-        if reduction > 50:
-            print("✓ Streaming significantly reduces memory usage")
-        else:
-            print("⚠ Streaming memory reduction is less than expected")
+        assert reduction > 50, "CPU range must reduce peak retained memory"
+        print("✓ Streaming significantly reduces memory usage")
+
+        projected, projected_memory = measure_memory(
+            plot_cpu.load_cpu_series, csv_path, cpu_filter=[3], fields=["freq"]
+        )
+        assert len(projected.samples) == 1000
+        assert projected.cpu_ids == [3]
+        assert projected.numeric_fields == ["freq"]
+        assert all(set(sample) == {3} and set(sample[3]) == {"freq"}
+                   for sample in projected.samples)
+        assert projected_memory < mem1 * 0.4, "CPU/field projection must occur before retention"
+        print(f"CPU3/freq projection: {projected_memory / 1024:.1f} KB peak memory")
             
     finally:
         csv_path.unlink()
 
 
-def test_json_unchanged():
-    """Verify JSON loading behavior is unchanged."""
+def test_json_range_streaming():
+    """JSON now applies the same inclusive range while loading as CSV."""
     print("\n=== JSON Loading Test ===")
     
     # Generate a small JSON file
     json_path = secure_temp_path(".json")
-    import json
     data = [
         {
             "schema_version": 9,
@@ -143,19 +150,56 @@ def test_json_unchanged():
     json_path.write_text(json.dumps(data))
     
     try:
-        # Test: JSON should load fully regardless of sample_range
         series1, _ = measure_memory(plot_sum.load_summary_series, json_path)
         series2, _ = measure_memory(plot_sum.load_summary_series, json_path, "10:20")
         
-        # Both should load all 100 samples (sample_range is ignored for JSON in load_summary_series)
         assert len(series1.rows) == 100, f"Expected 100 rows, got {len(series1.rows)}"
-        assert len(series2.rows) == 100, f"Expected 100 rows (JSON loads fully), got {len(series2.rows)}"
-        
-        print(f"JSON loads fully: {len(series1.rows)} rows")
-        print("✓ JSON behavior unchanged (loads fully, sample_range applied later)")
+        assert len(series2.rows) == 11, f"Expected 11 selected rows, got {len(series2.rows)}"
+        assert [row["__interval_index"] for row in series2.rows] == list(range(10, 21))
+        print("✓ JSON retains only the selected inclusive range")
         
     finally:
         json_path.unlink()
+
+
+def test_json_cpu_projection_memory():
+    """Memory follows selected samples/CPUs/fields, plus one decoded sample."""
+    path = secure_temp_path(".json")
+    try:
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write("[")
+            for index in range(1, 1001):
+                if index > 1:
+                    handle.write(",")
+                json.dump({
+                    "schema_version": 9, "interval": index,
+                    "cpus": [
+                        {"cpu": cpu, "freq": 2000.0 + index, "temp": 40.0 + cpu,
+                         "busy_percent": 50.0, "idle_percent": 50.0,
+                         "pmu": {f"event_{event}": index + event for event in range(8)}}
+                        for cpu in range(16)
+                    ],
+                }, handle)
+            handle.write("]")
+        full, full_memory = measure_memory(plot_cpu.load_cpu_series, path)
+        projected, projected_memory = measure_memory(
+            plot_cpu.load_cpu_series, path, cpu_filter=[3], fields=["freq"]
+        )
+        window, window_memory = measure_memory(
+            plot_cpu.load_cpu_series, path, "100:200", cpu_filter=[3], fields=["freq"]
+        )
+        assert len(full.samples) == len(projected.samples) == 1000
+        assert len(window.samples) == 101
+        assert projected.cpu_ids == window.cpu_ids == [3]
+        assert window.numeric_fields == ["freq"]
+        assert all(set(sample) == {3} and set(sample[3]) == {"freq"}
+                   for sample in projected.samples)
+        assert projected_memory < full_memory * 0.35
+        assert window_memory < full_memory * 0.2
+        print(f"JSON full: {full_memory / 1024:.1f} KB; CPU3/freq: "
+              f"{projected_memory / 1024:.1f} KB; window: {window_memory / 1024:.1f} KB")
+    finally:
+        path.unlink()
 
 
 if __name__ == "__main__":
@@ -164,7 +208,8 @@ if __name__ == "__main__":
     try:
         test_summary_csv_streaming()
         test_cpu_csv_streaming()
-        test_json_unchanged()
+        test_json_range_streaming()
+        test_json_cpu_projection_memory()
         
         print("\n" + "="*50)
         print("All streaming tests passed!")

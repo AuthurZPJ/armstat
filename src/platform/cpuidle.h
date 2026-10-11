@@ -59,6 +59,9 @@ void update_idle_states(unsigned long long elapsed_us,
  * so it can be spread across intervals without causing periodic spikes.
  */
 void refresh_idle_state_disable_cache_budgeted(int tracked_cpu_budget);
+void configure_cpuidle_fd_cache(int fd_cap, unsigned int residency_mask,
+				unsigned int usage_mask);
+int get_cpuidle_cached_fd_count(void);
 
 /* Get idle state count for all CPUs */
 int get_global_idle_state_count(void);

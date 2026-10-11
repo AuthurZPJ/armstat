@@ -83,7 +83,8 @@ LEGACY_OBJS = $(addprefix $(BUILD_OUTPUT)/,$(LEGACY_OBJ_NAMES))
 LEGACY_DEP_FILES = $(LEGACY_OBJS:.o=.d)
 
 TEST_NAMES = test_core_logic test_column_selection test_runtime_smoke \
-	     test_cpu_inventory test_section_policy test_command test_raw_snapshot
+	     test_cpu_inventory test_section_policy test_command test_raw_snapshot \
+	     test_sample_collection test_cpuidle_cache
 TEST_BINS = $(addprefix $(BUILD_OUTPUT)/tests/,$(TEST_NAMES))
 TEST_WRAPPERS = $(addprefix tests/,$(TEST_NAMES))
 TEST_DEP_FILES = $(TEST_BINS:%=%.d)
@@ -210,6 +211,8 @@ test: $(TARGET) $(TEST_BINS)
 	ARMSTAT_COMMAND_TEST_BIN=$(BUILD_OUTPUT)/tests/test_command \
 		PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_command_terminal.py
 	$(BUILD_OUTPUT)/tests/test_raw_snapshot
+	$(BUILD_OUTPUT)/tests/test_sample_collection
+	$(BUILD_OUTPUT)/tests/test_cpuidle_cache
 	ARMSTAT_BIN=$(TARGET) sh $(SRC_DIR)/tests/test_cli_smoke.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_loaders.py
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_render.py

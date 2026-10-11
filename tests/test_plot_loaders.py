@@ -13,10 +13,12 @@ import json
 import math
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +41,279 @@ armstat_loader = sys.modules["armstat_loader"]
 
 
 class PlotLoaderTests(unittest.TestCase):
+    def test_json_streaming_handles_chunk_boundaries_without_whole_file_read(self):
+        padding = ('brackets ]},[ and quote " and backslash \\ ' * 4000) + "汉字"
+        data = [
+            {"schema_version": 9, "interval": index,
+             "summary": {"freq": index, "nested": {"padding": padding}},
+             "cpus": [{"cpu": 0, "freq": index, "padding": padding}]}
+            for index in range(1, 4)
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "chunks.json"
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            reads = []
+            original_open = Path.open
+
+            class BoundedReader:
+                def __init__(self, handle):
+                    self.handle = handle
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.handle.close()
+
+                def read(self, size=-1):
+                    reads.append(size)
+                    if size <= 0:
+                        raise AssertionError("unbounded JSON read")
+                    return self.handle.read(size)
+
+            def open_bounded(source, *args, **kwargs):
+                handle = original_open(source, *args, **kwargs)
+                return BoundedReader(handle) if source == path else handle
+
+            with patch.object(Path, "open", open_bounded), patch.object(
+                Path, "read_text", side_effect=AssertionError("whole-file JSON read")
+            ):
+                summary = plot_sum.load_summary_series(path, "2:2", fields=["freq"])
+                cpus = plot_cpu.load_cpu_series(path, "2:2", cpu_filter=[0], fields=["freq"])
+
+        self.assertGreater(len(reads), 4)
+        self.assertEqual(reads[0], 64 * 1024)
+        self.assertLess(max(reads), len(json.dumps(data, ensure_ascii=False)) // 2)
+        self.assertEqual(summary.x_values, [2])
+        self.assertEqual(summary.rows[0]["freq"], 2)
+        self.assertNotIn("nested.padding", summary.rows[0])
+        self.assertEqual(cpus.samples, [{0: {"freq": 2}}])
+
+    def test_incremental_json_matches_decoder_across_literal_and_escape_boundaries(self):
+        data = [{"schema_version": 9, "interval": index, "summary": {
+            "freq": 1.234e123, "signed": -1.234e-123, "fraction": 1.234,
+            "truth": True, "false": False, "missing": None,
+            '[]"\\key': [{}, [], 'quote " and backslash \\ and unicode 汉字', '\n\t\u1234'],
+        }} for index in range(1, 4)]
+        original_open = Path.open
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "boundaries.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            for limit in range(1, 65):
+                class ShortReader:
+                    def __enter__(self):
+                        self.handle = original_open(path, "r", encoding="utf-8")
+                        return self
+
+                    def __exit__(self, *args):
+                        self.handle.close()
+
+                    def read(self, size):
+                        return self.handle.read(min(size, limit))
+
+                with self.subTest(chunk=limit), patch.object(
+                    Path, "open", lambda *args, **kwargs: ShortReader()
+                ):
+                    self.assertEqual(list(armstat_loader.iter_json_samples(path)), data)
+
+    def test_json_projection_still_rejects_damage_outside_selected_window(self):
+        first = '{"schema_version":9,"interval":1,"summary":{"freq":1}}'
+        padding = json.dumps('escaped " \\ ],{} ' * 7000)
+        bad_samples = [
+            '7',
+            '{"schema_version":8,"interval":2,"summary":{}}',
+            '{"schema_version":9,"interval":3,"summary":{}}',
+            '{"schema_version":9,"interval":2,"cpus":[]}',
+            '{"schema_version":9,"interval":2,"summary":{"freq":NaN}}',
+            '{"schema_version":9,"interval":2,"summary":{"padding":' + padding +
+            ',"freq":1,"freq":2}}',
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "bad.json"
+            for second in bad_samples:
+                with self.subTest(second=second[:70]):
+                    path.write_text(f"[{first},{second}]", encoding="utf-8")
+                    with self.assertRaises(SystemExit):
+                        plot_sum.load_summary_series(path, "1:1", fields=["freq"])
+            for tail in (",]", "] trailing", "][]", "", ","):
+                with self.subTest(tail=tail):
+                    path.write_text("[" + first + tail, encoding="utf-8")
+                    with self.assertRaises(SystemExit):
+                        plot_sum.load_summary_series(path, "1:1", fields=["freq"])
+
+    def test_cpu_projection_does_not_hide_invalid_or_duplicate_cpu_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for suffix in ("json", "csv"):
+                path = Path(tmpdir) / f"cpus.{suffix}"
+                for bad_id in (-1, 1.5, 1):
+                    with self.subTest(suffix=suffix, cpu=bad_id):
+                        if suffix == "json":
+                            path.write_text(json.dumps([
+                                {"schema_version": 9, "interval": 1,
+                                 "cpus": [{"cpu": 0, "freq": 100}]},
+                                {"schema_version": 9, "interval": 2,
+                                 "cpus": [{"cpu": 1, "freq": 200},
+                                          {"cpu": bad_id, "freq": 300}]},
+                            ]), encoding="utf-8")
+                        else:
+                            path.write_text(
+                                "schema_version,interval,CPU,freq\n"
+                                "9,1,0,100\n9,2,1,200\n" + f"9,2,{bad_id},300\n",
+                                encoding="utf-8",
+                            )
+                        with self.assertRaises(SystemExit):
+                            plot_cpu.load_cpu_series(path, "1:1", cpu_filter=[0], fields=["freq"])
+
+    def test_csv_projection_checks_schema_and_interval_after_selected_window(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "records.csv"
+            for loader, header, first, bad_rows in (
+                (plot_sum.load_summary_series, "schema_version,interval,Scope,freq\n",
+                 "9,1,SUM,100\n", ("8,2,SUM,200\n", "9,3,SUM,200\n", "9,2,SUM\n")),
+                (plot_cpu.load_cpu_series, "schema_version,interval,CPU,freq\n",
+                 "9,1,0,100\n", ("8,2,1,200\n", "9,3,1,200\n", "9,2,1\n")),
+            ):
+                for bad in bad_rows:
+                    with self.subTest(loader=loader.__name__, bad=bad):
+                        path.write_text(header + first + bad, encoding="utf-8")
+                        with self.assertRaises(SystemExit):
+                            loader(path, "1:1", fields=["freq"])
+
+    def test_streaming_ranges_preserve_bounds_and_original_sample_indices(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for suffix in ("json", "csv"):
+                path = Path(tmpdir) / f"records.{suffix}"
+                if suffix == "json":
+                    path.write_text(json.dumps([
+                        {"schema_version": 9, "interval": index,
+                         "summary": {"freq": index}, "cpus": [{"cpu": 0, "freq": index}]}
+                        for index in range(1, 4)
+                    ]), encoding="utf-8")
+                else:
+                    path.write_text(
+                        "schema_version,interval,Scope,CPU,Package,summary.freq,cpu.freq\n" +
+                        "".join(f"9,{i},SUM,,,{i},\n9,{i},CPU,0,,,{i}\n" for i in range(1, 4)),
+                        encoding="utf-8",
+                    )
+                for expr, expected in (("2:", [2, 3]), (":2", [1, 2]), ("2-9", [2, 3])):
+                    with self.subTest(suffix=suffix, expr=expr):
+                        self.assertEqual(plot_sum.load_summary_series(path, expr).x_values, expected)
+                        self.assertEqual(plot_cpu.load_cpu_series(path, expr).x_values, expected)
+                for loader in (plot_sum.load_summary_series, plot_cpu.load_cpu_series):
+                    with self.assertRaisesRegex(SystemExit, "contains only 3 samples"):
+                        loader(path, "4:9")
+                    for expr in ("0:2", "3:2", "x:2", "2"):
+                        with self.subTest(suffix=suffix, expr=expr), self.assertRaises(SystemExit):
+                            loader(path, expr)
+
+    def test_cpu_and_field_projection_preserves_aliases_and_scope(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for suffix in ("json", "csv"):
+                path = Path(tmpdir) / f"records.{suffix}"
+                if suffix == "json":
+                    path.write_text(json.dumps([{
+                        "schema_version": 9, "interval": 1,
+                        "summary": {"freq": 99, "power": 1000},
+                        "cpus": [{"cpu": 0, "freq": 100, "package": 0, "temp": 40,
+                                  "pmu": {"cycles": 10, "instructions": 20}},
+                                 {"cpu": 1, "freq": 200, "package": 1, "temp": 50,
+                                  "pmu": {"cycles": 30, "instructions": 40}}],
+                    }]), encoding="utf-8")
+                else:
+                    path.write_text(
+                        "schema_version,interval,Scope,CPU,Package,summary.freq,summary.power,"
+                        "cpu.freq,cpu.package,cpu.temp,cpu.pmu.cycles,cpu.pmu.instructions\n"
+                        "9,1,SUM,,,99,1000,,,,,\n"
+                        "9,1,CPU,0,,,,100,0,40,10,20\n"
+                        "9,1,CPU,1,,,,200,1,50,30,40\n", encoding="utf-8",
+                    )
+                summary = plot_sum.load_summary_series(path, fields=["summary_freq_mhz"])
+                cpus = plot_cpu.load_cpu_series(path, cpu_filter=[1], fields=["Freq", "cycles"])
+                self.assertEqual(summary.numeric_fields, ["freq"])
+                self.assertEqual(cpus.cpu_ids, [1])
+                self.assertEqual(cpus.numeric_fields, ["freq", "pmu.cycles"])
+                self.assertEqual(set(cpus.samples[0][1]), {"freq", "pmu.cycles"})
+                self.assertEqual(plot_cpu.extract_series(cpus.samples, 1, "freq"), [200])
+
+    def test_unmatched_cpu_filter_is_reported_before_missing_projected_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for suffix in ("json", "csv"):
+                path = Path(tmpdir) / f"cpus.{suffix}"
+                if suffix == "json":
+                    path.write_text(json.dumps([{
+                        "schema_version": 9, "interval": 1,
+                        "cpus": [{"cpu": 0, "freq": 2200}],
+                    }]), encoding="utf-8")
+                else:
+                    path.write_text("schema_version,interval,CPU,freq\n9,1,0,2200\n",
+                                    encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPTS / "plot_cpu.py"), str(path),
+                     "--y", "freq", "--cpu-filter", "99"],
+                    text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("CPU filter does not match any CPU", result.stderr)
+                self.assertNotIn("Unknown field", result.stderr)
+
+    def test_rolling_smoothing_preserves_window_gaps_and_has_linear_scan_work(self):
+        import plot_utils
+
+        values = [math.nan if i % 23 == 0 else math.inf if i % 29 == 0 else (i % 11 - 5) * 0.7
+                  for i in range(2500)]
+        for window in (1, 2, 17, 2048, 3000):
+            calls = 0
+            original_finite = math.isfinite
+
+            def counted_finite(value):
+                nonlocal calls
+                calls += 1
+                return original_finite(value)
+
+            with patch.object(plot_utils.math, "isfinite", counted_finite):
+                actual = plot_sum.smooth_series(values, window)
+            self.assertLess(calls, 9 * len(values))
+            for index, value in enumerate(values):
+                if not math.isfinite(value):
+                    self.assertTrue(math.isnan(actual[index]))
+                    continue
+                bucket = [v for v in values[max(0, index - window + 1):index + 1]
+                          if math.isfinite(v)]
+                self.assertAlmostEqual(actual[index], sum(bucket) / len(bucket), places=10)
+
+        overflow = plot_sum.smooth_series([1e308, 1e308, 3.0, 4.0], 2)
+        self.assertEqual(overflow[1], 1e308)
+        self.assertEqual(overflow[-1], 3.5)
+        three = plot_sum.smooth_series([1e308, 1e308, 1.0], 3)[-1]
+        self.assertTrue(math.isfinite(three))
+        self.assertAlmostEqual(three / 1e308, 2 / 3)
+        cancelled = plot_sum.smooth_series([1e308, 1e308, -1e308, -1e308, 3.0, 4.0], 2)
+        self.assertEqual(cancelled, [1e308, 1e308, 0.0, -1e308, -5e307, 3.5])
+        self.assertEqual(plot_sum.smooth_series([1e100, 1.0, 2.0], 2)[-1], 1.5)
+
+    def test_render_downsampling_keeps_extrema_and_missing_interval_boundaries(self):
+        import plot_utils
+
+        x_values = list(range(10000))
+        values = [0.0] * len(x_values)
+        peaks = [index + offset for index in range(0, 10000, 2000) for offset in (123, 999)]
+        for index, point in enumerate(peaks):
+            values[point] = 100.0 + index if index % 2 == 0 else -100.0 - index
+        for index in range(4500, 4550):
+            values[index] = math.nan
+        reduced_x, reduced_y = plot_utils.downsample_series(x_values, values, max_points=20)
+        self.assertLessEqual(len(reduced_x), 24)
+        self.assertEqual(reduced_x[0], 0)
+        self.assertEqual(reduced_x[-1], 9999)
+        self.assertTrue(set(peaks).issubset(reduced_x))
+        for point in (4499, 4500, 4549, 4550):
+            self.assertIn(point, reduced_x)
+        self.assertTrue(math.isnan(reduced_y[reduced_x.index(4500)]))
+        self.assertEqual(list(reduced_x), sorted(set(reduced_x)))
+        short_x = [1, 2]
+        short_y = [1.0, math.nan]
+        self.assertIs(plot_utils.downsample_series(short_x, short_y)[0], short_x)
+
     def test_nanosecond_timestamp_offset_is_preserved(self):
         for fraction in ("", ".1", ".123", ".123456", ".123456789"):
             for offset, seconds in (
@@ -525,7 +800,7 @@ class PlotLoaderTests(unittest.TestCase):
             path = Path(tmpdir) / "summary.json"
             path.write_text(json.dumps(data), encoding="utf-8")
             series = plot_sum.load_summary_series(path)
-            series = plot_sum.slice_summary_series(series, "2:2")
+            series = armstat_loader.slice_summary_series(series, "2:2")
 
         self.assertNotIn("freq", series.numeric_fields)
         self.assertIn("power", series.numeric_fields)
@@ -539,7 +814,7 @@ class PlotLoaderTests(unittest.TestCase):
         )
 
         with self.assertRaises(SystemExit):
-            plot_sum.slice_summary_series(series, "3:4")
+            armstat_loader.slice_summary_series(series, "3:4")
 
     def test_sysstat_preset_treats_memory_bandwidth_as_optional(self):
         fields = ["ctx_switches", "interrupts", "soft_interrupts"]

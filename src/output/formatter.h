@@ -185,6 +185,7 @@ void set_text_header_interval(int interval);
  * Cleanup formatter pool
  */
 void cleanup_formatter_pool(void);
+void cleanup_text_values(void);
 
 /*
  * Close the JSON output array (must be called once when JSON mode ends)

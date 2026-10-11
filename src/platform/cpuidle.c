@@ -59,17 +59,11 @@ static unsigned char *prev_state_time_valid;
 static unsigned char *prev_state_usage_valid;
 static int *cpu_idle_state_counts;
 static unsigned char *cpu_idle_state_disabled;
-static int *state_time_fds;
+static struct sysfs_counter_cache *state_time_cache;
+static struct sysfs_counter_cache *state_usage_cache;
 static int disable_refresh_cursor;
-static int state_time_fd_cap;
-static int state_time_fd_open_count;
-
-/*
- * PMU monitoring can keep hundreds of perf_event fds open on large machines.
- * Keep cpuidle's persistent cache intentionally small so split-LPI reporting
- * never consumes the entire process fd budget.
- */
-#define MAX_STATE_TIME_FD_CACHE 32
+static int state_fd_cap;
+static int state_fd_open_count;
 
 /* STATIC LAYER: Cached at init, never re-read */
 /* State names - read once at init, static throughout runtime */
@@ -85,45 +79,33 @@ static int state_fd_index(int cpu, int state)
 	return cpu * max_idle_states + state;
 }
 
-static int get_state_time_fd(int tracked_idx, int state)
+int get_cpuidle_cached_fd_count(void)
 {
-	char path[256];
-	char sub[64];
-	int idx;
-	int fd;
-	int cpu_id;
+	return state_fd_open_count;
+}
 
-	if (!state_time_fds)
-		return -1;
+void configure_cpuidle_fd_cache(int fd_cap, unsigned int residency_mask,
+				unsigned int usage_mask)
+{
+	state_fd_cap = fd_cap > 0 ? fd_cap : 0;
+	if (!state_time_cache || !state_usage_cache)
+		return;
+	for (int cpu = cached_cpu_count - 1; cpu >= 0; cpu--) {
+		for (int state = max_idle_states - 1; state >= 0; state--) {
+			int idx = state_fd_index(cpu, state);
 
-	idx = state_fd_index(tracked_idx, state);
-	fd = state_time_fds[idx];
-	if (fd >= 0)
-		return fd;
-
-	/*
-	 * On large-core servers, cpuidle state-time fds are only one part of the
-	 * process-wide fd footprint; PMU perf groups and cpufreq caches also keep
-	 * descriptors open. Cap the persistent cpuidle cache so enabling PMU does
-	 * not starve later sysfs/proc reads and collapse idle accounting.
-	 */
-	if (state_time_fd_open_count >= state_time_fd_cap)
-		return -1;
-
-	cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
-	if (cpu_id < 0)
-		return -1;
-
-	snprintf(sub, sizeof(sub), "cpuidle/state%d/time", state);
-	if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) < 0)
-		return -1;
-	fd = open(path, O_RDONLY | O_CLOEXEC);
-	if (fd >= 0) {
-		state_time_fds[idx] = fd;
-		state_time_fd_open_count++;
+			if (!(usage_mask & (1U << state)))
+				sysfs_counter_close(&state_usage_cache[idx], &state_fd_open_count);
+			if (!(residency_mask & (1U << state)))
+				sysfs_counter_close(&state_time_cache[idx], &state_fd_open_count);
+		}
 	}
-
-	return fd;
+	for (int idx = cached_cpu_count * max_idle_states - 1;
+	     idx >= 0 && state_fd_open_count > state_fd_cap; idx--) {
+		sysfs_counter_close(&state_usage_cache[idx], &state_fd_open_count);
+		if (state_fd_open_count > state_fd_cap)
+			sysfs_counter_close(&state_time_cache[idx], &state_fd_open_count);
+	}
 }
 
 static void copy_idle_state_name(char dest[32], const char *src)
@@ -257,8 +239,8 @@ static int read_idle_state(int tracked_idx, int state, struct idle_state *info,
 {
 	char path[256];
 	char sub[64];
-	int fd;
 	int cpu_id;
+	int idx;
 
 	memset(info, 0, sizeof(*info));
 	info->percentage = NAN;
@@ -280,34 +262,36 @@ static int read_idle_state(int tracked_idx, int state, struct idle_state *info,
 	}
 
 	info->available = 1;
+	idx = state_fd_index(tracked_idx, state);
 
 	/* DYNAMIC LAYER: Read only counters required by selected output fields. */
 	if (read_time) {
-		fd = get_state_time_fd(tracked_idx, state);
-		if (fd >= 0) {
-			if (fd_read_ull_checked(fd, &info->time) == 0) {
-				info->time_valid = 1;
-			} else {
-				int idx = state_fd_index(tracked_idx, state);
+		const char *source_path = NULL;
 
-				close(fd);
-				state_time_fds[idx] = -1;
-				state_time_fd_open_count--;
-			}
-		}
-		if (!info->time_valid) {
+		if (state_time_cache[idx].fd < 0) {
 			snprintf(sub, sizeof(sub), "cpuidle/state%d/time", state);
-			if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0 &&
-			    sysfs_read_ull_checked(path, &info->time) == 0)
-				info->time_valid = 1;
+			if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) < 0)
+				return -1;
+			source_path = path;
 		}
+		if (sysfs_counter_read(&state_time_cache[idx],
+				       source_path, &info->time, &state_fd_open_count,
+				       state_fd_cap) == 0)
+			info->time_valid = 1;
 	}
 
 	if (read_usage) {
-		/* usage is separate and is not part of the cached-fd budget. */
-		snprintf(sub, sizeof(sub), "cpuidle/state%d/usage", state);
-		if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) == 0 &&
-		    sysfs_read_ull_checked(path, &info->usage) == 0)
+		const char *source_path = NULL;
+
+		if (state_usage_cache[idx].fd < 0) {
+			snprintf(sub, sizeof(sub), "cpuidle/state%d/usage", state);
+			if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) < 0)
+				return -1;
+			source_path = path;
+		}
+		if (sysfs_counter_read(&state_usage_cache[idx],
+				       source_path, &info->usage, &state_fd_open_count,
+				       state_fd_cap) == 0)
 			info->usage_valid = 1;
 	}
 
@@ -335,13 +319,18 @@ static void free_idle_state_matrix(int total_cpus)
 
 static void cleanup_cpuidle_runtime_allocations(int total_cpus)
 {
-	if (state_time_fds) {
+	if (state_time_cache) {
 		for (int i = 0; i < total_cpus * max_idle_states; i++) {
-			if (state_time_fds[i] >= 0)
-				close(state_time_fds[i]);
+			sysfs_counter_close(&state_time_cache[i], &state_fd_open_count);
 		}
-		free(state_time_fds);
-		state_time_fds = NULL;
+		free(state_time_cache);
+		state_time_cache = NULL;
+	}
+	if (state_usage_cache) {
+		for (int i = 0; i < total_cpus * max_idle_states; i++)
+			sysfs_counter_close(&state_usage_cache[i], &state_fd_open_count);
+		free(state_usage_cache);
+		state_usage_cache = NULL;
 	}
 
 	if (cpu_idle_state_disabled) {
@@ -396,6 +385,9 @@ int init_cpuidle(void)
 
 	tracked = total_cpus;
 	state_count = 0;
+	cpu_idle_state_counts = calloc(total_cpus, sizeof(int));
+	if (!cpu_idle_state_counts)
+		return -1;
 	for (int tracked_idx = 0; tracked_idx < tracked; tracked_idx++) {
 		int cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
 		int cpu_state_count;
@@ -404,24 +396,29 @@ int init_cpuidle(void)
 			continue;
 
 		cpu_state_count = get_idle_state_count(cpu_id);
+		cpu_idle_state_counts[tracked_idx] = cpu_state_count > 0 ? cpu_state_count : 0;
 		if (cpu_state_count > state_count)
 			state_count = cpu_state_count;
 	}
 
-	if (state_count <= 0)
+	if (state_count <= 0) {
+		cleanup_cpuidle_runtime_allocations(total_cpus);
 		return -1;
+	}
 
 	max_idle_states = state_count;
 
 	idle_states = calloc(total_cpus, sizeof(struct idle_state *));
-	if (!idle_states)
+	if (!idle_states) {
+		cleanup_cpuidle_runtime_allocations(total_cpus);
 		return -1;
+	}
 
 	for (cpu = 0; cpu < total_cpus; cpu++) {
 		idle_states[cpu] = calloc(max_idle_states,
 					  sizeof(struct idle_state));
 		if (!idle_states[cpu]) {
-			free_idle_state_matrix(cpu);
+			cleanup_cpuidle_runtime_allocations(total_cpus);
 			return -1;
 		}
 	}
@@ -430,7 +427,7 @@ int init_cpuidle(void)
 	prev_state_times = calloc(total_cpus * max_idle_states,
 				 sizeof(unsigned long long));
 	if (!prev_state_times) {
-		free_idle_state_matrix(total_cpus);
+		cleanup_cpuidle_runtime_allocations(total_cpus);
 		return -1;
 	}
 
@@ -450,25 +447,20 @@ int init_cpuidle(void)
 		return -1;
 	}
 
-	cpu_idle_state_counts = calloc(total_cpus, sizeof(int));
-	if (!cpu_idle_state_counts) {
-		cleanup_cpuidle_runtime_allocations(total_cpus);
-		return -1;
-	}
-	for (cpu = 0; cpu < total_cpus; cpu++) {
-		int cpu_id = get_cpu_id_by_tracked_idx(cpu);
-
-		cpu_idle_state_counts[cpu] = (cpu_id >= 0) ?
-					     get_idle_state_count(cpu_id) : 0;
-	}
-
-	state_time_fds = malloc(total_cpus * max_idle_states * sizeof(int));
-	if (!state_time_fds) {
+	state_time_cache = calloc(total_cpus * max_idle_states, sizeof(*state_time_cache));
+	if (!state_time_cache) {
 		cleanup_cpuidle_runtime_allocations(total_cpus);
 		return -1;
 	}
 	for (cpu = 0; cpu < total_cpus * max_idle_states; cpu++)
-		state_time_fds[cpu] = -1;
+		sysfs_counter_init(&state_time_cache[cpu]);
+	state_usage_cache = calloc(total_cpus * max_idle_states, sizeof(*state_usage_cache));
+	if (!state_usage_cache) {
+		cleanup_cpuidle_runtime_allocations(total_cpus);
+		return -1;
+	}
+	for (cpu = 0; cpu < total_cpus * max_idle_states; cpu++)
+		sysfs_counter_init(&state_usage_cache[cpu]);
 
 	cpu_idle_state_disabled = calloc(total_cpus * max_idle_states,
 					 sizeof(unsigned char));
@@ -479,10 +471,8 @@ int init_cpuidle(void)
 	for (cpu = 0; cpu < total_cpus; cpu++)
 		refresh_disable_bits_for_cpu(cpu);
 	disable_refresh_cursor = 0;
-	state_time_fd_open_count = 0;
-	state_time_fd_cap = total_cpus * max_idle_states;
-	if (state_time_fd_cap > MAX_STATE_TIME_FD_CACHE)
-		state_time_fd_cap = MAX_STATE_TIME_FD_CACHE;
+	state_fd_open_count = 0;
+	state_fd_cap = 0;
 
 	/* STATIC LAYER: Cache idle state names (read once, never changes) */
 	idle_state_names = calloc(max_idle_states, sizeof(char[32]));
@@ -504,7 +494,7 @@ int init_cpuidle(void)
 				char name_buf[1024];
 				char *name;
 
-				if (cpu_id < 0 || get_idle_state_count(cpu_id) <= s)
+				if (cpu_id < 0 || cpu_idle_state_counts[tracked_idx] <= s)
 					continue;
 
 				snprintf(path, sizeof(path),
@@ -735,8 +725,8 @@ void close_cpuidle(void)
 	cached_cpu_count = 0;
 	effective_cpu_count = 0;
 	disable_refresh_cursor = 0;
-	state_time_fd_open_count = 0;
-	state_time_fd_cap = 0;
+	state_fd_open_count = 0;
+	state_fd_cap = 0;
 
 	/* Free static layer caches */
 	if (idle_state_names) {

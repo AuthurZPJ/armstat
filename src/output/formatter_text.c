@@ -56,6 +56,79 @@ static struct text_layout previous_layouts[3];
 static int previous_layout_valid;
 static int previous_compact_summary;
 
+/* Store only the rendered strings, retaining capacity between samples. */
+struct text_values {
+	size_t *offsets;
+	size_t cell_capacity;
+	char *data;
+	size_t capacity;
+	size_t used;
+	int rows;
+	int stride;
+	int valid;
+};
+
+static struct text_values text_values[3];
+
+static void prepare_text_values(enum field_scope scope, int rows, int stride)
+{
+	struct text_values *values = &text_values[scope];
+	size_t cells = (size_t)rows * (size_t)stride;
+
+	values->used = 0;
+	values->rows = rows;
+	values->stride = stride;
+	values->valid = 1;
+	if (cells > values->cell_capacity) {
+		size_t *offsets = realloc(values->offsets, cells * sizeof(*offsets));
+
+		if (!offsets) {
+			values->valid = 0;
+			return;
+		}
+		values->offsets = offsets;
+		values->cell_capacity = cells;
+	}
+}
+
+static void cache_text_value(enum field_scope scope, int row, int column,
+			     const char *value)
+{
+	struct text_values *values = &text_values[scope];
+	size_t length = strlen(value) + 1;
+	size_t needed = values->used + length;
+
+	if (!values->valid)
+		return;
+	if (needed > values->capacity) {
+		size_t capacity = values->capacity ? values->capacity * 2 : 4096;
+		char *data;
+
+		if (capacity < needed)
+			capacity = needed;
+		data = realloc(values->data, capacity);
+		if (!data) {
+			values->valid = 0;
+			return;
+		}
+		values->data = data;
+		values->capacity = capacity;
+	}
+	values->offsets[(size_t)row * values->stride + column] = values->used;
+	memcpy(values->data + values->used, value, length);
+	values->used = needed;
+}
+
+static const char *cached_text_value(enum field_scope scope, int row, int column)
+{
+	const struct text_values *values = &text_values[scope];
+
+	if (!values->valid || row < 0 || row >= values->rows ||
+	    column < 0 || column >= values->stride)
+		return NULL;
+	return values->data + values->offsets[(size_t)row * values->stride + column];
+}
+
 static int read_text_terminal(struct text_terminal *terminal)
 {
 	struct winsize size;
@@ -170,7 +243,7 @@ static int get_default_field_width(const struct field_desc *field)
 
 static int measure_text_field_width(const struct field_desc *field,
 				    const struct interval_record *rec,
-				    int row_idx)
+				    int row_idx, int column)
 {
 	char buf[TEXT_VALUE_BUF_LEN];
 	int width = get_default_field_width(field);
@@ -182,6 +255,7 @@ static int measure_text_field_width(const struct field_desc *field,
 	}
 
 	format_field_value(field, rec, row_idx, "-", buf, sizeof(buf));
+	cache_text_value(field->scope, row_idx, column, buf);
 	{
 		int value_len = (int)strlen(buf);
 		if (value_len > width)
@@ -191,7 +265,9 @@ static int measure_text_field_width(const struct field_desc *field,
 	return width;
 }
 
-static int measure_text_pmu_width(const char *name, unsigned long long value, int available)
+static int measure_text_pmu_width(enum field_scope scope, int row, int column,
+				 const char *name, unsigned long long value,
+				 int available)
 {
 	char buf[TEXT_VALUE_BUF_LEN];
 	int width = 0;
@@ -199,6 +275,7 @@ static int measure_text_pmu_width(const char *name, unsigned long long value, in
 	snprintf(buf, sizeof(buf), "%s", available ? "" : "-");
 	if (available)
 		snprintf(buf, sizeof(buf), "%llu", value);
+	cache_text_value(scope, row, column, buf);
 
 	width = (int)strlen(buf);
 	if (name) {
@@ -245,11 +322,18 @@ static void build_text_layout(struct text_layout *layout,
 		}
 	}
 
+	/* Package rows do not contain PMU cells. */
+	layout->pmu_count = scope != FIELD_SCOPE_PACKAGE && is_pmu_enabled() ?
+		get_pmu_event_count() : 0;
+	prepare_text_values(scope, scope == FIELD_SCOPE_SYSTEM ? 1 :
+			    scope == FIELD_SCOPE_PACKAGE ? rec->package_count :
+			    rec->cpu_row_count, layout->count + layout->pmu_count);
+
 	for (int i = 0; i < layout->count; i++) {
 		int width = 0;
 
 		if (scope == FIELD_SCOPE_SYSTEM) {
-			width = measure_text_field_width(layout->fields[i], rec, 0);
+			width = measure_text_field_width(layout->fields[i], rec, 0, i);
 		} else if (scope == FIELD_SCOPE_PACKAGE) {
 			width = get_default_field_width(layout->fields[i]);
 			if (layout->fields[i]->label) {
@@ -258,7 +342,7 @@ static void build_text_layout(struct text_layout *layout,
 					width = label_len;
 			}
 			for (int pkg = 0; pkg < rec->package_count; pkg++) {
-				int c = measure_text_field_width(layout->fields[i], rec, pkg);
+				int c = measure_text_field_width(layout->fields[i], rec, pkg, i);
 				if (c > width)
 					width = c;
 			}
@@ -272,7 +356,7 @@ static void build_text_layout(struct text_layout *layout,
 
 			for (int row_idx = 0; row_idx < rec->cpu_row_count; row_idx++) {
 				int candidate = measure_text_field_width(layout->fields[i],
-								 rec, row_idx);
+								 rec, row_idx, i);
 				if (candidate > width)
 					width = candidate;
 			}
@@ -285,10 +369,9 @@ static void build_text_layout(struct text_layout *layout,
 		layout->widths[i] = width;
 	}
 
-	if (!is_pmu_enabled())
+	if (!layout->pmu_count)
 		return;
 
-	layout->pmu_count = get_pmu_event_count();
 	for (int i = 0; i < layout->pmu_count; i++) {
 		const char *name = get_pmu_event_name(i);
 
@@ -300,7 +383,8 @@ static void build_text_layout(struct text_layout *layout,
 			unsigned long long value = rec ? rec->summary.pmu[i] : 0;
 			int available = rec && pmu_is_active() &&
 				rec->summary.pmu_valid;
-			layout->pmu_widths[i] = measure_text_pmu_width(name, value, available);
+			layout->pmu_widths[i] = measure_text_pmu_width(scope, 0,
+				layout->count + i, name, value, available);
 		} else {
 			int width = name ? (int)strlen(name) : 0;
 
@@ -316,7 +400,8 @@ static void build_text_layout(struct text_layout *layout,
 					available = rec->cpu_rows[row_idx].pmu_valid;
 				if (available)
 					value = rec->cpu_rows[row_idx].pmu[i];
-				candidate = measure_text_pmu_width(name, value, available);
+				candidate = measure_text_pmu_width(scope, row_idx,
+					layout->count + i, name, value, available);
 				if (candidate > width)
 					width = candidate;
 			}
@@ -334,12 +419,16 @@ static void print_text_separator(void)
 static void print_text_field_with_width(const struct field_desc *field,
 					const struct interval_record *rec,
 					int row_idx,
-					int width)
+					int column, int width)
 {
 	char buf[TEXT_VALUE_BUF_LEN];
+	const char *value = cached_text_value(field->scope, row_idx, column);
 
-	format_field_value(field, rec, row_idx, "-", buf, sizeof(buf));
-	printf("%*s", width, buf);
+	if (!value) {
+		format_field_value(field, rec, row_idx, "-", buf, sizeof(buf));
+		value = buf;
+	}
+	printf("%*s", width, value);
 }
 
 static void print_text_pmu_headers(const struct text_layout *layout)
@@ -356,8 +445,13 @@ static void print_text_summary_pmu(const struct interval_record *rec,
 				   const struct text_layout *layout)
 {
 	for (int i = 0; i < rec->pmu_event_count; i++) {
+		const char *value = cached_text_value(FIELD_SCOPE_SYSTEM, 0,
+						     layout->count + i);
+
 		print_text_separator();
-		if (!pmu_is_active() || !rec->summary.pmu_valid)
+		if (value)
+			printf("%*s", layout->pmu_widths[i], value);
+		else if (!pmu_is_active() || !rec->summary.pmu_valid)
 			printf("%*s", layout->pmu_widths[i], "-");
 		else
 			printf("%*llu", layout->pmu_widths[i], rec->summary.pmu[i]);
@@ -369,8 +463,13 @@ static void print_text_cpu_pmu(const struct interval_record *rec,
 			       const struct text_layout *layout)
 {
 	for (int i = 0; i < rec->pmu_event_count; i++) {
+		const char *value = cached_text_value(FIELD_SCOPE_CPU, row_idx,
+						     layout->count + i);
+
 		print_text_separator();
-		if (!pmu_is_active() || !rec->cpu_rows[row_idx].pmu_valid)
+		if (value)
+			printf("%*s", layout->pmu_widths[i], value);
+		else if (!pmu_is_active() || !rec->cpu_rows[row_idx].pmu_valid)
 			printf("%*s", layout->pmu_widths[i], "-");
 		else
 			printf("%*llu", layout->pmu_widths[i],
@@ -404,7 +503,7 @@ static void serialize_text_package_row(const struct interval_record *rec,
 	for (int i = 0; i < layout->count; i++) {
 		printf("%*s", TEXT_COLUMN_GAP, "");
 		print_text_field_with_width(layout->fields[i], rec, pkg_idx,
-					    layout->widths[i]);
+					    i, layout->widths[i]);
 	}
 	printf("\n");
 }
@@ -465,7 +564,7 @@ static void serialize_text_summary_row(const struct interval_record *rec,
 	for (int i = 0; i < layout->count; i++) {
 		print_text_separator();
 		print_text_field_with_width(layout->fields[i], rec, 0,
-					    layout->widths[i]);
+					    i, layout->widths[i]);
 	}
 
 	if (is_pmu_enabled())
@@ -493,7 +592,7 @@ static void serialize_text_cpu_row(const struct interval_record *rec,
 	for (int i = 0; i < layout->count; i++) {
 		print_text_separator();
 		print_text_field_with_width(layout->fields[i], rec, row_idx,
-					    layout->widths[i]);
+					    i, layout->widths[i]);
 	}
 
 	if (is_pmu_enabled())
@@ -679,4 +778,13 @@ void set_text_header_interval(int interval)
 	summary_screen_lines = 0;
 	previous_terminal_rows = 0;
 	previous_terminal_columns = 0;
+}
+
+void cleanup_text_values(void)
+{
+	for (int i = 0; i < 3; i++) {
+		free(text_values[i].offsets);
+		free(text_values[i].data);
+		memset(&text_values[i], 0, sizeof(text_values[i]));
+	}
 }

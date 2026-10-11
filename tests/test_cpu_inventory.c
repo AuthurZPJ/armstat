@@ -179,6 +179,93 @@ static void test_online_mask_catalog_match(void)
 	printf("  online mask fast-path match ok\n");
 }
 
+
+static void test_indexes_follow_sparse_catalog_replacement(void)
+{
+	struct cpu_inventory_seed cpus[4] = {
+		{MAX_CPUS - 1, 1, 1, 7, 0, 0},
+		{4, 1, 0, 2, 0, 0},
+		{0, 0, 1, 2, 0, 0},
+		{8, 1, 1, 7, 0, 0},
+	};
+	struct cpu_inventory_seed replacement = {4, 1, 1, 9, 0, 0};
+	struct cpu_desc *desc;
+
+	assert(set_cpu_inventory_filter("8,1023") == 0);
+	assert(cpu_inventory_seed(cpus, 4) == 0);
+	assert(cpu_catalog_present_count() == 4);
+	assert(cpu_catalog_online_count() == 3);
+	assert(cpu_catalog_tracked_count() == 2);
+	desc = cpu_catalog_get_by_id(4);
+	assert(desc && !desc->online && desc->package_id == 2);
+	desc = cpu_catalog_get_by_id(0);
+	assert(desc && !desc->present && desc->online);
+	assert(cpu_catalog_get_by_tracked_idx(0) == cpu_catalog_get_by_id(8));
+	assert(cpu_catalog_get_by_tracked_idx(1) ==
+	       cpu_catalog_get_by_id(MAX_CPUS - 1));
+	assert(cpu_catalog_get_by_id(-1) == NULL);
+	assert(cpu_catalog_get_by_id(MAX_CPUS) == NULL);
+	assert(cpu_catalog_get_by_id(7) == NULL);
+	assert(cpu_catalog_get_by_tracked_idx(-1) == NULL);
+	assert(cpu_catalog_get_by_tracked_idx(2) == NULL);
+
+	assert(set_cpu_inventory_filter(NULL) == 0);
+	assert(cpu_inventory_seed(&replacement, 1) == 0);
+	assert(cpu_catalog_get_by_id(0) == NULL);
+	assert(cpu_catalog_get_by_id(8) == NULL);
+	assert(cpu_catalog_get_by_id(MAX_CPUS - 1) == NULL);
+	assert(cpu_catalog_get_by_tracked_idx(0) == cpu_catalog_get_by_id(4));
+	assert(cpu_catalog_get_by_id(4)->package_id == 9);
+	assert(cpu_catalog_get_by_tracked_idx(1) == NULL);
+
+	cleanup_cpu_inventory();
+	assert(cpu_catalog_get_by_id(4) == NULL);
+	assert(cpu_catalog_get_by_tracked_idx(0) == NULL);
+	assert(get_cpu_id_by_tracked_idx(0) == -1);
+	printf("  catalog replacement and cleanup indexes ok\n");
+}
+
+static void test_full_filter_preserves_online_tracked_order(void)
+{
+	struct cpu_inventory_seed cpus[MAX_CPUS];
+	int tracked_idx = 0;
+
+	for (int i = 0; i < MAX_CPUS; i++) {
+		int cpu_id = MAX_CPUS - 1 - i;
+
+		cpus[i] = (struct cpu_inventory_seed){
+			cpu_id, 1, cpu_id % 3 != 0, cpu_id % 7, 0, 0,
+		};
+	}
+	assert(set_cpu_inventory_filter("0-1023,1-3,1023") == 0);
+	assert(cpu_inventory_seed(cpus, MAX_CPUS) == 0);
+	for (int cpu_id = 0; cpu_id < MAX_CPUS; cpu_id++) {
+		struct cpu_desc *desc = cpu_catalog_get_by_id(cpu_id);
+
+		assert(cpu_filter_contains(cpu_id));
+		assert(desc && desc->cpu_id == cpu_id);
+		assert(desc->online == (cpu_id % 3 != 0));
+		assert(desc->package_id == cpu_id % 7);
+		if (!desc->online)
+			continue;
+		assert(cpu_catalog_get_by_tracked_idx(tracked_idx) == desc);
+		assert(get_cpu_id_by_tracked_idx(tracked_idx++) == cpu_id);
+	}
+	assert(tracked_idx == get_tracked_cpu_count());
+	assert(cpu_catalog_get_by_tracked_idx(tracked_idx) == NULL);
+	assert(!cpu_filter_contains(-1) && !cpu_filter_contains(MAX_CPUS));
+
+	/* A failed parse clears all partial filter membership before a reseed. */
+	assert(set_cpu_inventory_filter("4,8,bad") < 0);
+	assert(!cpu_inventory_filter_is_active());
+	for (int cpu_id = 0; cpu_id < MAX_CPUS; cpu_id++)
+		assert(!cpu_filter_contains(cpu_id));
+	assert(cpu_inventory_seed(cpus, MAX_CPUS) == 0);
+	assert(get_tracked_cpu_count() == tracked_idx);
+	cleanup_cpu_inventory();
+	printf("  full filter and offline CPU order ok\n");
+}
+
 int main(void)
 {
 	printf("test_cpu_inventory:\n");
@@ -188,6 +275,8 @@ int main(void)
 	test_sysfs_path();
 	test_cpu_list_mask_parser();
 	test_online_mask_catalog_match();
+	test_indexes_follow_sparse_catalog_replacement();
+	test_full_filter_preserves_online_tracked_order();
 
 	printf("test_cpu_inventory: all tests passed\n");
 	return 0;

@@ -33,10 +33,10 @@ from armstat_loader import (  # noqa: E402
     CpuSeriesData,
     load_cpu_series,
     resolve_field_name,
-    slice_cpu_series,
 )
 from plot_utils import (  # noqa: E402
     configure_time_axis,
+    downsample_series,
     field_axis_label,
     field_list_label,
     is_finite_number,
@@ -456,9 +456,10 @@ def plot_cpu_series(series: CpuSeriesData,
         color = color_map(index % 20)
         values = smooth_series(extract_series(series.samples, cpu_id, left_field),
                                smooth_window)
+        plot_x, plot_y = downsample_series(series.x_values, values)
         line = ax1.plot(
-            series.x_values,
-            values,
+            plot_x,
+            plot_y,
             linewidth=1.8,
             color=color,
             label=f"cpu{cpu_id}:{left_field}",
@@ -476,9 +477,10 @@ def plot_cpu_series(series: CpuSeriesData,
             color = color_map(index % 20)
             values = smooth_series(extract_series(series.samples, cpu_id, right_field),
                                    smooth_window)
+            plot_x, plot_y = downsample_series(series.x_values, values)
             line = ax2.plot(
-                series.x_values,
-                values,
+                plot_x,
+                plot_y,
                 linewidth=1.6,
                 linestyle="--",
                 color=color,
@@ -525,9 +527,10 @@ def plot_group_series(series: CpuSeriesData,
             smooth_window,
         )
         label = f"{format_group_name(group_label, group_value)}:{left_field}"
+        plot_x, plot_y = downsample_series(series.x_values, values)
         line = ax1.plot(
-            series.x_values,
-            values,
+            plot_x,
+            plot_y,
             linewidth=1.8,
             color=color,
             label=label,
@@ -551,9 +554,10 @@ def plot_group_series(series: CpuSeriesData,
                 smooth_window,
             )
             label = f"{format_group_name(group_label, group_value)}:{right_field}"
+            plot_x, plot_y = downsample_series(series.x_values, values)
             line = ax2.plot(
-                series.x_values,
-                values,
+                plot_x,
+                plot_y,
                 linewidth=1.6,
                 linestyle="--",
                 color=color,
@@ -675,10 +679,20 @@ def main() -> int:
     args = parse_args()
     input_path = Path(args.input)
 
-    series = load_cpu_series(input_path, args.sample_range)
-
-    if input_path.suffix.lower() == ".json":
-        series = slice_cpu_series(series, args.sample_range)
+    fields = None
+    cpu_filter = None
+    if not args.list_fields and not args.list_cpus:
+        cpu_filter = parse_cpu_list(args.cpu_filter)
+        if args.preset:
+            fields = ["temp" if args.preset == "temp" else
+                      "freq" if args.preset == "freq" else
+                      "ipc" if args.preset == "ipc" else f"{args.preset}_percent"]
+        elif args.y:
+            fields = [args.y, *([args.y2] if args.y2 else [])]
+        if fields is not None and args.group_by:
+            fields.extend(["package", "core"] if args.group_by == "core" else ["node"])
+    series = load_cpu_series(input_path, args.sample_range,
+                             cpu_filter=cpu_filter, fields=fields)
 
     if args.list_fields:
         list_fields(series)
@@ -697,6 +711,7 @@ def main() -> int:
     if args.group_by is None and args.aggregate != "avg":
         raise SystemExit("--aggregate is only meaningful together with --group-by.")
 
+    cpu_ids = select_cpu_ids(series, args.cpu_filter)
     if args.preset:
         left_field, right_field, default_title = resolve_preset(series, args.preset)
     else:
@@ -709,7 +724,6 @@ def main() -> int:
         right_field = resolve_field_name(args.y2, series.numeric_fields) if args.y2 else None
         default_title = None
 
-    cpu_ids = select_cpu_ids(series, args.cpu_filter)
     groups, group_label = build_cpu_groups(series, cpu_ids, args.group_by)
 
     if group_label is None:

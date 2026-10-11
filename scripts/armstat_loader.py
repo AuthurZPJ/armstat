@@ -8,8 +8,8 @@ duplicated between plot_sum.py and plot_cpu.py.
 Public interface:
     - FIELD_ALIASES: unified alias map (flat, scope-agnostic)
     - SeriesData / CpuSeriesData: loaded data containers
-    - load_summary_series(path, sample_range) -> SeriesData
-    - load_cpu_series(path, sample_range) -> CpuSeriesData
+    - load_summary_series(path, sample_range, fields=None) -> SeriesData
+    - load_cpu_series(path, sample_range, cpu_filter=None, fields=None) -> CpuSeriesData
     - resolve_field_name(requested, available_fields) -> str
     - slice_summary_series / slice_cpu_series
     - count_csv_summary_samples / count_csv_cpu_samples
@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 from plot_utils import (
     flatten_dict,
@@ -176,10 +176,10 @@ def reject_nonstandard_json_constant(value: str):
     raise InvalidJsonConstantError(value)
 
 
-def load_json_export(path: Path) -> object:
+def decode_json_sample(text: str, path: Path) -> object:
     try:
         return json.loads(
-            path.read_text(encoding="utf-8"),
+            text,
             object_pairs_hook=reject_duplicate_json_keys,
             parse_constant=reject_nonstandard_json_constant,
         )
@@ -191,6 +191,152 @@ def load_json_export(path: Path) -> object:
         raise SystemExit(
             f"{path} contains non-standard JSON constant {exc.value!r}."
         ) from exc
+
+
+def iter_json_samples(path: Path) -> Iterator[object]:
+    """Decode the entire array one sample at a time, without retaining it.
+
+    Each unfinished sample doubles the buffered text before another decode,
+    bounding repeated work by its size. Consumed prefixes are discarded when
+    reading more; ordinary complete samples use the standard C decoder once.
+    """
+    decoder = json.JSONDecoder(
+        object_pairs_hook=reject_duplicate_json_keys,
+        parse_constant=reject_nonstandard_json_constant,
+    )
+    whitespace = re.compile(r"[ \t\r\n]*")
+    buffer = ""
+    position = 0
+    eof = False
+    chunk_size = 64 * 1024
+
+    with path.open("r", encoding="utf-8") as handle:
+        def read_more(grow: bool = False) -> None:
+            nonlocal buffer, position, eof
+            remaining = buffer[position:]
+            amount = max(chunk_size, len(remaining)) if grow else chunk_size
+            text = handle.read(amount)
+            buffer = remaining + text
+            position = 0
+            eof = not text
+
+        def skip_whitespace() -> None:
+            nonlocal position
+            while True:
+                position = whitespace.match(buffer, position).end()
+                if position < len(buffer) or eof:
+                    return
+                read_more()
+
+        def incomplete(exc: json.JSONDecodeError) -> bool:
+            if exc.pos >= len(buffer) - 1 or exc.msg.startswith("Unterminated string"):
+                return True
+            tail = buffer[exc.pos:]
+            if tail in {"t", "tr", "tru", "f", "fa", "fal", "fals", "n", "nu", "nul"}:
+                return True
+            if re.fullmatch(r"[eE][+-]?", tail):
+                return True
+            if exc.msg == "Invalid \\uXXXX escape" and re.fullmatch(r"u[0-9a-fA-F]{0,4}", tail):
+                return True
+            return False
+
+        skip_whitespace()
+        if position == len(buffer) or buffer[position] != "[":
+            raise SystemExit(f"{path} does not contain a JSON array.")
+        position += 1
+        skip_whitespace()
+        if position < len(buffer) and buffer[position] == "]":
+            position += 1
+        else:
+            while True:
+                skip_whitespace()
+                while True:
+                    try:
+                        item, end = decoder.raw_decode(buffer, position)
+                        break
+                    except DuplicateJsonKeyError as exc:
+                        raise SystemExit(f"{path} contains duplicate JSON key {exc.key!r}.") from exc
+                    except InvalidJsonConstantError as exc:
+                        raise SystemExit(f"{path} contains non-standard JSON constant {exc.value!r}.") from exc
+                    except json.JSONDecodeError as exc:
+                        if eof or not incomplete(exc):
+                            raise
+                        read_more(grow=True)
+                position = end
+                yield item
+                skip_whitespace()
+                if position == len(buffer):
+                    raise json.JSONDecodeError("Unterminated JSON array", buffer, position)
+                separator = buffer[position]
+                position += 1
+                if separator == "]":
+                    break
+                if separator != ",":
+                    raise json.JSONDecodeError("Expected ',' or ']'", buffer, position - 1)
+                skip_whitespace()
+                if position < len(buffer) and buffer[position] == "]":
+                    raise json.JSONDecodeError("Expected a JSON sample", buffer, position)
+        skip_whitespace()
+        if position != len(buffer):
+            raise json.JSONDecodeError("Extra data after JSON array", buffer, position)
+
+
+def load_json_export(path: Path) -> object:
+    """Compatibility helper; plotting loaders consume iter_json_samples."""
+    return list(iter_json_samples(path))
+
+
+def streaming_sample_bounds(expr: Optional[str]) -> Tuple[int, Optional[int]]:
+    """Parse syntax now and check the input's actual length after scanning."""
+    if not expr:
+        return 1, None
+    sep = ":" if ":" in expr else "-"
+    if sep not in expr:
+        raise SystemExit("Use --sample-range START:END, for example 10:100.")
+    start_text, end_text = expr.split(sep, 1)
+    try:
+        start = int(start_text) if start_text else 1
+        end = int(end_text) if end_text else None
+    except ValueError as exc:
+        raise SystemExit("Invalid --sample-range. Expected one-based START:END.") from exc
+    if start < 1 or (end is not None and end < start):
+        raise SystemExit("Invalid --sample-range. Expected one-based START:END.")
+    return start, end
+
+
+def sample_is_selected(index: int, bounds: Tuple[int, Optional[int]]) -> bool:
+    start, end = bounds
+    return index >= start and (end is None or index <= end)
+
+
+class FieldProjection:
+    """Retain the candidates used by resolve_field_name, without all values."""
+
+    def __init__(self, fields: Optional[Iterable[str]]):
+        self.targets = None if fields is None else {
+            normalize_field_name(field) for field in fields
+        }
+        if self.targets is not None:
+            self.targets.update(FIELD_ALIASES.get(field, field)
+                                for field in tuple(self.targets))
+
+    def includes(self, field: str) -> bool:
+        if self.targets is None:
+            return True
+        normalized = normalize_field_name(field)
+        return (normalized in self.targets or
+                normalized.rsplit(".", 1)[-1] in self.targets)
+
+    def flatten(self, prefix: str, value: object,
+                out: Dict[str, object]) -> None:
+        if self.targets is None:
+            flatten_dict(prefix, value, out)
+        elif isinstance(value, dict):
+            for key, nested in value.items():
+                name = f"{prefix}.{key}" if prefix else key
+                self.flatten(name, nested, out)
+        elif self.includes(prefix):
+            out[prefix] = value
 
 def parse_timestamp_timezone(timestamp_iso: object):
     if not isinstance(timestamp_iso, str) or not timestamp_iso.strip():
@@ -453,16 +599,17 @@ def validate_csv_row_shape(item: Dict[Optional[str], object],
 # Summary loaders
 # ---------------------------------------------------------------------------
 
-def load_json_summary(path: Path) -> SeriesData:
-    data = load_json_export(path)
-    if not isinstance(data, list):
-        raise SystemExit(f"{path} does not contain a JSON array.")
-
+def load_json_summary(path: Path, sample_range: Optional[str] = None,
+                      fields: Optional[Iterable[str]] = None) -> SeriesData:
+    bounds = streaming_sample_bounds(sample_range)
+    projection = FieldProjection(fields)
     rows: List[Dict[str, object]] = []
     x_values: List[object] = []
     sample_values: List[int] = []
+    total_samples = 0
 
-    for sample_index, item in enumerate(data, start=1):
+    for sample_index, item in enumerate(iter_json_samples(path), start=1):
+        total_samples = sample_index
         if not isinstance(item, dict):
             raise SystemExit(
                 f"{path} sample {sample_index} is not a JSON object."
@@ -474,9 +621,11 @@ def load_json_summary(path: Path) -> SeriesData:
                 f"{path} sample {sample_index} does not contain a summary object."
             )
         validate_interval_number(item.get("interval"), sample_index, path)
+        if not sample_is_selected(sample_index, bounds):
+            continue
 
         row: Dict[str, object] = {}
-        flatten_dict("", summary, row)
+        projection.flatten("", summary, row)
         row["__interval_index"] = sample_index
         row["__timestamp"] = item.get("timestamp")
         rows.append(row)
@@ -487,6 +636,7 @@ def load_json_summary(path: Path) -> SeriesData:
         ))
         sample_values.append(sample_index)
 
+    parse_sample_range(sample_range, total_samples)
     if not rows:
         raise SystemExit(
             f"{path} does not contain summary records. "
@@ -502,16 +652,32 @@ def load_json_summary(path: Path) -> SeriesData:
     )
 
 
-def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesData:
-    start_sample = 1
-    end_sample = None
+CSV_METADATA_COLUMNS = {
+    "Scope", "CPU", "Package", "schema_version", "interval", "duration_us",
+    "timestamp", "timestamp_ns", "timestamp_iso",
+}
 
-    if sample_range:
-        total_samples = count_csv_summary_samples(path)
-        parsed = parse_sample_range(sample_range, total_samples)
-        if parsed:
-            start_sample, end_sample = parsed
 
+def csv_metric_columns(fieldnames: Iterable[str], mixed: bool, scope: str,
+                       projection: FieldProjection) -> List[Tuple[str, str]]:
+    """Discard other scopes and resolve column names once, before row loading."""
+    columns: List[Tuple[str, str]] = []
+    excluded = ("cpu.", "package.") if scope == "summary" else ("summary.", "package.")
+    for key in fieldnames:
+        if key in CSV_METADATA_COLUMNS:
+            continue
+        if mixed and normalize_field_name(key).startswith(excluded):
+            continue
+        canonical = canonicalize_csv_key(key)
+        if projection.includes(canonical):
+            columns.append((key, canonical))
+    return columns
+
+
+def load_csv_summary(path: Path, sample_range: Optional[str] = None,
+                     fields: Optional[Iterable[str]] = None) -> SeriesData:
+    bounds = streaming_sample_bounds(sample_range)
+    projection = FieldProjection(fields)
     rows: List[Dict[str, object]] = []
     x_values: List[object] = []
     sample_values: List[int] = []
@@ -527,6 +693,7 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
             "armstat -S -f csv -o summary.csv",
         )
         is_mixed_scope = {"CPU", "Package"}.issubset(fieldnames)
+        metric_columns = csv_metric_columns(fieldnames, is_mixed_scope, "summary", projection)
 
         sample_index = 0
         for item in reader:
@@ -535,25 +702,11 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
                 continue
             sample_index += 1
             validate_interval_number(item.get("interval"), sample_index, path)
-            if sample_index < start_sample:
-                continue
-            if end_sample is not None and sample_index > end_sample:
-                break
             validate_schema_version(item.get("schema_version"), path)
+            if not sample_is_selected(sample_index, bounds):
+                continue
 
-            row = {}
-            for key, value in item.items():
-                if key in {
-                    "Scope", "CPU", "Package",
-                    "schema_version", "interval", "duration_us", "timestamp",
-                    "timestamp_ns", "timestamp_iso",
-                }:
-                    continue
-                if is_mixed_scope:
-                    normalized = normalize_field_name(key)
-                    if normalized.startswith(("cpu.", "package.")):
-                        continue
-                row[canonicalize_csv_key(key)] = value
+            row = {canonical: item[key] for key, canonical in metric_columns}
             row["__interval_index"] = sample_index
             row["__timestamp"] = item.get("timestamp")
             rows.append(row)
@@ -564,6 +717,7 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
             ))
             sample_values.append(sample_index)
 
+    parse_sample_range(sample_range, sample_index)
     if not rows:
         raise SystemExit(f"{path} does not contain summary rows.")
 
@@ -576,13 +730,14 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
     )
 
 
-def load_summary_series(path: Path, sample_range: Optional[str] = None) -> SeriesData:
+def load_summary_series(path: Path, sample_range: Optional[str] = None,
+                        fields: Optional[Iterable[str]] = None) -> SeriesData:
     try:
         suffix = path.suffix.lower()
         if suffix == ".json":
-            return load_json_summary(path)
+            return load_json_summary(path, sample_range, fields)
         if suffix == ".csv":
-            return load_csv_summary(path, sample_range)
+            return load_csv_summary(path, sample_range, fields)
         raise SystemExit(
             f"Unsupported input format for {path}. "
             "Use summary JSON or summary CSV exported by armstat."
@@ -612,17 +767,20 @@ def slice_summary_series(series: SeriesData,
 # CPU loaders
 # ---------------------------------------------------------------------------
 
-def load_json_cpu_series(path: Path) -> CpuSeriesData:
-    data = load_json_export(path)
-    if not isinstance(data, list):
-        raise SystemExit(f"{path} does not contain a JSON array.")
-
+def load_json_cpu_series(path: Path, sample_range: Optional[str] = None,
+                         cpu_filter: Optional[Iterable[int]] = None,
+                         fields: Optional[Iterable[str]] = None) -> CpuSeriesData:
+    bounds = streaming_sample_bounds(sample_range)
+    selected_cpus = None if cpu_filter is None else set(cpu_filter)
+    projection = FieldProjection(fields)
     samples: List[Dict[int, Dict[str, object]]] = []
     x_values: List[object] = []
     sample_values: List[int] = []
     cpu_ids: Set[int] = set()
+    total_samples = 0
 
-    for sample_index, item in enumerate(data, start=1):
+    for sample_index, item in enumerate(iter_json_samples(path), start=1):
+        total_samples = sample_index
         if not isinstance(item, dict):
             raise SystemExit(
                 f"{path} sample {sample_index} is not a JSON object."
@@ -636,6 +794,8 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
         validate_interval_number(item.get("interval"), sample_index, path)
 
         sample: Dict[int, Dict[str, object]] = {}
+        seen_cpu_ids: Set[int] = set()
+        keep_sample = sample_is_selected(sample_index, bounds)
         for entry_index, cpu_entry in enumerate(cpus, start=1):
             if not isinstance(cpu_entry, dict):
                 raise SystemExit(
@@ -643,32 +803,38 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
                     "is not a JSON object."
                 )
             cpu_id = parse_cpu_id(cpu_entry.get("cpu"), path)
-            if cpu_id in sample:
+            if cpu_id in seen_cpu_ids:
                 raise SystemExit(
                     f"{path} sample {sample_index} contains duplicate CPU ID "
                     f"{cpu_id}."
                 )
+            seen_cpu_ids.add(cpu_id)
+            if not keep_sample or (selected_cpus is not None and cpu_id not in selected_cpus):
+                continue
             row: Dict[str, object] = {}
             for key, value in cpu_entry.items():
                 if key == "cpu":
                     continue
-                flatten_dict(key, value, row)
+                projection.flatten(key, value, row)
 
             sample[cpu_id] = row
             cpu_ids.add(cpu_id)
 
-        if not sample:
+        if not cpus:
             raise SystemExit(
                 f"{path} sample {sample_index} does not contain any CPU rows."
             )
+        if not keep_sample:
+            continue
 
         samples.append(sample)
         x_values.append(sample_x_value(
-            item.get("timestamp"), len(samples), item.get("timestamp_ns"),
+            item.get("timestamp"), sample_index, item.get("timestamp_ns"),
             item.get("timestamp_iso")
         ))
-        sample_values.append(len(samples))
+        sample_values.append(sample_index)
 
+    parse_sample_range(sample_range, total_samples)
     if not samples:
         raise SystemExit(
             f"{path} does not contain per-CPU JSON records. "
@@ -685,16 +851,12 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
     )
 
 
-def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSeriesData:
-    start_sample = 1
-    end_sample = None
-
-    if sample_range:
-        total_samples = count_csv_cpu_samples(path)
-        parsed = parse_sample_range(sample_range, total_samples)
-        if parsed:
-            start_sample, end_sample = parsed
-
+def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None,
+                        cpu_filter: Optional[Iterable[int]] = None,
+                        fields: Optional[Iterable[str]] = None) -> CpuSeriesData:
+    bounds = streaming_sample_bounds(sample_range)
+    selected_cpus = None if cpu_filter is None else set(cpu_filter)
+    projection = FieldProjection(fields)
     samples: List[Dict[int, Dict[str, object]]] = []
     x_values: List[object] = []
     sample_values: List[int] = []
@@ -712,23 +874,26 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
             "per-CPU",
             "armstat -a -f csv -o cpus.csv",
         )
+        metric_columns = csv_metric_columns(fieldnames, is_mixed_scope, "cpu", projection)
 
         current_key: Optional[Tuple[object, object, object, object]] = None
         current_sample: Dict[int, Dict[str, object]] = {}
+        seen_cpu_ids: Set[int] = set()
         sample_index = 0
 
         def flush_sample() -> None:
-            nonlocal current_key, current_sample, sample_index
-            if not current_sample or current_key is None:
+            nonlocal current_sample, seen_cpu_ids, sample_index
+            if current_key is None:
                 return
             sample_index += 1
-            if sample_index >= start_sample and (end_sample is None or sample_index <= end_sample):
+            if sample_is_selected(sample_index, bounds):
                 samples.append(current_sample)
                 x_values.append(sample_x_value(
                     current_key[1], sample_index, current_key[2], current_key[3]
                 ))
                 sample_values.append(sample_index)
             current_sample = {}
+            seen_cpu_ids = set()
 
         for item in reader:
             validate_csv_row_shape(item, path, reader.line_num)
@@ -749,37 +914,27 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
                 current_key = key
             elif key != current_key:
                 flush_sample()
-                if end_sample is not None and sample_index >= end_sample:
-                    current_key = None
-                    break
                 validate_interval_number(
                     item.get("interval"), sample_index + 1, path
                 )
                 current_key = key
 
             cpu_id = parse_cpu_id(cpu_value, path)
-            if cpu_id in current_sample:
+            if cpu_id in seen_cpu_ids:
                 raise SystemExit(
                     f"{path} sample {sample_index + 1} contains duplicate "
                     f"CPU ID {cpu_id}."
                 )
-            row = {}
-            for key, value in item.items():
-                if key in {
-                    "Scope", "schema_version", "interval",
-                    "duration_us", "timestamp", "timestamp_ns",
-                    "timestamp_iso", "CPU", "Package",
-                }:
-                    continue
-                if is_mixed_scope:
-                    normalized = normalize_field_name(key)
-                    if normalized.startswith(("summary.", "package.")):
-                        continue
-                row[canonicalize_csv_key(key)] = value
+            seen_cpu_ids.add(cpu_id)
+            if (not sample_is_selected(sample_index + 1, bounds) or
+                    (selected_cpus is not None and cpu_id not in selected_cpus)):
+                continue
+            row = {canonical: item[key] for key, canonical in metric_columns}
             current_sample[cpu_id] = row
 
         flush_sample()
 
+    parse_sample_range(sample_range, sample_index)
     if not samples:
         raise SystemExit(f"{path} does not contain per-CPU rows.")
 
@@ -796,13 +951,15 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
     )
 
 
-def load_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSeriesData:
+def load_cpu_series(path: Path, sample_range: Optional[str] = None,
+                    cpu_filter: Optional[Iterable[int]] = None,
+                    fields: Optional[Iterable[str]] = None) -> CpuSeriesData:
     try:
         suffix = path.suffix.lower()
         if suffix == ".json":
-            return load_json_cpu_series(path)
+            return load_json_cpu_series(path, sample_range, cpu_filter, fields)
         if suffix == ".csv":
-            return load_csv_cpu_series(path, sample_range)
+            return load_csv_cpu_series(path, sample_range, cpu_filter, fields)
         raise SystemExit(
             f"Unsupported input format for {path}. "
             "Use CPU JSON or CPU CSV exported by armstat."

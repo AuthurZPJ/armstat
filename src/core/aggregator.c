@@ -4,6 +4,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <limits.h>
@@ -24,9 +25,15 @@ static unsigned long long prev_authoritative_iowait_jiffies[MAX_CPUS];
 static unsigned char prev_authoritative_procstat_valid[MAX_CPUS];
 static unsigned long long prev_authoritative_runtime_ns[MAX_CPUS];
 static unsigned char prev_authoritative_runtime_valid[MAX_CPUS];
+static int aggregate_packages = 1;
+static int package_map_valid;
+static int package_map_cpu_count;
+static int package_map_count;
+static int tracked_package_ids[MAX_CPUS];
+static int tracked_package_indexes[MAX_CPUS];
+static int package_ids[MAX_PACKAGES];
 
 struct package_accumulator {
-	int package_id;
 	int cpu_count;
 	int freq_count;
 	int idle_count;
@@ -38,6 +45,7 @@ struct package_accumulator {
 
 static void clear_aggregator_baselines(void)
 {
+	package_map_valid = 0;
 	memset(&prev_counters, 0, sizeof(prev_counters));
 	memset(prev_pmu_per_cpu, 0, sizeof(prev_pmu_per_cpu));
 	memset(prev_authoritative_idle_jiffies, 0,
@@ -73,11 +81,21 @@ int init_aggregator(void)
 	return 0;
 }
 
-static void initialize_interval_stats(struct interval_stats *stats)
+void set_aggregator_package_output(int enabled)
 {
-	memset(stats, 0, sizeof(*stats));
+	aggregate_packages = !!enabled;
+}
 
-	for (int i = 0; i < MAX_CPUS; i++) {
+static void initialize_interval_stats(struct interval_stats *stats, int cpu_count)
+{
+	memset(stats->pmu_delta, 0, sizeof(stats->pmu_delta));
+	memset(stats->per_cpu_pmu, 0,
+	       (size_t)cpu_count * sizeof(stats->per_cpu_pmu[0]));
+	memset(stats->per_cpu_pmu_valid, 0,
+	       (size_t)cpu_count * sizeof(stats->per_cpu_pmu_valid[0]));
+	stats->pmu_valid = 0;
+	stats->package_count = 0;
+	for (int i = 0; i < cpu_count; i++) {
 		stats->per_cpu_mhz[i] = NAN;
 		stats->per_cpu_busy[i] = NAN;
 		stats->per_cpu_idle[i] = NAN;
@@ -404,38 +422,102 @@ static void calculate_pmu_stats(const struct raw_counters *current,
 				    instructions_idx);
 }
 
-static struct package_accumulator *get_package_accumulator(
-	struct package_accumulator *packages, int *package_count, int package_id)
+struct package_mapping_entry {
+	int package_id;
+	int tracked_idx;
+};
+
+static int compare_package_mapping_entry(const void *lhs, const void *rhs)
 {
-	for (int i = 0; i < *package_count; i++) {
-		if (packages[i].package_id == package_id)
-			return &packages[i];
-	}
+	const struct package_mapping_entry *left = lhs;
+	const struct package_mapping_entry *right = rhs;
 
-	if (*package_count >= MAX_PACKAGES)
-		return NULL;
-
-	packages[*package_count].package_id = package_id;
-	return &packages[(*package_count)++];
+	if (left->package_id < right->package_id)
+		return -1;
+	if (left->package_id > right->package_id)
+		return 1;
+	return 0;
 }
 
-static void calculate_package_stats(struct interval_stats *stats)
+static void rebuild_package_mapping(int cpu_count)
 {
-	struct package_accumulator packages[MAX_PACKAGES] = {0};
-	struct cpu_desc *desc;
-	int package_count = 0;
-	int i;
+	struct package_mapping_entry entries[MAX_CPUS];
+	int group_to_package[MAX_PACKAGES];
+	int entry_count = 0;
+	int group = -1;
+	int last_id = -1;
 
-	for_each_tracked_cpu(i, desc) {
+	for (int i = 0; i < cpu_count; i++) {
+		struct cpu_desc *desc = cpu_catalog_get_by_tracked_idx(i);
+		int package_id = desc ? desc->package_id : -1;
+
+		tracked_package_ids[i] = package_id;
+		tracked_package_indexes[i] = -1;
+		if (package_id < 0)
+			continue;
+		entries[entry_count].package_id = package_id;
+		entries[entry_count++].tracked_idx = i;
+	}
+	qsort(entries, (size_t)entry_count, sizeof(entries[0]),
+	      compare_package_mapping_entry);
+	for (int i = 0; i < entry_count; i++) {
+		if (entries[i].package_id != last_id) {
+			group++;
+			group_to_package[group] = -1;
+			last_id = entries[i].package_id;
+		}
+		tracked_package_indexes[entries[i].tracked_idx] = group;
+	}
+
+	/* Keep package output ordered by its first tracked CPU, as before. */
+	package_map_count = 0;
+	for (int i = 0; i < cpu_count; i++) {
+		int group_idx = tracked_package_indexes[i];
+
+		if (group_idx < 0)
+			continue;
+		if (group_to_package[group_idx] < 0) {
+			group_to_package[group_idx] = package_map_count;
+			package_ids[package_map_count++] = tracked_package_ids[i];
+		}
+		tracked_package_indexes[i] = group_to_package[group_idx];
+	}
+	package_map_cpu_count = cpu_count;
+	package_map_valid = 1;
+}
+
+static void ensure_package_mapping(int cpu_count)
+{
+	if (package_map_valid && package_map_cpu_count == cpu_count) {
+		int i;
+
+		/* Topology, filter, seed, and hotplug can all change this assignment. */
+		for (i = 0; i < cpu_count; i++) {
+			struct cpu_desc *desc = cpu_catalog_get_by_tracked_idx(i);
+			int package_id = desc ? desc->package_id : -1;
+
+			if (tracked_package_ids[i] != package_id)
+				break;
+		}
+		if (i == cpu_count)
+			return;
+	}
+	rebuild_package_mapping(cpu_count);
+}
+
+static void calculate_package_stats(struct interval_stats *stats, int cpu_count)
+{
+	struct package_accumulator packages[MAX_PACKAGES];
+
+	ensure_package_mapping(cpu_count);
+	memset(packages, 0, (size_t)package_map_count * sizeof(packages[0]));
+	for (int i = 0; i < cpu_count; i++) {
+		int package_idx = tracked_package_indexes[i];
 		struct package_accumulator *package;
 
-		if (desc->package_id < 0)
+		if (package_idx < 0)
 			continue;
-
-		package = get_package_accumulator(packages, &package_count,
-						      desc->package_id);
-		if (!package)
-			continue;
+		package = &packages[package_idx];
 
 		package->cpu_count++;
 		if (!isnan(stats->per_cpu_mhz[i])) {
@@ -452,11 +534,11 @@ static void calculate_package_stats(struct interval_stats *stats)
 		}
 	}
 
-	stats->package_count = package_count;
-	for (i = 0; i < stats->package_count; i++) {
+	stats->package_count = package_map_count;
+	for (int i = 0; i < stats->package_count; i++) {
 		struct package_accumulator *package = &packages[i];
 
-		stats->packages[i].package_id = package->package_id;
+		stats->packages[i].package_id = package_ids[i];
 		stats->packages[i].cpu_count = package->cpu_count;
 		stats->packages[i].avg_mhz = package->freq_count > 0 ?
 			package->freq_sum / package->freq_count : NAN;
@@ -503,16 +585,21 @@ void calculate_interval_stats(const struct sys_snapshot *raw,
 		return;
 
 	cpu_count = sys_snapshot_get_effective_cpu_count(raw);
+	if (cpu_count < 0)
+		cpu_count = 0;
+	else if (cpu_count > MAX_CPUS)
+		cpu_count = MAX_CPUS;
 	delta_us = sys_snapshot_get_interval_delta_us(raw);
 	current = sys_snapshot_get_counters(raw);
 
 	warn_cpu_truncation(raw, cpu_count);
-	initialize_interval_stats(stats);
+	initialize_interval_stats(stats, cpu_count);
 	calculate_frequency_stats(raw, stats, cpu_count);
 	calculate_busy_idle_stats(raw, stats, cpu_count, delta_us);
 	calculate_system_stats(raw, &current, stats, delta_us);
 	calculate_pmu_stats(&current, stats, cpu_count);
-	calculate_package_stats(stats);
+	if (aggregate_packages)
+		calculate_package_stats(stats, cpu_count);
 	save_aggregator_baseline(raw, &current, cpu_count);
 }
 

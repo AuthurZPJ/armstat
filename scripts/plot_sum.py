@@ -32,10 +32,10 @@ from armstat_loader import (  # noqa: E402
     SeriesData,
     load_summary_series,
     resolve_field_name,
-    slice_summary_series,
 )
 from plot_utils import (  # noqa: E402
     configure_time_axis,
+    downsample_series,
     field_axis_label,
     field_list_label,
     finalize_figure_layout,
@@ -46,6 +46,14 @@ from plot_utils import (  # noqa: E402
 )
 
 PRESET_NAMES = ("freq", "power", "temp", "power-temp", "idle-lpi", "sysstat")
+PRESET_FIELDS = {
+    "freq": ["freq", "uncore_freq"],
+    "power": ["power"],
+    "temp": [f"temp{i}" for i in range(4)],
+    "power-temp": ["power", *[f"temp{i}" for i in range(4)]],
+    "idle-lpi": ["busy_percent", "idle_percent", *[f"lpi{i}" for i in range(8)]],
+    "sysstat": ["ctx_switches", "interrupts", "soft_interrupts", "mem_bw"],
+}
 
 
 def extract_series(rows: List[Dict[str, object]], field: str) -> List[float]:
@@ -170,9 +178,10 @@ def plot_summary(
 
     for index, field in enumerate(left_fields):
         values = smooth_series(extract_series(series.rows, field), smooth_window)
+        plot_x, plot_y = downsample_series(series.x_values, values)
         line = ax1.plot(
-            series.x_values,
-            values,
+            plot_x,
+            plot_y,
             linewidth=2,
             label=field,
             color=color_map(index % color_map.N),
@@ -188,9 +197,10 @@ def plot_summary(
         ax2 = ax1.twinx()
         for index, field in enumerate(right_fields):
             values = smooth_series(extract_series(series.rows, field), smooth_window)
+            plot_x, plot_y = downsample_series(series.x_values, values)
             line = ax2.plot(
-                series.x_values,
-                values,
+                plot_x,
+                plot_y,
                 linewidth=2,
                 label=field,
                 color=color_map((len(left_fields) + index) % color_map.N),
@@ -261,10 +271,13 @@ def main() -> int:
     args = parse_args()
     input_path = Path(args.input)
 
-    series = load_summary_series(input_path, args.sample_range)
-
-    if input_path.suffix.lower() == ".json":
-        series = slice_summary_series(series, args.sample_range)
+    fields = None
+    if not args.list_fields:
+        if args.preset:
+            fields = PRESET_FIELDS[args.preset]
+        elif args.y:
+            fields = [args.y, *([args.y2] if args.y2 else [])]
+    series = load_summary_series(input_path, args.sample_range, fields=fields)
 
     if args.list_fields:
         list_fields(series)

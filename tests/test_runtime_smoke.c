@@ -2709,6 +2709,249 @@ static int run_text_fixture(int argc, char **argv)
 	return 0;
 }
 
+
+static getter_double original_text_freq_getter;
+static int text_freq_getter_calls;
+
+static double count_text_freq_getter(const struct interval_record *rec,
+				    int row_idx)
+{
+	text_freq_getter_calls++;
+	return original_text_freq_getter(rec, row_idx);
+}
+
+static void test_text_values_refresh_grow_and_reuse_after_cleanup(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[3];
+	struct cpu_freq_info freqs[3];
+	struct serializer_args args;
+	struct field_desc *freq = get_field_desc("freq_mhz");
+	char *output;
+	char *freq_argv[] = {"armstat", "-s", "freq_mhz", NULL};
+	char *busy_argv[] = {"armstat", "-s", "cpu_busy_percent", NULL};
+	char *expanded_argv[] = {"armstat", "-s",
+				"governor,cpu_busy_percent", NULL};
+
+	assert(freq && freq->type == FIELD_TYPE_DOUBLE);
+	parse_test_args(3, freq_argv);
+	set_text_quiet(1);
+	make_multi_cpu_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	args.rec = &rec;
+	original_text_freq_getter = freq->getter.get_double;
+	freq->getter.get_double = count_text_freq_getter;
+
+	rec.cpu_row_count = 1;
+	text_freq_getter_calls = 0;
+	output = capture_stdout(emit_text_record, &args);
+	assert(text_freq_getter_calls == 1);
+	assert(count_output_matches(output, "2000.00") == 1);
+	free(output);
+
+	/* The next interval grows the row set and contains wider/missing values. */
+	rec.interval = 2;
+	rec.cpu_row_count = 3;
+	cpu_rows[0].freq.cur_freq_valid = 0;
+	cpu_rows[1].freq.cur_freq = 123456000U;
+	cpu_rows[2].freq.cur_freq = 0;
+	text_freq_getter_calls = 0;
+	output = capture_stdout(emit_text_record, &args);
+	assert(text_freq_getter_calls == 3);
+	assert(strstr(output, "2000.00") == NULL);
+	assert(strstr(output, "123456.00") != NULL);
+	assert(strstr(output, "0.00") != NULL);
+	assert(strchr(output, '-') != NULL);
+	free(output);
+
+	/* Equal field counts in the same scope must still use the new field. */
+	parse_test_args(3, busy_argv);
+	set_text_quiet(1);
+	cpu_rows[0].busy_percent = 37.25;
+	text_freq_getter_calls = 0;
+	output = capture_stdout(emit_text_record, &args);
+	assert(text_freq_getter_calls == 0);
+	assert(strstr(output, "37.25") != NULL);
+	assert(strstr(output, "123456.00") == NULL);
+	free(output);
+
+	parse_test_args(3, expanded_argv);
+	set_text_quiet(1);
+	snprintf(cpu_rows[0].freq.governor, sizeof(cpu_rows[0].freq.governor),
+		 "long-governor-for-width-growth");
+	output = capture_stdout(emit_text_record, &args);
+	assert(strstr(output, "long-governor-for-width-growth") != NULL);
+	assert(strstr(output, "37.25") != NULL);
+	free(output);
+
+	cleanup_formatter_pool();
+	parse_test_args(3, freq_argv);
+	set_text_quiet(1);
+	cpu_rows[0].freq.cur_freq = 99999000U;
+	cpu_rows[0].freq.cur_freq_valid = 1;
+	text_freq_getter_calls = 0;
+	output = capture_stdout(emit_text_record, &args);
+	assert(text_freq_getter_calls == 3);
+	assert(strstr(output, "99999.00") != NULL);
+	free(output);
+	freq->getter.get_double = original_text_freq_getter;
+	cleanup_formatter_pool();
+	reset_test_state();
+}
+
+static void test_csv_cached_layout_refreshes_values_and_rejects_same_scope_change(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[3];
+	struct cpu_freq_info freqs[3];
+	struct serializer_args args;
+	char *output;
+	char *both_argv[] = {"armstat", "-s", "freq_mhz,governor", NULL};
+	char *governor_argv[] = {"armstat", "-s", "governor", NULL};
+	char *freq_argv[] = {"armstat", "-s", "freq_mhz", NULL};
+
+	parse_test_args(3, both_argv);
+	reset_machine_state();
+	make_multi_cpu_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	args.rec = &rec;
+	snprintf(cpu_rows[0].freq.governor, sizeof(cpu_rows[0].freq.governor),
+		 "comma,\"quotes\"");
+	output = capture_stdout(emit_csv_mixed_scope, &args);
+	assert(strstr(output, ",freq,governor\n") != NULL);
+	assert(strstr(output, "\"comma,\"\"quotes\"\"\"") != NULL);
+	assert(count_output_matches(output, ".123456789+00:00") == 3);
+	assert_csv_rows_are_rectangular(output);
+	free(output);
+
+	rec.interval = 2;
+	rec.timestamp_ns += 500000000ULL;
+	cpu_rows[0].freq.cur_freq_valid = 0;
+	snprintf(cpu_rows[0].freq.governor, sizeof(cpu_rows[0].freq.governor),
+		 "schedutil");
+	output = capture_stdout(emit_csv_mixed_scope, &args);
+	assert(strstr(output, "schema_version") == NULL);
+	assert(strstr(output, ",,schedutil\n") != NULL);
+	assert(strstr(output, "comma") == NULL);
+	assert(count_output_matches(output, ".623456789+00:00") == 3);
+	assert_csv_rows_are_rectangular(output);
+	free(output);
+
+	parse_test_args(3, governor_argv);
+	output = capture_stdout(emit_rejected_csv_record, &args);
+	assert(output[0] == '\0');
+	free(output);
+	reset_machine_state();
+	output = capture_stdout(emit_csv_mixed_scope, &args);
+	assert(strstr(output, ",governor\n") != NULL);
+	assert(strstr(output, ",freq,") == NULL);
+	free(output);
+
+	/* Same number of fields and rows, different field identity. */
+	parse_test_args(3, freq_argv);
+	output = capture_stdout(emit_rejected_csv_record, &args);
+	assert(output[0] == '\0');
+	free(output);
+	reset_machine_state();
+	cpu_rows[0].freq.cur_freq_valid = 1;
+	cpu_rows[0].freq.cur_freq = 76543000U;
+	output = capture_stdout(emit_csv_mixed_scope, &args);
+	assert(strstr(output, ",freq\n") != NULL);
+	assert(strstr(output, "76543.00\n") != NULL);
+	assert(strstr(output, "governor") == NULL);
+	free(output);
+	reset_machine_state();
+	reset_test_state();
+}
+
+
+static void test_pooled_package_rows_hide_and_restore_without_stale_values(void)
+{
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct interval_record *rec;
+	struct interval_record *pooled_rec;
+	struct serializer_args args;
+	char *output;
+	char *argv[] = {"armstat", "-s", "pkg_freq_mhz,pkg_busy_percent", NULL};
+
+	parse_test_args(3, argv);
+	seed_single_cpu_inventory();
+	cleanup_formatter_pool();
+	assert(setup_formatter_pool(0) == 0);
+	memset(&raw, 0, sizeof(raw));
+	memset(&stats, 0, sizeof(stats));
+	raw.cpu_count = 1;
+	raw.effective_cpu_count = 1;
+	raw.interval_delta_us = 1000000ULL;
+	raw.sample_timestamp = 1774665600;
+	raw.sample_timestamp_ns = 1774665600123456789ULL;
+	stats.package_count = 2;
+	stats.packages[0] = (struct package_row){99, 2, 1234, 75, 25, 2};
+	stats.packages[1] = (struct package_row){333, 1, 5678, NAN, NAN, 0};
+
+	rec = build_interval_record(&raw, &stats, 1);
+	assert(rec && rec->package_count == 2 && rec->cpu_row_count == 0);
+	assert(rec->packages[0].package_id == 99);
+	assert(rec->packages[1].avg_mhz == 5678);
+	pooled_rec = rec;
+	args.rec = rec;
+	reset_machine_state();
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, "\"package\": 99") != NULL);
+	assert(strstr(output, "\"package\": 333") != NULL);
+	free(output);
+	free_interval_record(rec);
+
+	enable_package(0);
+	rec = build_interval_record(&raw, &stats, 2);
+	assert(rec == pooled_rec && rec->package_count == 0);
+	args.rec = rec;
+	reset_machine_state();
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, "\"packages\"") == NULL);
+	assert(strstr(output, "\"package\": 99") == NULL);
+	free(output);
+	free_interval_record(rec);
+
+	enable_package(1);
+	stats.package_count = 1;
+	stats.packages[0] = (struct package_row){7, 1, NAN, 100, 0, NAN};
+	rec = build_interval_record(&raw, &stats, 3);
+	assert(rec == pooled_rec && rec->package_count == 1);
+	assert(rec->packages[0].package_id == 7);
+	assert(rec->packages[0].cpu_count == 1);
+	assert(isnan(rec->packages[0].avg_mhz));
+	assert(rec->packages[0].busy_percent == 0);
+	assert(isnan(rec->packages[0].iowait_percent));
+	args.rec = rec;
+	reset_machine_state();
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, "\"package\": 7") != NULL);
+	assert(strstr(output, "\"freq\": null") != NULL);
+	assert(strstr(output, "\"busy_percent\": 0") != NULL);
+	assert(strstr(output, "\"package\": 99") == NULL);
+	assert(strstr(output, "\"package\": 333") == NULL);
+	free(output);
+	free_interval_record(rec);
+
+	stats.package_count = 0;
+	rec = build_interval_record(&raw, &stats, 4);
+	assert(rec == pooled_rec && rec->package_count == 0);
+	args.rec = rec;
+	reset_machine_state();
+	output = capture_stdout(emit_json_record, &args);
+	assert(strstr(output, "\"packages\"") == NULL);
+	assert(strstr(output, "\"package\": 7") == NULL);
+	free(output);
+	free_interval_record(rec);
+	cleanup_formatter_pool();
+	reset_machine_state();
+	reset_test_state();
+}
+
 int main(int argc, char **argv)
 {
 	assert(setenv("TZ", "UTC0", 1) == 0);
@@ -2755,6 +2998,8 @@ int main(int argc, char **argv)
 	test_empty_json_selection_has_no_dangling_comma();
 	test_empty_json_stream_closes_as_empty_array();
 	test_text_serializer_emits_column_headers_and_values();
+	test_text_values_refresh_grow_and_reuse_after_cleanup();
+	test_csv_cached_layout_refreshes_values_and_rejects_same_scope_change();
 	test_text_header_interval_counts_complete_data_rows();
 	test_compact_pmu_only_summary_headers_quiet_and_refresh();
 	test_default_live_and_full_text_views();
@@ -2767,6 +3012,7 @@ int main(int argc, char **argv)
 	test_all_scope_csv_serializer_emits_package_rows();
 	test_summary_csv_serializer_emits_metadata_and_summary_fields();
 	test_interval_record_materializes_owned_values();
+	test_pooled_package_rows_hide_and_restore_without_stale_values();
 	test_lpi_records_preserve_independent_states();
 	test_hotplug_rebuild_refreshes_cpufreq_state();
 	return 0;
