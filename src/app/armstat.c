@@ -579,6 +579,9 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 		case FORMAT_JSON:
 			serialize_json(rec);
 			break;
+		case FORMAT_NDJSON:
+			serialize_ndjson(rec);
+			break;
 		case FORMAT_CSV:
 			if (serialize_csv(rec) < 0)
 				status = -1;
@@ -606,12 +609,28 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 			break;
 		}
 		if (opts->debug && stage_start_ns && collected_ns >= stage_start_ns &&
-		    aggregated_ns >= collected_ns && output_ns >= aggregated_ns)
+		    aggregated_ns >= collected_ns && output_ns >= aggregated_ns) {
+			struct sample_cache_slow_stats slow;
+			char sweep[48];
+
+			get_sample_cache_slow_stats(&slow);
+			if (slow.last_sweep_us)
+				snprintf(sweep, sizeof(sweep), "%.3f ms",
+					 slow.last_sweep_us / 1000.0);
+			else
+				snprintf(sweep, sizeof(sweep), "pending");
 			fprintf(stderr, "Debug: interval %llu collect=%.3f ms "
-				"aggregate=%.3f ms output=%.3f ms skipped=%llu\n",
+				"aggregate=%.3f ms output=%.3f ms skipped=%llu "
+				"slow=%.3f ms budget=%.3f ms refreshed=%u config_reads=%u "
+				"sweep=%s age=%.3f ms stale=%u unavailable=%u\n",
 				iteration, (collected_ns - stage_start_ns) / 1000000.0,
 				(aggregated_ns - collected_ns) / 1000000.0,
-				(output_ns - aggregated_ns) / 1000000.0, skipped);
+				(output_ns - aggregated_ns) / 1000000.0, skipped,
+				slow.work_us / 1000.0, slow.time_budget_us / 1000.0,
+				slow.refreshed_cpus, slow.config_reads, sweep,
+				slow.max_age_us / 1000.0, slow.stale_cpus,
+				slow.unavailable_cpus);
+		}
 
 		/* Check exit condition */
 		if (last_interval)
@@ -687,6 +706,8 @@ static int run_command(struct armstat_options *opts,
 	if (opts->format == FORMAT_JSON) {
 		serialize_json(rec);
 		close_machine_json();
+	} else if (opts->format == FORMAT_NDJSON) {
+		serialize_ndjson(rec);
 	} else if (opts->format == FORMAT_CSV) {
 		output_status = serialize_csv(rec);
 	} else {

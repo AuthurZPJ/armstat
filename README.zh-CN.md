@@ -7,7 +7,7 @@
 `armstat` 是面向 ARM64 Linux 服务器的监控工具，风格接近 `turbostat`。
 它观察 CPU 频率、Busy/Idle、空闲状态、功耗与能量、温度、PMU 计数和 IPC，
 通过 Linux 的 `sysfs`、`procfs`、`hwmon` 与 `perf_event_open()` 采集数据，
-输出带时间戳的文本、JSON 或 CSV，并提供绘图工具。
+输出带时间戳的文本、JSON、NDJSON 或 CSV，并提供绘图工具。
 
 首发目标平台为 **华为鲲鹏**。其他 ARM64 系统也可能提供兼容的基础指标。
 每个鲲鹏型号在部署前都需要通过[目标机验收](docs/REFERENCE.zh-CN.md#arm64-目标机验收)；
@@ -111,7 +111,7 @@ cpuidle 在状态退出时结算时间。长时间空闲可能使前几个窗口
 
 状态缺失、禁用、读取失败或计数器回退时，对应值独立显示不可用。累计计数器
 恢复时需重新建立基线，下一完整区间才能恢复统计。不可用值在文本中为 `-`，
-JSON 中为 `null`，CSV 中为空。没有 cpuidle 支持时，LPI 列隐藏，Busy/Idle
+JSON/NDJSON 中为 `null`，CSV 中为空。没有 cpuidle 支持时，LPI 列隐藏，Busy/Idle
 仍可使用。若初始化后所选视图只剩 CPU 行标识而没有数据列，启动报错。
 
 ## 常用命令
@@ -146,6 +146,8 @@ armstat -J                             # 区间能量
 `freq` 选择当前频率与 UncoreFreq，`idle` 选择 LPI 驻留及 Busy/Idle/IOWait。
 `freq-config`、`idle-usage` 分别选择 CPU 配置和状态进入速率。`-a` 省略这两组
 及插槽行，CPU 的 `Pkg`、`Core`、`Node` 列仍用于身份识别与分组。
+慢配置刷新会对已确认共享的 cpufreq policy 去重读取，并按耗时预算推进。
+读取失败或过期的配置显示为不可用；`-d` 报告刷新耗时、轮询时长与数据年龄。
 `MemBW` 需要显式选择：使用 `-s membw`（或 `mem`）、`-s mem_bw`，可单独请求或
 与其他选择组合。默认、`-S`、`-a` 和 `-s all` 均不会自动启用它。
 
@@ -174,7 +176,7 @@ CPU，以及不能输出任何行的选择都会在启动时失败。
 `armstat [选项] -- command [参数...]` 围绕命令执行测量一个区间，包含少量采集、
 启动和等待开销。统计覆盖所选 CPU 和平台来源，不限于该命令的进程。默认将
 统计写到 stderr，命令保留原有
-stdout 和 stderr；JSON/CSV 建议用 `-o` 写文件，避免混入命令的 stderr。
+stdout 和 stderr；机器输出建议用 `-o` 写文件，避免混入命令的 stderr。
 命令模式不能与显式 `-i`、`-n`、`-D`、`--probe` 或 `-l` 组合。
 
 初始化失败时不执行命令。测量成功后，即使命令失败也输出统计，并返回命令的
@@ -233,24 +235,32 @@ IPC，不增加原始计数列或 CPU 行。所选 N 个 CPU 需要 2N 个 perf 
 
 ```bash
 armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -S -a -f ndjson -o summary.ndjson -i 1
 armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --preset freq
 armstat-plot-cpu cpus.csv --preset busy --top 8
 armstat-plot-cpu cpus.csv --group-by node --y busy
 ```
 
-`-o`/`--out` 将统计写入文件。JSON 是区间对象数组，CSV 按选择输出汇总、插槽、CPU
-或混合行。两者都含 `schema_version=9`、区间编号、实测时长和时间戳。随附
+`-o`/`--out` 将统计写入文件。JSON 是区间对象数组；NDJSON 每行写入一个完整
+区间对象并刷新输出，适合长期采集和实时读取。CSV 按选择输出汇总、插槽、CPU
+或混合行。三种格式都含 `schema_version=9`、区间编号、实测时长和时间戳。随附
 绘图加载器只接受第 9 版。
 默认 JSON 只包含 `summary`，默认 CSV 使用 `Scope=SUM` 的汇总布局；显式选择
 插槽字段或使用 `-s all` 仍可输出插槽行。
 
 CSV 要求列布局固定。运行中能力变化导致列改变时，采集会在写入该区间前停止，
-并返回非零状态；此时重新开始 CSV 采集，或使用允许字段集变化的 JSON。
+并返回非零状态；此时重新开始 CSV 采集，或使用允许字段集变化的 JSON/NDJSON。
 已有输出文件只在初始化和基线采集成功后打开；后续失败保留已经写入的前缀。
+开始新一轮采集会覆盖指定文件。
+
+绘图加载器按内容识别 JSON 数组和 NDJSON。采集中断在半条记录时，可用
+`armstat-plot-summary summary.ndjson --preset freq --recover-tail` 丢弃末尾
+没有换行的不完整记录，并在 stderr 报告。完整坏记录和文件中间的损坏仍报错；
+JSON 数组和 CSV 不支持此恢复选项。逐样本刷新不保证断电后的磁盘持久性。
 
 绘图保留时间戳和不可用数据造成的空缺。使用输入文件的 `--list-fields` 查询
-可用曲线。JSON 和 CSV 的 `--sample-range START:END` 都只保留所选样本，
+可用曲线。JSON、NDJSON 和 CSV 的 `--sample-range START:END` 都只保留所选样本，
 `--cpu-filter` 还可减少保留的 CPU 曲线。大图会减少渲染点，保留分桶峰谷和缺失
 区间边界；排名和平滑仍使用全部所选样本。从源码运行时，以
 `scripts/plot_sum.py`、`scripts/plot_cpu.py` 替代

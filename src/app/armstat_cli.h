@@ -21,7 +21,7 @@ struct armstat_options {
 	int quiet;
 	int quiet_all;
 	int summary_mode;
-	int format;  /* FORMAT_TEXT, FORMAT_JSON, FORMAT_CSV */
+	int format;  /* FORMAT_TEXT, FORMAT_JSON, FORMAT_CSV, FORMAT_NDJSON */
 
 	/* CPU filter */
 	char *cpu_filter;
@@ -54,7 +54,7 @@ void set_all_columns_enabled(int enable);
 int parse_column_option(const char *arg, int enable);
 
 /*
- * Startup banner for text mode; suppressed for JSON/CSV or when -q is active.
+ * Startup banner for text mode; suppressed for machine formats or -q.
  * Implemented in armstat_cli.c.
  */
 void print_interval_header(const struct armstat_options *opts, double interval);

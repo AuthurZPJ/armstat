@@ -93,9 +93,22 @@ from the next measurement.
 
 Slow data starts with a full refresh, then advances a rolling CPU cursor after
 the fast snapshot. Credits accumulate at `selected_cpus / 5s`, permitting zero
-refreshes in a short interval, with at most 32 CPUs refreshed per sample. The
-cap can lengthen a complete sweep beyond five seconds.
-Runtime disable changes therefore take effect gradually.
+refreshes in a short interval. Verified shared cpufreq policy directories share
+Min/Max/Governor reads and cached values; current frequency remains per CPU.
+Each sweep rechecks policy identities, including replacements without CPU hotplug.
+Frequency configuration and cpuidle disable refreshes share a measured time
+budget: 1% of the interval, bounded to 50 us–2 ms. An estimate of unit cost
+avoids starting work unlikely to fit, retaining unused credits for later samples.
+A single backend read cannot be interrupted and may exceed this budget.
+The five-second sweep is a target, not a guaranteed freshness bound.
+
+Failed configuration reads invalidate the affected values. Cached values also
+expire after `max(2 × target sweep, 2 × sample interval)` without a successful
+refresh. Since refresh follows the fast snapshot, updated or failed reads
+usually appear in the next sample; age is checked while copying each snapshot.
+`-d` describes the cache after refresh and reports units, work/budget time, the last completed sweep
+duration, maximum configuration age, and stale/unavailable CPU counts. Runtime disable
+changes take effect as the cursor advances.
 
 Reads follow selected fields and scopes. `/proc/stat` is parsed once when
 Busy/Idle/IOWait or system counters need it; LPI-only output does not need it.
@@ -227,7 +240,7 @@ A valid zero remains data.
 
 ## Output contract
 
-JSON/CSV and bundled plot loaders use **schema version 9**. Version 8's LPI
+JSON/NDJSON/CSV and bundled plot loaders use **schema version 9**. Version 8's LPI
 fields were residual-adjusted; do not interpret them as independent state
 statistics or mix those captures with version 9. `--list` is generated from
 the serializer's field registry. The separate key-value probe contract is
@@ -333,6 +346,22 @@ Missing numbers/strings and non-finite values are `null`; available Boost is
 boolean. Strings are JSON-escaped. The array is finalized on orderly exit;
 abrupt termination can leave an incomplete document.
 
+### NDJSON
+
+`-f ndjson` uses the same interval objects and schema as JSON, with one complete
+object per line and no enclosing array. Strings retain JSON escaping, so a
+newline within a value cannot split a record. Every sample is flushed and can
+be consumed before capture ends; an empty capture writes no records.
+
+Plot loaders identify arrays and NDJSON by content, including `.ndjson` and
+`.jsonl` files. Strict validation remains the default. `--recover-tail` may
+discard one final record only when it has no line ending and is an incomplete
+but otherwise valid JSON-object prefix; it reports the discard on stderr.
+A complete final object without a newline is accepted. Complete malformed
+objects, duplicate keys, invalid constants, and earlier corruption remain
+errors. JSON arrays and CSV reject the recovery option. Sample flushing is
+not an `fsync` guarantee; a power failure may lose already flushed data.
+
 ### CSV
 
 One header defines the layout. Default output uses the summary-only layout:
@@ -352,21 +381,22 @@ Use a conforming parser and select rows by identity.
 
 Scopes and ordered columns must match the first header. A capability-induced
 layout change returns an error before the affected interval; CPU membership
-can change if the layout remains fixed. Restart CSV or use JSON when fields
-can change.
+can change if the layout remains fixed. Restart CSV or use JSON/NDJSON when
+fields can change.
 
 ### Output lifecycle
 
 `-o`/`--out` chooses the statistics file. Periodic statistics use stdout by
 default; command statistics use stderr while the child retains its original
 stdout/stderr. Child stderr and statistics therefore share a stream by default;
-use a file for command JSON/CSV. Command mode requires an explicit `--` and
+use a file for command machine output. Command mode requires an explicit `--` and
 rejects explicit `-i`/`-n`, `-D`, `--probe`, and `-l`.
 
 Existing targets are opened only after initialization and baseline collection
 succeed, with formatter allocation also required for interval output.
 After startup, output streams progressively;
-later failures retain the written prefix and return nonzero. All successful
+later failures retain the written prefix and return nonzero. A new capture
+overwrites its selected file; appending sessions is not supported. All successful
 operations, including help/list/probe, require a checked stdout flush. SIGPIPE
 is handled as EPIPE, allowing resource cleanup before exit.
 
@@ -393,19 +423,21 @@ python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install matplotlib
 armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -S -a -f ndjson -o summary.ndjson -i 1
 armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --y power --y2 temp0
 armstat-plot-cpu cpus.csv --preset busy --top 8
 ```
 
 Source-tree entry points are `python3 scripts/plot_sum.py` and
-`python3 scripts/plot_cpu.py`. Both also accept JSON/CSV mixed exports that
+`python3 scripts/plot_cpu.py`. Both also accept JSON/NDJSON/CSV mixed exports that
 contain their required scope. Use their `--help` and input `--list-fields`.
 
 | Options | Use |
 |---|---|
 | `--preset`, or `--y` / `--y2` | Choose a metric preset or fields; do not combine them |
-| `--sample-range START:END` | One-based sample window; JSON and CSV retain only that window |
+| `--sample-range START:END` | One-based sample window; retain only that window |
+| `--recover-tail` | NDJSON only: discard and report one incomplete final record |
 | `--smooth N` | Rolling mean over N samples, preserving current missing samples |
 | `--cpu-filter`, `--top`, `--group-by node/core` | Limit CPU lines or group them |
 | `--aggregate avg/max/min`, `--rank-by avg/max/last` | CPU group aggregation and top-N ranking |
@@ -414,7 +446,7 @@ contain their required scope. Use their `--help` and input `--list-fields`.
 Core grouping uses `(package, core)` identity. Average ranking is the arithmetic
 mean of visible samples, not duration weighted. Entities with no primary data
 are reported and skipped; a missing secondary field skips only that line.
-Both formats are scanned completely for validation, decoding JSON one sample
+All formats are scanned completely for validation, decoding JSON/NDJSON one sample
 at a time. Loaders retain only the selected window, CPU filter, and requested
 fields; `--top` ranks the retained CPU series rather than limiting loading.
 Rolling smoothing takes linear work in the sample count. After smoothing,

@@ -24,6 +24,10 @@ grep -F -- "--Dump" "$tmp_dir/help.txt" >/dev/null
 grep -F -- "--no-perf" "$tmp_dir/help.txt" >/dev/null
 grep -F -- "--quiet-all" "$tmp_dir/help.txt" >/dev/null
 grep -F -- "0 = unlimited" "$tmp_dir/help.txt" >/dev/null
+grep -F -- "text, json, ndjson, csv" "$tmp_dir/help.txt" >/dev/null
+"$armstat_bin" -f ndjson -l >"$tmp_dir/ndjson-list.txt" \
+	2>"$tmp_dir/ndjson-list.stderr"
+test ! -s "$tmp_dir/ndjson-list.stderr"
 "$armstat_bin" -l >"$tmp_dir/list.txt" 2>"$tmp_dir/list.stderr"
 test ! -s "$tmp_dir/list.stderr"
 grep -F -- "Exact fields (stable ID" "$tmp_dir/list.txt" >/dev/null
@@ -64,6 +68,8 @@ expect_cli_error -P -I
 grep -F -- "--no-perf cannot be combined" "$tmp_dir/cli.stderr" >/dev/null
 expect_cli_error -I -P
 expect_cli_error -D -f json
+grep -F -- "--Dump requires text" "$tmp_dir/cli.stderr" >/dev/null
+expect_cli_error -D -f ndjson
 grep -F -- "--Dump requires text" "$tmp_dir/cli.stderr" >/dev/null
 expect_cli_error --
 grep -F -- "-- requires a command" "$tmp_dir/cli.stderr" >/dev/null

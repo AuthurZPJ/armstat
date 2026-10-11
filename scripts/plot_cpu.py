@@ -584,12 +584,16 @@ def plot_group_series(series: CpuSeriesData,
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot armstat per-CPU exports. JSON and current CSV exports both "
+            "Plot armstat per-CPU exports. JSON, NDJSON, and current CSV exports "
             "carry timestamps. "
             "On large exports, use --cpu-filter to keep plots readable."
         )
     )
-    parser.add_argument("input", help="CPU JSON or CPU CSV exported by armstat")
+    parser.add_argument("input", help="CPU JSON, NDJSON, or CSV exported by armstat")
+    parser.add_argument(
+        "--recover-tail", action="store_true",
+        help="Discard one truncated final NDJSON record without a newline; report it on stderr",
+    )
     parser.add_argument(
         "--preset",
         choices=PRESET_NAMES,
@@ -692,7 +696,8 @@ def main() -> int:
         if fields is not None and args.group_by:
             fields.extend(["package", "core"] if args.group_by == "core" else ["node"])
     series = load_cpu_series(input_path, args.sample_range,
-                             cpu_filter=cpu_filter, fields=fields)
+                             cpu_filter=cpu_filter, fields=fields,
+                             recover_tail=args.recover_tail)
 
     if args.list_fields:
         list_fields(series)

@@ -33,6 +33,12 @@ void configure_cpufreq_fd_cache(int fd_cap, int collect_current);
 int get_cpufreq_cached_fd_count(void);
 void cpufreq_begin_sample(void);
 
+/* Slow configuration sharing requires a verified common sysfs directory. */
+void cpufreq_begin_config_sweep(void);
+int get_cpufreq_config_representative(int tracked_idx);
+int cpufreq_config_group_matches(int tracked_idx, int representative);
+unsigned long long get_cpufreq_config_generation(int tracked_idx);
+
 /* Read CPU governor (tracked_idx) */
 int read_cpu_governor(int tracked_idx, char *governor, size_t len);
 

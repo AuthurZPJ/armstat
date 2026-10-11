@@ -124,7 +124,7 @@ static void print_help(void)
 	printf("  -D, --Dump             Dump one raw proc/sysfs snapshot in text and exit\n");
 	printf("  -S, --Summary          Summary mode (SUM only)\n");
 	printf("  -a, --all              Expand live metrics with CPU rows (use -s all for configuration and usage)\n");
-	printf("  -f, --format <fmt>     Output format: text, json, csv\n");
+	printf("  -f, --format <fmt>     Output format: text, json, ndjson, csv\n");
 	printf("  -s, --show <items>     Show only selected groups or exact field names\n");
 	printf("  -H, --hide <items>     Hide selected groups or exact field names\n");
 	printf("  -p, --pmu-events <evts> Show raw PMU counters (add -I for IPC)\n");
@@ -247,7 +247,7 @@ void print_interval_header(const struct armstat_options *opts, double interval)
 	char interval_text[64];
 	char *end;
 
-	if (opts->format == FORMAT_JSON || opts->format == FORMAT_CSV)
+	if (opts->format != FORMAT_TEXT)
 		return;
 	if (opts->quiet)
 		return;
@@ -517,6 +517,8 @@ static int apply_format_option(struct armstat_options *opts, const char *arg)
 {
 	if (strcmp(arg, "json") == 0)
 		opts->format = FORMAT_JSON;
+	else if (strcmp(arg, "ndjson") == 0)
+		opts->format = FORMAT_NDJSON;
 	else if (strcmp(arg, "csv") == 0)
 		opts->format = FORMAT_CSV;
 	else if (strcmp(arg, "text") == 0)

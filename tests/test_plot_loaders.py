@@ -9,6 +9,7 @@ machine-readable exports can be parsed by the helper scripts.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import math
 import os
@@ -41,6 +42,178 @@ armstat_loader = sys.modules["armstat_loader"]
 
 
 class PlotLoaderTests(unittest.TestCase):
+    def test_ndjson_content_detection_and_projection_match_json(self):
+        data = [{"schema_version": 9, "interval": index,
+                 "summary": {"freq": index, "unused": 99},
+                 "cpus": [{"cpu": cpu, "freq": index + cpu, "unused": 99}
+                          for cpu in (0, 4)]}
+                for index in range(1, 4)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for suffix in ("ndjson", "jsonl", "json", "csv", "capture"):
+                path = Path(tmpdir) / f"samples.{suffix}"
+                # A complete final line without a newline is valid NDJSON.
+                path.write_text("\n".join(json.dumps(item) for item in data), encoding="utf-8")
+                with self.subTest(suffix=suffix):
+                    summary = armstat_loader.load_summary_series(path, "2:2", fields=["freq"])
+                    cpus = armstat_loader.load_cpu_series(path, "2:2", cpu_filter=[4], fields=["Freq"])
+                    self.assertEqual(summary.x_values, [2])
+                    self.assertEqual(summary.rows[0]["freq"], 2)
+                    self.assertNotIn("unused", summary.rows[0])
+                    self.assertEqual(cpus.samples, [{4: {"freq": 6}}])
+            path.write_text(json.dumps(data), encoding="utf-8")
+            self.assertEqual(len(armstat_loader.load_summary_series(path).rows), 3)
+
+    def test_ndjson_strict_validation_covers_unselected_tail(self):
+        first = '{"schema_version":9,"interval":1,"summary":{"freq":1},"cpus":[{"cpu":0,"freq":1}]}\n'
+        bad = [
+            "7", "[]", "", '{"schema_version":9,"interval":2,"summary":{"freq":1,"freq":2}}',
+            '{"schema_version":9,"interval":2,"summary":{"freq":NaN}}',
+            '{"schema_version":9,"interval":2,"summary":{"freq":Infinity}}',
+            '{"schema_version":8,"interval":2,"summary":{}}',
+            '{"schema_version":9,"interval":3,"summary":{}}',
+            '{"schema_version":9,"interval":2}',
+            '{"schema_version":9,"interval":2,"summary":{"freq":invalid}}',
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "bad.ndjson"
+            for tail in bad:
+                path.write_text(first + tail + "\n", encoding="utf-8")
+                for recovery in (False, True):
+                    with self.subTest(tail=tail, recovery=recovery), self.assertRaises(SystemExit):
+                        armstat_loader.load_summary_series(path, "1:1", fields=["freq"],
+                                                           recover_tail=recovery)
+            for cpus in ('[7]', '[{"cpu":0},{"cpu":0}]', '[{"cpu":0.5}]', '[]'):
+                path.write_text(first + '{"schema_version":9,"interval":2,"cpus":' + cpus + '}\n',
+                                encoding="utf-8")
+                with self.subTest(cpus=cpus), self.assertRaises(SystemExit):
+                    armstat_loader.load_cpu_series(path, "1:1", cpu_filter=[0], fields=["freq"])
+
+    def test_ndjson_streams_large_lines_without_whole_file_reads(self):
+        padding = ('brackets ]},[ and quote " and unicode 汉字 ' * 5000)
+        samples = [{"schema_version": 9, "interval": index,
+                    "summary": {"freq": index, "padding": padding},
+                    "cpus": [{"cpu": 0, "freq": index, "padding": padding}]}
+                   for index in range(1, 4)]
+        original_open = Path.open
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "stream.ndjson"
+            path.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in samples),
+                            encoding="utf-8")
+
+            class StreamReader:
+                def __init__(self, handle):
+                    self.handle = handle
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.handle.close()
+
+                def read(self, size=-1):
+                    if size <= 0:
+                        raise AssertionError("unbounded NDJSON read")
+                    return self.handle.read(size)
+
+                def __iter__(self):
+                    return iter(self.handle)
+
+            with patch.object(Path, "open", lambda source, *args, **kwargs:
+                              StreamReader(original_open(source, *args, **kwargs))), patch.object(
+                Path, "read_text", side_effect=AssertionError("whole-file NDJSON read")
+            ):
+                summary = armstat_loader.load_summary_series(path, "2:2", fields=["freq"])
+                cpus = armstat_loader.load_cpu_series(path, "2:2", cpu_filter=[0], fields=["freq"])
+            self.assertEqual(summary.rows[0]["freq"], 2)
+            self.assertNotIn("padding", summary.rows[0])
+            self.assertEqual(cpus.samples, [{0: {"freq": 2}}])
+
+    def test_ndjson_tail_recovery_accepts_only_incomplete_object_prefixes(self):
+        first = '{"schema_version":9,"interval":1,"summary":{"freq":1},"cpus":[{"cpu":0,"freq":1}]}\n'
+        final = json.dumps({"schema_version": 9, "interval": 2,
+                            "summary": {"freq": -1.234e-123, "text": 'quote " \\ 汉字\n',
+                                        "nested": [{"truth": True, "missing": None}]},
+                            "cpus": [{"cpu": 0, "freq": 2}]}, ensure_ascii=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cut.jsonl"
+            # Every byte boundary in a valid emitted record is a recovery candidate.
+            raw_final = final.encode("utf-8")
+            for end in range(1, len(raw_final)):
+                path.write_bytes(first.encode("utf-8") + raw_final[:end])
+                with self.subTest(end=end), patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+                    series = armstat_loader.load_summary_series(path, recover_tail=True)
+                    self.assertEqual(len(series.rows), 1)
+                    self.assertIn("discarded 1 incomplete NDJSON tail record", stderr.getvalue())
+            path.write_text(first + final, encoding="utf-8")
+            with patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+                self.assertEqual(len(armstat_loader.load_summary_series(path, recover_tail=True).rows), 2)
+                self.assertEqual(stderr.getvalue(), "")
+            path.write_text(first + '{"schema_version":9,"interval":2,"summary":', encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                armstat_loader.load_summary_series(path)
+            with patch.object(sys, "stderr", new_callable=io.StringIO):
+                self.assertEqual(len(armstat_loader.load_cpu_series(path, recover_tail=True).samples), 1)
+
+    def test_ndjson_recovery_does_not_hide_complete_or_earlier_damage(self):
+        first = '{"schema_version":9,"interval":1,"summary":{"freq":1}}\n'
+        bad = ['{"x":invalid', '{"x":01', '{"x":1eZ', '{"x":"bad\\q',
+               '{"x":"bad\\uZZ', '{"x":1,"x":', '{"x":{"a":1,"a":',
+               '{"x":NaN,', '{"x":Infinity,', '{"x":[1,]', '{"x":true trailing',
+               '{"schema_version":9,"interval":2,"summary":{}} garbage',
+               '{"schema_version":8,"interval":2,"summary":{}}',
+               '{"schema_version":9,"interval":3,"summary":{}}']
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "bad.ndjson"
+            for tail in bad:
+                path.write_text(first + tail, encoding="utf-8")
+                with self.subTest(tail=tail), self.assertRaises(SystemExit):
+                    armstat_loader.load_summary_series(path, recover_tail=True)
+            for content in (first + '{"x":\n', first + '{"x":\n' + first,
+                            '[' + first.rstrip() + ',{"x":'):
+                path.write_text(content, encoding="utf-8")
+                with self.subTest(content=content), self.assertRaises(SystemExit):
+                    armstat_loader.load_summary_series(path, recover_tail=True)
+            path.write_bytes(first.encode("utf-8") + b'{"x":"\xff')
+            with self.assertRaises(SystemExit):
+                armstat_loader.load_summary_series(path, recover_tail=True)
+
+    def test_ndjson_plot_cli_exposes_recovery_and_warning(self):
+        first = '{"schema_version":9,"interval":1,"summary":{"freq":1},"cpus":[{"cpu":0,"freq":1}]}\n'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cut.ndjson"
+            path.write_text(first + '{"schema_version":9,"interval":2,"summary":', encoding="utf-8")
+            for script in ("plot_sum.py", "plot_cpu.py"):
+                command = [sys.executable, str(SCRIPTS / script), str(path), "--list-fields"]
+                result = subprocess.run(command, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                result = subprocess.run(command + ["--recover-tail"], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("freq", result.stdout)
+                self.assertIn("discarded 1 incomplete NDJSON tail record", result.stderr)
+
+    def test_json_and_ndjson_overflow_numbers_preserve_gap_semantics(self):
+        samples = ['{"schema_version":9,"interval":1,"summary":{"freq":1e400},'
+                   '"cpus":[{"cpu":0,"freq":-1e400}]}',
+                   '{"schema_version":9,"interval":2,"summary":{"freq":2},'
+                   '"cpus":[{"cpu":0,"freq":3}]}']
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for suffix in ("json", "ndjson"):
+                path = Path(tmpdir) / f"overflow.{suffix}"
+                path.write_text("[" + ",".join(samples) + "]" if suffix == "json" else "\n".join(samples),
+                                encoding="utf-8")
+                summary = armstat_loader.load_summary_series(path)
+                cpus = armstat_loader.load_cpu_series(path)
+                with self.subTest(suffix=suffix):
+                    self.assertEqual(summary.numeric_fields, ["freq"])
+                    self.assertEqual(cpus.numeric_fields, ["freq"])
+                    self.assertTrue(math.isnan(plot_sum.extract_series(summary.rows, "freq")[0]))
+                    self.assertTrue(math.isnan(plot_cpu.extract_series(cpus.samples, 0, "freq")[0]))
+                    self.assertEqual(summary.rows[1]["freq"], 2)
+                    self.assertEqual(cpus.samples[1][0]["freq"], 3)
+            path.write_text(samples[0] + '\n{"summary":{"freq":1e400,"text":"cut', encoding="utf-8")
+            with patch.object(sys, "stderr", new_callable=io.StringIO):
+                self.assertEqual(len(armstat_loader.load_summary_series(path, recover_tail=True).rows), 1)
+
     def test_json_streaming_handles_chunk_boundaries_without_whole_file_read(self):
         padding = ('brackets ]},[ and quote " and backslash \\ ' * 4000) + "汉字"
         data = [

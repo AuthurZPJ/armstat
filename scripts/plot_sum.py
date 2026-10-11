@@ -224,11 +224,15 @@ def plot_summary(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot armstat summary exports. JSON and current CSV exports both "
+            "Plot armstat summary exports. JSON, NDJSON, and current CSV exports "
             "carry timestamps."
         )
     )
-    parser.add_argument("input", help="Summary JSON or summary CSV exported by armstat")
+    parser.add_argument("input", help="Summary JSON, NDJSON, or CSV exported by armstat")
+    parser.add_argument(
+        "--recover-tail", action="store_true",
+        help="Discard one truncated final NDJSON record without a newline; report it on stderr",
+    )
     parser.add_argument(
         "--preset",
         choices=PRESET_NAMES,
@@ -277,7 +281,8 @@ def main() -> int:
             fields = PRESET_FIELDS[args.preset]
         elif args.y:
             fields = [args.y, *([args.y2] if args.y2 else [])]
-    series = load_summary_series(input_path, args.sample_range, fields=fields)
+    series = load_summary_series(input_path, args.sample_range, fields=fields,
+                                 recover_tail=args.recover_tail)
 
     if args.list_fields:
         list_fields(series)

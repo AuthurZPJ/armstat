@@ -214,6 +214,8 @@ test: $(TARGET) $(TEST_BINS)
 	$(BUILD_OUTPUT)/tests/test_sample_collection
 	$(BUILD_OUTPUT)/tests/test_cpuidle_cache
 	ARMSTAT_BIN=$(TARGET) sh $(SRC_DIR)/tests/test_cli_smoke.sh
+	ARMSTAT_BIN=$(TARGET) PYTHONDONTWRITEBYTECODE=1 \
+		python3 $(SRC_DIR)/tests/test_ndjson_runtime.py
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_loaders.py
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_render.py
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_csv_streaming.py

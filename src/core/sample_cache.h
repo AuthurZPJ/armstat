@@ -45,4 +45,17 @@ int is_sample_cache_initialized(void);
 /* Include schedstat counters in diagnostic snapshots regardless of Busy source. */
 void set_diagnostic_counter_collection(int enable);
 
+struct sample_cache_slow_stats {
+	unsigned long long work_us;
+	unsigned long long time_budget_us;
+	unsigned long long last_sweep_us; /* Last completed sweep, excluding startup. */
+	unsigned long long max_age_us;
+	unsigned int refreshed_cpus;
+	unsigned int config_reads;
+	unsigned int stale_cpus;
+	unsigned int unavailable_cpus;
+};
+
+void get_sample_cache_slow_stats(struct sample_cache_slow_stats *stats);
+
 #endif /* ARMSTAT_SAMPLE_CACHE_H */

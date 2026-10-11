@@ -7,7 +7,7 @@
 `armstat` monitors ARM64 Linux servers in the style of `turbostat`: CPU
 frequency, Busy/Idle, idle states, power and energy, temperature, PMU counters,
 and IPC. It reads Linux `sysfs`, `procfs`, `hwmon`, and `perf_event_open()`
-interfaces and exports timestamped text, JSON, or CSV. Plotting helpers are
+interfaces and exports timestamped text, JSON, NDJSON, or CSV. Plotting helpers are
 included.
 
 The initial target is **Huawei Kunpeng**. Other ARM64 systems may provide
@@ -128,7 +128,7 @@ States 0–7 are exposed; deeper states are not folded into another column.
 
 A missing, disabled, failed, or reset state is unavailable independently.
 A recovered cumulative counter needs a new baseline before its next interval.
-Unavailable values are `-` in text, `null` in JSON, and empty CSV cells. With
+Unavailable values are `-` in text, `null` in JSON/NDJSON, and empty CSV cells. With
 no cpuidle support, LPI columns are hidden and Busy/Idle remains usable.
 If the selected view leaves only CPU row IDs without data columns after
 discovery, startup fails.
@@ -167,6 +167,9 @@ rows, for example `-a -c 0-3`. Package rows still follow explicit selection.
 and Busy/Idle/IOWait. `freq-config` and `idle-usage` separately select CPU
 configuration and state-entry rates. `-a` omits those two groups and package
 rows; its CPU `Pkg`, `Core`, and `Node` columns support identification and grouping.
+Slow configuration refreshes share reads across verified cpufreq policies and
+use a time budget. Failed or expired configuration values become unavailable;
+`-d` reports refresh time, sweep duration, and data age.
 `MemBW` is opt-in: use `-s membw` (or `mem`) or `-s mem_bw`, alone or combined
 with other selections. Default, `-S`, `-a`, and `-s all` do not enable it.
 
@@ -200,7 +203,7 @@ column groups, and PMU names. Stable field IDs are the clearest script tokens.
 command's execution, including small collection, launch, and wait overheads.
 Statistics cover the selected CPUs and platform sources,
 not only the command's process. They go to stderr by default; the command
-keeps its original stdout and stderr. Use `-o` for JSON/CSV so command stderr
+keeps its original stdout and stderr. Use `-o` for machine output so command stderr
 cannot mix with the statistics. Explicit `-i`, `-n`, `-D`, `--probe`, and
 `-l` cannot be combined with a command.
 
@@ -271,6 +274,7 @@ file-descriptor capacity.
 
 ```bash
 armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -S -a -f ndjson -o summary.ndjson -i 1
 armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --preset freq
 armstat-plot-cpu cpus.csv --preset busy --top 8
@@ -278,7 +282,9 @@ armstat-plot-cpu cpus.csv --group-by node --y busy
 ```
 
 `-o`/`--out` writes statistics to a file. JSON is an array of interval objects;
-CSV uses summary, package, CPU, or mixed rows according to the selected scopes. Both
+NDJSON writes and flushes one complete interval object per line, suitable for
+long captures and live consumers. CSV uses summary, package, CPU, or mixed rows
+according to the selected scopes. All three
 carry `schema_version=9`, interval number, measured duration, and timestamps.
 The bundled plot loaders accept version 9 only.
 Default JSON includes only `summary`; default CSV uses the summary layout with
@@ -286,13 +292,20 @@ Default JSON includes only `summary`; default CSV uses the summary layout with
 
 CSV requires a fixed column layout. A capability change that alters columns
 stops capture before the affected interval with a nonzero exit. Restart CSV
-or use JSON for changing field sets. Existing output files are opened only
+or use JSON/NDJSON for changing field sets. Existing output files are opened only
 after initialization and baseline collection succeed; later failures retain
-the already written prefix.
+the already written prefix. Starting a new capture overwrites the chosen file.
+
+Plot loaders detect JSON arrays and NDJSON by content. If a capture stops
+mid-record, `armstat-plot-summary summary.ndjson --preset freq --recover-tail`
+can discard the final unterminated, incomplete record and report it on stderr.
+Complete malformed records and corruption earlier in the file remain errors;
+JSON arrays and CSV do not support this recovery option. Flushing each sample
+does not guarantee persistence through a power failure.
 
 Plotting preserves timestamps and unavailable-data gaps. Use `--list-fields`
 on an input to find usable series. `--sample-range START:END` limits retained
-samples for both JSON and CSV; `--cpu-filter` also limits retained CPU series.
+samples for JSON, NDJSON, and CSV; `--cpu-filter` also limits retained CPU series.
 Large plots reduce rendering points while preserving bucket extrema and gap
 boundaries; ranking and smoothing use the full selected samples. From the source tree, use
 `scripts/plot_sum.py` and `scripts/plot_cpu.py` in place of the installed

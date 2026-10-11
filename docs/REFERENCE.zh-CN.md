@@ -80,8 +80,18 @@ CPU ID、采集下标查询及筛选集合查询都是常数时间操作。只�
 | 每区间 | 所选频率、Busy/Idle、LPI、功耗、温度、带宽与 PMU 输入 |
 
 慢速数据先全量刷新，之后在快速快照完成后按滚动 CPU 游标刷新。按
-`所选 CPU 数 / 5秒` 累积刷新额度，短区间可以不刷新，每轮最多刷新 32 个 CPU；
-上限可能使完整刷新超过五秒。因此运行中修改 disable 标志会逐步生效。
+`所选 CPU 数 / 5秒` 累积刷新额度，短区间可以不刷新。确认共享同一 cpufreq
+policy 目录的 CPU 共用 Min/Max/Governor 读取与缓存；当前频率仍逐 CPU 读取。
+每轮重新核对 policy 身份，也能发现 CPU 集合未变时的目录替换。
+频率配置与 cpuidle disable 刷新共用实测耗时预算：区间的 1%，限制在
+50 us–2 ms。根据单元成本估计避免启动预计无法完成的工作，未用额度保留到后续
+样本。单次后端读取无法中断，可能超出预算；五秒是轮询目标，不保证刷新时限。
+
+配置读取失败会使相关值失效；超过 `max(2 × 目标轮询周期, 2 × 采样区间)`
+未成功刷新的缓存也变为不可用。刷新发生在快速快照之后，更新或读取失败通常在
+下一样本可见；复制快照时检查年龄。`-d` 描述刷新后的缓存，报告单元数、实际耗时
+与预算、最近完整
+轮询时长、最大配置年龄和过期/不可用 CPU 数。运行中修改 disable 标志随游标推进生效。
 
 读取按字段和输出层级选择。只有 Busy/Idle/IOWait 或系统计数器需要时，才在该
 区间解析一次 `/proc/stat`；仅选择 LPI 不需要它。cpuidle 只读选中的状态和计数器：
@@ -190,7 +200,7 @@ IPC 要求命名为 `cycles` 和 `instructions` 的有效计数且 cycles 非零
 
 ## 输出契约
 
-JSON/CSV 与随附绘图加载器使用 **schema 第 9 版**。第 8 版 LPI 是补齐后的值，
+JSON/NDJSON/CSV 与随附绘图加载器使用 **schema 第 9 版**。第 8 版 LPI 是补齐后的值，
 不能按独立状态统计解释或与第 9 版混用。`--list` 来自序列化器共用的字段注册表。
 独立的 key-value 探测契约为 `probe_schema_version: 1`，PMU 探测仅覆盖首个 CPU 的 cycles。
 
@@ -269,6 +279,18 @@ Dump 与显式 `-i`/`-n`、命令、`--probe`、`-l`、非文本格式和显式 
 缺失数字/字符串与非有限值为 `null`，可用 Boost 为布尔值，字符串按 JSON 转义。
 正常退出时闭合数组；异常终止可能留下不完整文档。
 
+### NDJSON
+
+`-f ndjson` 使用与 JSON 相同的区间对象和 schema，每行一个完整对象，不带外层
+数组。字符串继续按 JSON 转义，值中的换行不会拆开记录。每个样本写完刷新输出，
+采集尚未结束时也能读取；空采集不输出记录。
+
+绘图加载器按内容识别数组与 NDJSON，也支持 `.ndjson`、`.jsonl` 文件。默认严格
+校验。`--recover-tail` 只允许丢弃末尾没有行结束符、且是合法 JSON 对象前缀的
+不完整记录，并在 stderr 报告。完整末条即使没有换行也接受。完整坏对象、重复
+key、非法常量及文件中间的损坏仍报错；JSON 数组和 CSV 拒绝该恢复选项。
+逐样本刷新不是 `fsync` 保证，断电仍可能丢失已经刷新输出的数据。
+
 ### CSV
 
 首次表头定义布局；默认输出使用仅汇总布局：
@@ -286,17 +308,19 @@ PMU 列为 `pmu.<event>`，混合时为 `summary.pmu.<event>` / `cpu.pmu.<event>
 规则转义；使用标准解析器，并按身份筛选行。
 
 输出层级和有序列须与首次表头一致。能力变化改变布局时，在写入该区间前返回
-错误；CPU 成员变化且布局不变时可继续。字段可能变化时，重新采集 CSV 或使用 JSON。
+错误；CPU 成员变化且布局不变时可继续。字段可能变化时，重新采集 CSV 或使用
+JSON/NDJSON。
 
 ### 输出生命周期
 
 `-o`/`--out` 指定统计文件。周期统计默认输出到 stdout，命令统计默认输出到
 stderr，子进程保留原有 stdout/stderr；默认统计会与子进程 stderr 共流，命令
-JSON/CSV 应写入文件。命令模式要求显式 `--`，拒绝显式 `-i`/`-n`、`-D`、
+机器输出应写入文件。命令模式要求显式 `--`，拒绝显式 `-i`/`-n`、`-D`、
 `--probe` 和 `-l`。
 
 已有输出目标只在初始化与基线采集成功后打开；区间输出还要求格式化缓冲区分配
-成功。启动成功后逐步写入；后续失败保留已写前缀并返回非零状态。所有成功操作，
+成功。启动成功后逐步写入；后续失败保留已写前缀并返回非零状态。新一轮采集覆盖
+指定文件，不支持追加会话。所有成功操作，
 包括 help/list/probe，
 都要求 stdout 刷新检查成功。SIGPIPE 按 EPIPE 处理，使资源清理后再退出。
 
@@ -321,18 +345,20 @@ python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install matplotlib
 armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -S -a -f ndjson -o summary.ndjson -i 1
 armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --y power --y2 temp0
 armstat-plot-cpu cpus.csv --preset busy --top 8
 ```
 
 源码入口为 `python3 scripts/plot_sum.py`、`python3 scripts/plot_cpu.py`。两者
-也接受包含所需层级的混合 JSON/CSV。使用各自的 `--help` 和输入的 `--list-fields`。
+也接受包含所需层级的混合 JSON/NDJSON/CSV。使用各自的 `--help` 和输入的 `--list-fields`。
 
 | 选项 | 用途 |
 |---|---|
 | `--preset`，或 `--y` / `--y2` | 选择预设或字段，两种方式不混用 |
-| `--sample-range START:END` | 从 1 开始的样本窗口；JSON 和 CSV 都只保留所选窗口 |
+| `--sample-range START:END` | 从 1 开始的样本窗口；只保留所选窗口 |
+| `--recover-tail` | 仅 NDJSON：丢弃并报告末尾一条不完整记录 |
 | `--smooth N` | N 个样本的滑动平均，当前样本缺失仍保留空缺 |
 | `--cpu-filter`、`--top`、`--group-by node/core` | 限制 CPU 曲线或分组 |
 | `--aggregate avg/max/min`、`--rank-by avg/max/last` | CPU 分组聚合与前 N 项排名 |
@@ -341,7 +367,7 @@ armstat-plot-cpu cpus.csv --preset busy --top 8
 按 core 分组使用 `(package, core)`，避免不同插槽同编号合并。平均排名是可见
 样本的算术平均，不按时长加权。没有主字段数据的对象报告后跳过；只缺副字段
 时仅跳过该副曲线。
-两种格式都完整扫描以校验输入，JSON 逐样本解码；加载器只保留所选窗口、CPU
+三种格式都完整扫描以校验输入，JSON/NDJSON 逐样本解码；加载器只保留所选窗口、CPU
 筛选和请求字段。`--top` 在保留的 CPU 曲线中排名，不减少加载的 CPU 数。
 滑动平均的工作量随样本数线性增长。平滑后，大曲线以每条约 4000 个渲染点为目标，
 保留每桶首尾、峰谷及全部缺失区间边界；空缺较多时可以超过目标点数。排名和

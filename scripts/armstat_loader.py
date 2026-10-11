@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 """Shared loader for armstat machine-readable exports.
 
-Consolidates the JSON/CSV loaders, field-alias maps, canonicalizers, field
+Consolidates the JSON/NDJSON/CSV loaders, field-alias maps, canonicalizers, field
 resolvers, series slicers, and CSV row counters that were previously
 duplicated between plot_sum.py and plot_cpu.py.
 
@@ -21,6 +21,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -174,6 +175,182 @@ def reject_duplicate_json_keys(
 
 def reject_nonstandard_json_constant(value: str):
     raise InvalidJsonConstantError(value)
+
+
+def is_incomplete_json_object(text: str) -> bool:
+    """Recognize a valid object prefix, without accepting earlier damage.
+
+    Used only for explicit EOF recovery. The standard decoder's error position
+    alone cannot distinguish a truncated number from an invalid token, or find
+    duplicate keys in an object whose closing brace was never written.
+    """
+    position = 0
+    length = len(text)
+    decoder = json.JSONDecoder()
+
+    class Incomplete(Exception):
+        pass
+
+    def peek() -> str:
+        nonlocal position
+        while position < length and text[position] in " \t\r\n":
+            position += 1
+        if position == length:
+            raise Incomplete
+        return text[position]
+
+    def string() -> str:
+        nonlocal position
+        start = position
+        position += 1
+        while position < length:
+            char = text[position]
+            position += 1
+            if char == '"':
+                return decoder.decode(text[start:position])
+            if ord(char) < 0x20:
+                raise ValueError("Invalid string control character")
+            if char == "\\":
+                if position == length:
+                    raise Incomplete
+                escape = text[position]
+                position += 1
+                if escape == "u":
+                    for _ in range(4):
+                        if position == length:
+                            raise Incomplete
+                        if text[position] not in "0123456789abcdefABCDEF":
+                            raise ValueError("Invalid unicode escape")
+                        position += 1
+                elif escape not in '\\"/bfnrt':
+                    raise ValueError("Invalid string escape")
+        raise Incomplete
+
+    def value() -> None:
+        nonlocal position
+        char = peek()
+        if char == '"':
+            string()
+        elif char in "{[":
+            is_object = char == "{"
+            close = "}" if is_object else "]"
+            keys: Set[str] = set()
+            position += 1
+            if peek() == close:
+                position += 1
+                return
+            while True:
+                if is_object:
+                    if peek() != '"':
+                        raise ValueError("Expected object key")
+                    key = string()
+                    if key in keys:
+                        raise DuplicateJsonKeyError(key)
+                    keys.add(key)
+                    if peek() != ":":
+                        raise ValueError("Expected colon")
+                    position += 1
+                value()
+                separator = peek()
+                position += 1
+                if separator == close:
+                    return
+                if separator != ",":
+                    raise ValueError("Expected separator")
+                # A comma requires another element, even before a closing brace.
+                if peek() == close:
+                    raise ValueError("Trailing comma")
+        elif char in "tfn":
+            literal = {"t": "true", "f": "false", "n": "null"}[char]
+            for expected in literal:
+                if position == length:
+                    raise Incomplete
+                if text[position] != expected:
+                    raise ValueError("Invalid JSON literal")
+                position += 1
+        elif char in "-0123456789":
+            start = position
+            while position < length and text[position] not in " \t\r\n,]}":
+                position += 1
+            token = text[start:position]
+            if re.fullmatch(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?", token):
+                decoder.decode(token)
+            elif position == length and (
+                token == "-" or
+                re.fullmatch(r"-?(?:0|[1-9][0-9]*)(?:\.|(?:\.[0-9]+)?[eE][+-]?)", token)
+            ):
+                raise Incomplete
+            else:
+                raise ValueError("Invalid JSON number")
+        else:
+            raise ValueError("Invalid JSON value")
+
+    try:
+        if peek() != "{":
+            return False
+        value()
+    except Incomplete:
+        return True
+    except (ValueError, RecursionError):
+        return False
+    return False
+
+
+def iter_ndjson_samples(path: Path, recover_tail: bool = False) -> Iterator[object]:
+    """Read one strictly validated JSON object per physical line."""
+    with path.open("rb") as handle:
+        for line_number, raw in enumerate(handle, start=1):
+            terminated = raw.endswith(b"\n")
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                if (recover_tail and not terminated and
+                        exc.reason == "unexpected end of data" and
+                        is_incomplete_json_object(raw[:exc.start].decode("utf-8"))):
+                    print(f"{path}: discarded 1 incomplete NDJSON tail record "
+                          f"at line {line_number}.", file=sys.stderr)
+                    return
+                raise
+            try:
+                item = json.loads(
+                    text, object_pairs_hook=reject_duplicate_json_keys,
+                    parse_constant=reject_nonstandard_json_constant,
+                )
+            except DuplicateJsonKeyError as exc:
+                raise SystemExit(f"{path} line {line_number} contains duplicate JSON key {exc.key!r}.") from exc
+            except InvalidJsonConstantError as exc:
+                raise SystemExit(f"{path} line {line_number} contains non-standard JSON constant {exc.value!r}.") from exc
+            except json.JSONDecodeError as exc:
+                if recover_tail and not terminated and is_incomplete_json_object(text):
+                    print(f"{path}: discarded 1 incomplete NDJSON tail record "
+                          f"at line {line_number}.", file=sys.stderr)
+                    return
+                raise SystemExit(f"{path} line {line_number} contains invalid NDJSON: "
+                                 f"{exc.msg} (column {exc.colno}).") from exc
+            if not isinstance(item, dict):
+                raise SystemExit(f"{path} line {line_number} is not a JSON object.")
+            yield item
+
+
+def detect_export_format(path: Path) -> str:
+    """Prefer file contents; extensions also identify damaged/empty inputs."""
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(64 * 1024)
+            if not chunk:
+                break
+            prefix = chunk.lstrip(b" \t\r\n")
+            if not prefix:
+                continue
+            if prefix[:1] == b"[":
+                return "json"
+            if prefix[:1] == b"{":
+                return "ndjson"
+            break
+    suffix = path.suffix.lower()
+    if suffix in {".json", ".csv", ".ndjson", ".jsonl"}:
+        return "ndjson" if suffix in {".ndjson", ".jsonl"} else suffix[1:]
+    raise SystemExit(f"Unsupported input format for {path}. Use armstat JSON, NDJSON, or CSV exports.")
 
 
 def decode_json_sample(text: str, path: Path) -> object:
@@ -600,7 +777,8 @@ def validate_csv_row_shape(item: Dict[Optional[str], object],
 # ---------------------------------------------------------------------------
 
 def load_json_summary(path: Path, sample_range: Optional[str] = None,
-                      fields: Optional[Iterable[str]] = None) -> SeriesData:
+                      fields: Optional[Iterable[str]] = None,
+                      *, ndjson: bool = False, recover_tail: bool = False) -> SeriesData:
     bounds = streaming_sample_bounds(sample_range)
     projection = FieldProjection(fields)
     rows: List[Dict[str, object]] = []
@@ -608,7 +786,8 @@ def load_json_summary(path: Path, sample_range: Optional[str] = None,
     sample_values: List[int] = []
     total_samples = 0
 
-    for sample_index, item in enumerate(iter_json_samples(path), start=1):
+    source = iter_ndjson_samples(path, recover_tail) if ndjson else iter_json_samples(path)
+    for sample_index, item in enumerate(source, start=1):
         total_samples = sample_index
         if not isinstance(item, dict):
             raise SystemExit(
@@ -731,16 +910,20 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None,
 
 
 def load_summary_series(path: Path, sample_range: Optional[str] = None,
-                        fields: Optional[Iterable[str]] = None) -> SeriesData:
+                        fields: Optional[Iterable[str]] = None,
+                        *, recover_tail: bool = False) -> SeriesData:
     try:
-        suffix = path.suffix.lower()
-        if suffix == ".json":
-            return load_json_summary(path, sample_range, fields)
-        if suffix == ".csv":
+        export_format = detect_export_format(path)
+        if recover_tail and export_format != "ndjson":
+            raise SystemExit("--recover-tail is only supported for NDJSON input.")
+        if export_format in {"json", "ndjson"}:
+            return load_json_summary(path, sample_range, fields,
+                                     ndjson=export_format == "ndjson", recover_tail=recover_tail)
+        if export_format == "csv":
             return load_csv_summary(path, sample_range, fields)
         raise SystemExit(
             f"Unsupported input format for {path}. "
-            "Use summary JSON or summary CSV exported by armstat."
+            "Use summary JSON, NDJSON, or CSV exported by armstat."
         )
     except (OSError, UnicodeError, json.JSONDecodeError, csv.Error) as exc:
         raise SystemExit(f"Could not read {path}: {exc}") from exc
@@ -769,7 +952,8 @@ def slice_summary_series(series: SeriesData,
 
 def load_json_cpu_series(path: Path, sample_range: Optional[str] = None,
                          cpu_filter: Optional[Iterable[int]] = None,
-                         fields: Optional[Iterable[str]] = None) -> CpuSeriesData:
+                         fields: Optional[Iterable[str]] = None,
+                         *, ndjson: bool = False, recover_tail: bool = False) -> CpuSeriesData:
     bounds = streaming_sample_bounds(sample_range)
     selected_cpus = None if cpu_filter is None else set(cpu_filter)
     projection = FieldProjection(fields)
@@ -779,7 +963,8 @@ def load_json_cpu_series(path: Path, sample_range: Optional[str] = None,
     cpu_ids: Set[int] = set()
     total_samples = 0
 
-    for sample_index, item in enumerate(iter_json_samples(path), start=1):
+    source = iter_ndjson_samples(path, recover_tail) if ndjson else iter_json_samples(path)
+    for sample_index, item in enumerate(source, start=1):
         total_samples = sample_index
         if not isinstance(item, dict):
             raise SystemExit(
@@ -953,16 +1138,20 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None,
 
 def load_cpu_series(path: Path, sample_range: Optional[str] = None,
                     cpu_filter: Optional[Iterable[int]] = None,
-                    fields: Optional[Iterable[str]] = None) -> CpuSeriesData:
+                    fields: Optional[Iterable[str]] = None,
+                    *, recover_tail: bool = False) -> CpuSeriesData:
     try:
-        suffix = path.suffix.lower()
-        if suffix == ".json":
-            return load_json_cpu_series(path, sample_range, cpu_filter, fields)
-        if suffix == ".csv":
+        export_format = detect_export_format(path)
+        if recover_tail and export_format != "ndjson":
+            raise SystemExit("--recover-tail is only supported for NDJSON input.")
+        if export_format in {"json", "ndjson"}:
+            return load_json_cpu_series(path, sample_range, cpu_filter, fields,
+                                        ndjson=export_format == "ndjson", recover_tail=recover_tail)
+        if export_format == "csv":
             return load_csv_cpu_series(path, sample_range, cpu_filter, fields)
         raise SystemExit(
             f"Unsupported input format for {path}. "
-            "Use CPU JSON or CPU CSV exported by armstat."
+            "Use CPU JSON, NDJSON, or CSV exported by armstat."
         )
     except (OSError, UnicodeError, json.JSONDecodeError, csv.Error) as exc:
         raise SystemExit(f"Could not read {path}: {exc}") from exc

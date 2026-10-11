@@ -78,7 +78,7 @@ aggregate rows, Min/Max/Governor/Boost, and LPI usage rates; use \fB-s all\fR
 for the full base view. Both attempt IPC without displaying raw event counters.
 .TP
 .BI \-f ", " \-\-format " format"
-Output format: \fBtext\fR (default), \fBjson\fR, or \fBcsv\fR.
+Output format: \fBtext\fR (default), \fBjson\fR, \fBndjson\fR, or \fBcsv\fR.
 .TP
 .BI \-s ", " \-\-show " items"
 Select comma-separated groups or exact fields. The first option starts a
@@ -122,6 +122,8 @@ Show initialization and runtime diagnostics on stderr. Interval mode reports
 collection, aggregation, and output time in milliseconds, plus the number of
 deadlines skipped before the next sample. Output time includes record building,
 serialization, and flushing; a slow terminal or pipe can delay sampling.
+Slow-refresh diagnostics include work time, budget, complete sweep duration,
+and the age and stale count of selected configuration data.
 .TP
 .B \-v, \-\-version
 Print the version and exit.
@@ -176,7 +178,7 @@ sources; the window includes small collection, launch, and wait overheads.
 They describe system activity rather than only the command's process.
 They go to stderr by default,
 while the command keeps its original stdout and stderr. Use \fB-o\fR for
-JSON/CSV to prevent command stderr from mixing with machine output.
+machine output to prevent command stderr from mixing with statistics.
 Explicit \fB-i\fR, \fB-n\fR, \fB-D\fR, \fB--probe\fR, and \fB-l\fR
 conflict with command mode.
 .PP
@@ -297,9 +299,9 @@ use grows with CPUs and events. Armstat attempts to raise its soft
 RLIMIT_NOFILE within the hard limit; reduce CPUs or events if capacity remains
 insufficient.
 .SH EXPORTS
-JSON and CSV use \fBschema_version=9\fR. Bundled plotting loaders accept only
-that version. LPI fields contain independent sysfs statistics; version 8's
-residual-adjusted values cannot be interpreted as version 9 data.
+JSON, NDJSON, and CSV use \fBschema_version=9\fR. Bundled plotting loaders
+accept only that version. LPI fields contain independent sysfs statistics;
+version 8's residual-adjusted values cannot be interpreted as version 9 data.
 .PP
 Every interval or CSV row carries schema_version, one-based interval number,
 duration_us, timestamp, timestamp_ns, and timestamp_iso. The timestamps describe
@@ -314,6 +316,14 @@ Package and CPU objects use package and cpu identity keys.
 Unavailable values are null; available Boost is boolean. Strings are escaped
 and non-finite numbers become null.
 .PP
+NDJSON uses the same interval objects, one complete object per line, without
+array brackets. Every sample is flushed for live readers; an empty capture
+produces no records. For a truncated final record, the plotting helpers accept
+\fB--recover-tail\fR to discard an incomplete final line with no line ending
+and report the discard. Earlier corruption and complete malformed records
+remain errors. This option applies only to NDJSON. Sample flushing does not
+guarantee persistence through a power failure.
+.PP
 CSV has one header. Default and summary-only output use Scope=SUM;
 package-only uses Package;
 CPU-only uses CPU. Mixed output uses Scope,CPU,Package with SUM, PKG, and CPU
@@ -322,10 +332,16 @@ compact columns use JSON keys. Unavailable and out-of-scope cells are empty.
 Use a conforming CSV parser.
 .PP
 CSV layout changes stop capture before the affected interval with a nonzero
-exit; restart CSV or use JSON for changing column sets. CPU membership may
-change if the layout stays fixed. Existing output targets are opened only
+exit; restart CSV or use JSON/NDJSON for changing column sets. CPU membership
+may change if the layout stays fixed. Existing output targets are opened only
 after initialization, baseline collection, and output-buffer allocation
 succeed. Later errors retain the written prefix and return nonzero.
+Starting a new capture overwrites the selected output file.
+.PP
+Slow configuration reads share verified cpufreq policies and use a measured
+time budget. Current frequency still uses per-CPU reads. Failed or expired
+Min/Max/Governor/Boost values are unavailable; slow refresh does not guarantee
+that every configuration change appears within five seconds.
 .SH ENVIRONMENT
 .TP
 .B ARMSTAT_TEMP_POLICY
@@ -373,8 +389,10 @@ armstat -s all
 armstat -s pkg_freq_mhz
 armstat -I
 armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -S -a -f ndjson -o summary.ndjson -i 1
 armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --preset freq
+armstat-plot-summary summary.ndjson --preset freq --recover-tail
 armstat-plot-cpu cpus.csv --preset busy --top 8
 .fi
 .SH FILES

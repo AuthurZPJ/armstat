@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 
 #include "armstat_cli.h"
 #include "sample_cache.h"
@@ -36,6 +37,28 @@ static unsigned int last_residency_mask;
 static unsigned int last_usage_mask;
 static int mock_budget = 128;
 static int mock_schedstat_failed = 1;
+static unsigned long long slow_time_us = 1000000;
+static unsigned long long slow_read_cost_us;
+static unsigned long long idle_read_cost_us;
+static int config_failed;
+static int config_representatives[MAX_CPUS];
+static unsigned long long config_generations[MAX_CPUS];
+
+static int fixture_slow_clock(clockid_t clock, struct timespec *now)
+{
+	(void)clock;
+	now->tv_sec = (time_t)(slow_time_us / 1000000);
+	now->tv_nsec = (long)(slow_time_us % 1000000) * 1000;
+	return 0;
+}
+
+static void fixture_config_sweep(void) { }
+static int fixture_config_representative(int cpu) { return config_representatives[cpu]; }
+static unsigned long long fixture_config_generation(int cpu) { return config_generations[cpu]; }
+static int fixture_config_matches(int cpu, int representative)
+{
+	return config_representatives[cpu] == config_representatives[representative];
+}
 
 static int fixture_read_freq(int cpu, unsigned int *value)
 {
@@ -52,10 +75,11 @@ static int fixture_read_min_max(int cpu, unsigned int *min, int *min_valid,
 	(void)cpu;
 	min_reads += !!want_min;
 	max_reads += !!want_max;
+	slow_time_us += (unsigned long long)(!!want_min + !!want_max) * slow_read_cost_us;
 	*min = 1000000;
 	*max = 3000000;
-	*min_valid = !!want_min;
-	*max_valid = !!want_max;
+	*min_valid = !!want_min && !config_failed;
+	*max_valid = !!want_max && !config_failed;
 	return 0;
 }
 
@@ -63,6 +87,9 @@ static int fixture_read_governor(int cpu, char *governor, size_t len)
 {
 	(void)cpu;
 	governor_reads++;
+	slow_time_us += slow_read_cost_us;
+	if (config_failed)
+		return -1;
 	copy_cstring(governor, len, "performance");
 	return 0;
 }
@@ -71,6 +98,9 @@ static int fixture_read_boost(int cpu, int *value)
 {
 	(void)cpu;
 	boost_reads++;
+	slow_time_us += slow_read_cost_us;
+	if (config_failed)
+		return -1;
 	*value = 1;
 	return 0;
 }
@@ -127,12 +157,19 @@ static void fixture_configure_idle(int cap, unsigned int residency, unsigned int
 	last_residency_mask = residency;
 	last_usage_mask = usage;
 }
-static void fixture_refresh_disable(int cpus) { disable_refreshes += cpus; }
+static void fixture_refresh_disable(int cpus)
+{
+	disable_refreshes += cpus;
+	slow_time_us += (unsigned long long)cpus * idle_read_cost_us;
+}
 int fixture_init_sample_cache(int count);
 void fixture_free_sample_cache(void);
 int fixture_realloc_sample_cache(int count);
+void fixture_collect_per_interval_data_raw(struct sys_snapshot *snapshot,
+					   unsigned long long delta_us);
 void fixture_collect_per_interval_data(struct sys_snapshot *snapshot,
 				       unsigned long long delta_us);
+void fixture_slow_stats(struct sample_cache_slow_stats *stats);
 int fixture_cache_initialized(void);
 void fixture_diagnostic_collection(int enable);
 
@@ -140,7 +177,7 @@ void fixture_diagnostic_collection(int enable);
 #define init_sample_cache fixture_init_sample_cache
 #define free_sample_cache fixture_free_sample_cache
 #define realloc_sample_cache fixture_realloc_sample_cache
-#define collect_per_interval_data fixture_collect_per_interval_data
+#define collect_per_interval_data fixture_collect_per_interval_data_raw
 #define is_sample_cache_initialized fixture_cache_initialized
 #define set_diagnostic_counter_collection fixture_diagnostic_collection
 #define read_cpu_freq fixture_read_freq
@@ -159,6 +196,12 @@ void fixture_diagnostic_collection(int enable);
 #define configure_cpuidle_fd_cache fixture_configure_idle
 #define refresh_idle_state_disable_cache_budgeted fixture_refresh_disable
 #define sysfs_counter_fd_budget fixture_fd_budget
+#define cpufreq_begin_config_sweep fixture_config_sweep
+#define get_cpufreq_config_representative fixture_config_representative
+#define get_cpufreq_config_generation fixture_config_generation
+#define cpufreq_config_group_matches fixture_config_matches
+#define get_sample_cache_slow_stats fixture_slow_stats
+#define clock_gettime fixture_slow_clock
 #include "../src/core/sample_cache.c"
 #undef init_sample_cache
 #undef free_sample_cache
@@ -182,6 +225,19 @@ void fixture_diagnostic_collection(int enable);
 #undef configure_cpuidle_fd_cache
 #undef refresh_idle_state_disable_cache_budgeted
 #undef sysfs_counter_fd_budget
+#undef cpufreq_begin_config_sweep
+#undef get_cpufreq_config_representative
+#undef get_cpufreq_config_generation
+#undef cpufreq_config_group_matches
+#undef get_sample_cache_slow_stats
+#undef clock_gettime
+
+void fixture_collect_per_interval_data(struct sys_snapshot *snapshot,
+				       unsigned long long delta_us)
+{
+	slow_time_us += delta_us;
+	fixture_collect_per_interval_data_raw(snapshot, delta_us);
+}
 
 static void seed_cpus(int count)
 {
@@ -194,12 +250,18 @@ static void seed_cpus(int count)
 			.package_id = 0, .core_id = i, .numa_node = 0,
 		};
 	assert(cpu_inventory_seed(cpus, count) == 0);
+	for (int i = 0; i < count; i++) {
+		config_representatives[i] = i;
+		config_generations[i] = 1;
+	}
 }
 
 static void reset_reads(void)
 {
 	current_reads = min_reads = max_reads = governor_reads = boost_reads = 0;
 	uncore_reads = schedstat_reads = disable_refreshes = budget_calculations = 0;
+	slow_read_cost_us = idle_read_cost_us = 0;
+	config_failed = 0;
 }
 
 static void configure_view(const char *fields)
@@ -299,6 +361,254 @@ static void test_diagnostic_full_state_budget_and_hotplug_reset(void)
 	assert(freq_fd_cap + idle_fd_cap == 33);
 	fixture_free_sample_cache();
 	fixture_diagnostic_collection(0);
+}
+
+static void test_policy_sharing_failure_age_and_recovery(void)
+{
+	struct sys_snapshot snapshot = { .interval_delta_us = 1000 };
+	struct sample_cache_slow_stats stats;
+
+	seed_cpus(4);
+	for (int i = 0; i < 4; i++)
+		config_representatives[i] = 0;
+	configure_view("min_freq_mhz,max_freq_mhz,governor,boost");
+	reset_reads();
+	assert(fixture_init_sample_cache(4) == 0);
+	assert(min_reads == 1 && max_reads == 1 && governor_reads == 1 && boost_reads == 1);
+	fixture_collect_per_interval_data(&snapshot, 1000);
+	for (int i = 0; i < 4; i++) {
+		assert(snapshot.freqs[i].min_freq_valid && snapshot.freqs[i].max_freq_valid);
+		assert(snapshot.freqs[i].boost == 1);
+		assert(!strcmp(snapshot.freqs[i].governor, "performance"));
+	}
+	config_failed = 1;
+	fixture_collect_per_interval_data(&snapshot, 1250000);
+	fixture_collect_per_interval_data(&snapshot, 1);
+	for (int i = 0; i < 4; i++) {
+		assert(!snapshot.freqs[i].min_freq_valid && !snapshot.freqs[i].max_freq_valid);
+		assert(snapshot.freqs[i].boost == -1 && !snapshot.freqs[i].governor[0]);
+	}
+	fixture_slow_stats(&stats);
+	assert(stats.unavailable_cpus == 4 && stats.max_age_us >= 1250000);
+	config_failed = 0;
+	fixture_collect_per_interval_data(&snapshot, 5000000);
+	fixture_collect_per_interval_data(&snapshot, 1);
+	assert(snapshot.freqs[3].min_freq_valid && snapshot.freqs[3].boost == 1);
+
+	/* A clock gap with a short requested sample exposes old config as stale. */
+	slow_time_us += 10000001;
+	fixture_collect_per_interval_data(&snapshot, 1);
+	fixture_slow_stats(&stats);
+	assert(stats.stale_cpus == 4 && stats.unavailable_cpus == 4);
+	assert(!snapshot.freqs[0].min_freq_valid && snapshot.freqs[0].boost == -1);
+	assert(!snapshot.freqs[0].governor[0]);
+	/* A legitimate long sampling interval receives a matching freshness window. */
+	fixture_collect_per_interval_data(&snapshot, 30000000);
+	assert(snapshot.freqs[0].min_freq_valid);
+	fixture_free_sample_cache();
+}
+
+static void test_time_budget_retains_credit_and_replaces_cpu_cap(void)
+{
+	struct sys_snapshot snapshot = { .interval_delta_us = 1000000 };
+	struct sample_cache_slow_stats stats;
+
+	seed_cpus(MAX_CPUS);
+	configure_view("min_freq_mhz");
+	reset_reads();
+	assert(fixture_init_sample_cache(MAX_CPUS) == 0);
+	reset_reads();
+	fixture_collect_per_interval_data(&snapshot, 1000000);
+	fixture_slow_stats(&stats);
+	assert(stats.refreshed_cpus == 204 && min_reads == 204);
+	assert(stats.time_budget_us == 2000);
+	fixture_free_sample_cache();
+
+	seed_cpus(100);
+	configure_view("min_freq_mhz,idle_state0");
+	reset_reads();
+	assert(fixture_init_sample_cache(100) == 0);
+	reset_reads();
+	slow_read_cost_us = 100;
+	idle_read_cost_us = 100;
+	fixture_collect_per_interval_data(&snapshot, 1000000);
+	fixture_slow_stats(&stats);
+	assert(stats.refreshed_cpus == 10 && min_reads == 10 && disable_refreshes == 10);
+	assert(stats.work_us == 2000 && stats.time_budget_us == 2000);
+	assert(slow_budget_credit / 5000000 == 10);
+	for (int i = 0; i < 9; i++)
+		fixture_collect_per_interval_data(&snapshot, 1000000);
+	fixture_slow_stats(&stats);
+	assert(stats.last_sweep_us >= 10000000);
+	assert(stats.last_sweep_us < 10100000);
+	fixture_free_sample_cache();
+}
+
+/* Real policy discovery is exercised with independently controlled directory IDs. */
+static ino_t fixture_policy_inodes[MAX_CPUS];
+static int fixture_policy_stats;
+
+static int fixture_policy_stat(const char *path, struct stat *st)
+{
+	const char *cpu = strstr(path, "/cpu/cpu");
+	int cpu_id = -1;
+
+	fixture_policy_stats++;
+	if (!cpu || sscanf(cpu, "/cpu/cpu%d/cpufreq", &cpu_id) != 1 ||
+	    cpu_id < 0 || cpu_id >= MAX_CPUS || !fixture_policy_inodes[cpu_id]) {
+		errno = ENOENT;
+		return -1;
+	}
+	memset(st, 0, sizeof(*st));
+	st->st_dev = 7;
+	st->st_ino = fixture_policy_inodes[cpu_id];
+	st->st_mode = S_IFDIR | 0755;
+	return 0;
+}
+
+#define read_cpu_freq fixture_backend_read_cpu_freq
+#define read_cpu_min_max_freq_checked fixture_backend_read_cpu_min_max_freq_checked
+#define read_cpu_min_max_freq_selected fixture_backend_read_cpu_min_max_freq_selected
+#define configure_cpufreq_fd_cache fixture_backend_configure_cpufreq_fd_cache
+#define get_cpufreq_cached_fd_count fixture_backend_get_cpufreq_cached_fd_count
+#define cpufreq_begin_sample fixture_backend_cpufreq_begin_sample
+#define cpufreq_begin_config_sweep fixture_backend_cpufreq_begin_config_sweep
+#define get_cpufreq_config_representative fixture_backend_get_cpufreq_config_representative
+#define cpufreq_config_group_matches fixture_backend_cpufreq_config_group_matches
+#define get_cpufreq_config_generation fixture_backend_get_cpufreq_config_generation
+#define read_cpu_governor fixture_backend_read_cpu_governor
+#define read_cpu_boost fixture_backend_read_cpu_boost
+#define read_uncore_freq fixture_backend_read_uncore_freq
+#define has_uncore_freq_support fixture_backend_has_uncore_freq_support
+#define get_uncore_freq_device_name fixture_backend_get_uncore_freq_device_name
+#define init_cpufreq fixture_backend_init_cpufreq
+#define get_cpufreq_tracked_count fixture_backend_get_cpufreq_tracked_count
+#define close_cpufreq fixture_backend_close_cpufreq
+/* Read current CPU frequency in kHz (tracked_idx) */
+int read_cpu_freq(int tracked_idx, unsigned int *freq);
+
+/* Read min/max frequency with independent validity for min and max. */
+int read_cpu_min_max_freq_checked(int tracked_idx,
+				  unsigned int *min, int *min_valid,
+				  unsigned int *max, int *max_valid);
+int read_cpu_min_max_freq_selected(int tracked_idx,
+				 unsigned int *min, int *min_valid,
+				 unsigned int *max, int *max_valid,
+				 int read_min, int read_max);
+
+/* Set the persistent current-frequency cache share; existing fds may shrink. */
+void configure_cpufreq_fd_cache(int fd_cap, int collect_current);
+int get_cpufreq_cached_fd_count(void);
+void cpufreq_begin_sample(void);
+
+/* Slow configuration sharing requires a verified common sysfs directory. */
+void cpufreq_begin_config_sweep(void);
+int get_cpufreq_config_representative(int tracked_idx);
+int cpufreq_config_group_matches(int tracked_idx, int representative);
+unsigned long long get_cpufreq_config_generation(int tracked_idx);
+
+/* Read CPU governor (tracked_idx) */
+int read_cpu_governor(int tracked_idx, char *governor, size_t len);
+
+/* Read CPU boost state (0/1), returns -1 if unavailable (tracked_idx) */
+int read_cpu_boost(int tracked_idx, int *boost);
+
+/* Read uncore frequency from devfreq cur_freq in Hz */
+int read_uncore_freq(unsigned long long *freq_hz);
+
+/* Whether a readable devfreq cur_freq source was discovered */
+int has_uncore_freq_support(void);
+
+/* Return the discovered devfreq device name, or NULL if unavailable */
+const char *get_uncore_freq_device_name(void);
+
+/* Initialize cpufreq subsystem */
+int init_cpufreq(void);
+
+/* Number of tracked CPUs represented by the current cached-fd set. */
+int get_cpufreq_tracked_count(void);
+
+/* Close cached file descriptors */
+void close_cpufreq(void);
+
+#define stat(path, st) fixture_policy_stat(path, st)
+#include "../src/platform/cpufreq.c"
+#undef stat
+#undef read_cpu_freq
+#undef read_cpu_min_max_freq_checked
+#undef read_cpu_min_max_freq_selected
+#undef configure_cpufreq_fd_cache
+#undef get_cpufreq_cached_fd_count
+#undef cpufreq_begin_sample
+#undef cpufreq_begin_config_sweep
+#undef get_cpufreq_config_representative
+#undef cpufreq_config_group_matches
+#undef get_cpufreq_config_generation
+#undef read_cpu_governor
+#undef read_cpu_boost
+#undef read_uncore_freq
+#undef has_uncore_freq_support
+#undef get_uncore_freq_device_name
+#undef init_cpufreq
+#undef get_cpufreq_tracked_count
+#undef close_cpufreq
+
+static void test_real_policy_identity_verification_and_replacement(void)
+{
+	unsigned long long old_generation;
+	int checks;
+
+	seed_cpus(4);
+	fixture_policy_inodes[0] = fixture_policy_inodes[1] = 100;
+	fixture_policy_inodes[2] = 200;
+	fixture_policy_inodes[3] = 0;
+	fixture_policy_stats = 0;
+	assert(fixture_backend_init_cpufreq() == 0);
+	assert(fixture_policy_stats == 4);
+	checks = fixture_policy_stats;
+	assert(fixture_backend_get_cpufreq_config_representative(0) == 0);
+	assert(fixture_backend_get_cpufreq_config_representative(1) == 0);
+	assert(fixture_backend_get_cpufreq_config_representative(2) == 2);
+	assert(fixture_backend_get_cpufreq_config_representative(3) == 3);
+	assert(fixture_policy_stats == checks);
+	assert(!fixture_backend_cpufreq_config_group_matches(3, 0));
+
+	old_generation = fixture_backend_get_cpufreq_config_generation(0);
+	fixture_policy_inodes[0] = 300;
+	fixture_backend_cpufreq_begin_config_sweep();
+	/* CPU 1 must verify its previous representative before trusting the cache. */
+	assert(fixture_backend_get_cpufreq_config_representative(1) == 1);
+	assert(fixture_policy_stats == checks + 2);
+	assert(!fixture_backend_cpufreq_config_group_matches(1, 0));
+	assert(fixture_backend_get_cpufreq_config_generation(0) != old_generation);
+	fixture_policy_inodes[3] = 300;
+	assert(fixture_backend_get_cpufreq_config_representative(3) == 0);
+	assert(fixture_backend_cpufreq_config_group_matches(3, 0));
+	fixture_backend_close_cpufreq();
+	assert(fixture_backend_get_cpufreq_tracked_count() == 0);
+}
+
+static void test_independent_policy_index_at_cpu_limit(void)
+{
+	unsigned int occupied = 0;
+
+	seed_cpus(MAX_CPUS);
+	for (int i = 0; i < MAX_CPUS; i++)
+		fixture_policy_inodes[i] = (ino_t)(10000 + i);
+	fixture_policy_stats = 0;
+	assert(fixture_backend_init_cpufreq() == 0);
+	assert(policy_index_size >= MAX_CPUS * 2);
+	for (unsigned int i = 0; i < policy_index_size; i++)
+		occupied += !!policy_index[i].occupied;
+	assert(occupied == MAX_CPUS);
+	fixture_backend_cpufreq_begin_config_sweep();
+	for (int i = 0; i < MAX_CPUS; i++) {
+		assert(fixture_backend_get_cpufreq_config_representative(i) == i);
+		assert(policy_identity[i].representative == i);
+	}
+	/* Exactly one directory verification per CPU, including independent ones. */
+	assert(fixture_policy_stats == MAX_CPUS * 2);
+	fixture_backend_close_cpufreq();
 }
 
 /* Counter-cache failure timing is deterministic and does not sleep. */
@@ -466,10 +776,14 @@ int main(void)
 	test_schedstat_failure_once_per_cycle_and_recovery();
 	test_frequency_dependency_and_fractional_slow_refresh();
 	test_diagnostic_full_state_budget_and_hotplug_reset();
+	test_policy_sharing_failure_age_and_recovery();
+	test_time_budget_retains_credit_and_replaces_cpu_cap();
+	test_real_policy_identity_verification_and_replacement();
+	test_independent_policy_index_at_cpu_limit();
 	test_counter_missing_permission_backoff_and_reset();
 	test_counter_cached_ephemeral_recovery_and_cloexec();
 	test_fd_budget_reserves_runtime_space();
 	cleanup_cpu_inventory();
-	puts("sample collection tests: 6 cases passed");
+	puts("sample collection tests: 10 cases passed");
 	return 0;
 }

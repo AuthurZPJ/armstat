@@ -3,7 +3,7 @@
  * formatter.h - Output formatting layer
  *
  * RESPONSIBLE FOR:
- *   - Text/JSON/CSV output formatting
+ *   - Text/JSON/NDJSON/CSV output formatting
  *   - Header printing
  *   - Row formatting
  *
@@ -26,6 +26,7 @@
 #define FORMAT_TEXT  0
 #define FORMAT_JSON  1
 #define FORMAT_CSV   2
+#define FORMAT_NDJSON 3
 
 /*
  * CPU row data - per-CPU intermediate model
@@ -156,6 +157,9 @@ void serialize_text(const struct interval_record *rec);
 
 /* JSON stream serializer. Call close_machine_json() when the stream ends. */
 void serialize_json(const struct interval_record *rec);
+
+/* One complete JSON object followed by a newline; no stream wrapper. */
+void serialize_ndjson(const struct interval_record *rec);
 
 /*
  * CSV serializer

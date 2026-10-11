@@ -125,6 +125,28 @@ def main() -> int:
         assert "skipping groups" in cpu_result.stderr
         assert "skipping secondary 'temp' lines" in cpu_result.stderr
 
+        # Content detection and explicit recovery also reach the actual renderers.
+        for script, source, output, arguments in (
+            ("plot_sum.py", summary_path, output_dir / "plots" / "ndjson-summary.png",
+             ["--preset", "power-temp"]),
+            ("plot_cpu.py", cpu_path, output_dir / "plots" / "ndjson-cpus.svg",
+             ["--y", "freq", "--cpu-filter", "0,64"]),
+        ):
+            ndjson = output_dir / f"{script}.capture"
+            records = json.loads(source.read_text(encoding="utf-8"))
+            ndjson.write_text("".join(json.dumps(record) + "\n" for record in records) +
+                              '{"schema_version":9,"interval":4,"summary":', encoding="utf-8")
+            recovered = run_plot([
+                f"scripts/{script}", str(ndjson), "--recover-tail", *arguments,
+                "-o", str(output),
+            ])
+            assert "discarded 1 incomplete NDJSON tail record" in recovered.stderr
+            assert output.stat().st_size > 1_000
+            if output.suffix == ".png":
+                assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            else:
+                assert "<svg" in output.read_text(encoding="utf-8")[:1_000]
+
         # Inspect the same ten-line chart before savefig expands/crops its
         # canvas. A clipped label or a legend over the axes is a layout failure
         # even when the PNG/SVG can be written successfully.

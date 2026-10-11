@@ -15,10 +15,12 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <ctype.h>
 #include <limits.h>
+#include <stdint.h>
 
 #include "cpufreq.h"
 #include "collector.h"
@@ -32,6 +34,29 @@ static struct sysfs_counter_cache *max_freq_cache;
 static struct sysfs_counter_cache *boost_cache;
 static int cur_freq_fd_open_count;
 static int cur_freq_fd_cap;
+
+struct cpufreq_policy_identity {
+	dev_t device;
+	ino_t inode;
+	unsigned long long verified_sweep;
+	unsigned long long generation;
+	int representative;
+	int valid;
+};
+
+static struct cpufreq_policy_identity *policy_identity;
+static unsigned long long config_sweep;
+
+struct cpufreq_policy_index {
+	dev_t device;
+	ino_t inode;
+	int representative;
+	int occupied;
+};
+
+static struct cpufreq_policy_index *policy_index;
+static unsigned int policy_index_size;
+static int policy_index_ready;
 
 /*
  * Sysfs component names can legitimately be much longer than the handful of
@@ -55,6 +80,122 @@ static unsigned long long global_boost_value;
 void cpufreq_begin_sample(void)
 {
 	global_boost_read = 0;
+}
+
+static void rebuild_policy_index(void)
+{
+	if (!policy_index_ready)
+		return;
+	memset(policy_index, 0, policy_index_size * sizeof(*policy_index));
+	for (int i = 0; i < cpu_count; i++) {
+		struct cpufreq_policy_identity *identity = &policy_identity[i];
+		uint64_t hash;
+		unsigned int slot;
+
+		identity->representative = i;
+		if (!identity->valid)
+			continue;
+		hash = (uint64_t)identity->device * UINT64_C(11400714819323198485) ^
+			(uint64_t)identity->inode * UINT64_C(14029467366897019727);
+		hash ^= hash >> 32;
+		slot = (unsigned int)hash & (policy_index_size - 1);
+		while (policy_index[slot].occupied) {
+			if (policy_index[slot].device == identity->device &&
+			    policy_index[slot].inode == identity->inode)
+				break;
+			slot = (slot + 1) & (policy_index_size - 1);
+		}
+		if (policy_index[slot].occupied) {
+			identity->representative = policy_index[slot].representative;
+		} else {
+			policy_index[slot].occupied = 1;
+			policy_index[slot].device = identity->device;
+			policy_index[slot].inode = identity->inode;
+			policy_index[slot].representative = i;
+		}
+	}
+}
+
+void cpufreq_begin_config_sweep(void)
+{
+	if (++config_sweep == 0) {
+		config_sweep = 1;
+		for (int i = 0; i < cpu_count; i++)
+			policy_identity[i].verified_sweep = 0;
+	}
+	rebuild_policy_index();
+}
+
+static void verify_config_policy(int tracked_idx)
+{
+	struct cpufreq_policy_identity *identity = &policy_identity[tracked_idx];
+	struct stat st;
+	char path[CPUFREQ_SYSFS_PATH_LEN];
+	int cpu_id = get_cpu_id_by_tracked_idx(tracked_idx);
+	int valid;
+	int changed;
+
+	if (identity->verified_sweep == config_sweep)
+		return;
+	cpu_sysfs_path(cpu_id, "cpufreq", path, sizeof(path));
+	valid = stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+	changed = valid != identity->valid || (valid &&
+		(identity->device != st.st_dev || identity->inode != st.st_ino));
+	if (changed) {
+		identity->generation++;
+		/* A replacement policy must not inherit old fds or negative backoff. */
+		sysfs_counter_close(&cur_freq_cache[tracked_idx], &cur_freq_fd_open_count);
+		sysfs_counter_init(&min_freq_cache[tracked_idx]);
+		sysfs_counter_init(&max_freq_cache[tracked_idx]);
+		sysfs_counter_init(&boost_cache[tracked_idx]);
+	}
+	identity->valid = valid;
+	identity->device = valid ? st.st_dev : 0;
+	identity->inode = valid ? st.st_ino : 0;
+	identity->verified_sweep = config_sweep;
+	if (changed)
+		rebuild_policy_index();
+}
+
+int cpufreq_config_group_matches(int tracked_idx, int representative)
+{
+	struct cpufreq_policy_identity *identity;
+	struct cpufreq_policy_identity *other;
+
+	if (!policy_identity || tracked_idx < 0 || tracked_idx >= cpu_count ||
+	    representative < 0 || representative >= cpu_count)
+		return 0;
+	if (tracked_idx == representative)
+		return 1;
+	identity = &policy_identity[tracked_idx];
+	other = &policy_identity[representative];
+	return identity->valid && other->valid &&
+		identity->device == other->device && identity->inode == other->inode;
+}
+
+int get_cpufreq_config_representative(int tracked_idx)
+{
+	int representative;
+
+	if (!policy_identity || tracked_idx < 0 || tracked_idx >= cpu_count)
+		return tracked_idx;
+	verify_config_policy(tracked_idx);
+	if (!policy_identity[tracked_idx].valid)
+		return tracked_idx;
+	/* Replacement identities rebuild the index before trying the next owner. */
+	for (int attempts = 0; attempts < cpu_count; attempts++) {
+		representative = policy_identity[tracked_idx].representative;
+		verify_config_policy(representative);
+		if (cpufreq_config_group_matches(tracked_idx, representative))
+			return representative;
+	}
+	return tracked_idx;
+}
+
+unsigned long long get_cpufreq_config_generation(int tracked_idx)
+{
+	return policy_identity && tracked_idx >= 0 && tracked_idx < cpu_count ?
+		policy_identity[tracked_idx].generation : 0;
 }
 
 void configure_cpufreq_fd_cache(int fd_cap, int collect_current)
@@ -324,12 +465,24 @@ int init_cpufreq(void)
 	min_freq_cache = calloc(cpu_count, sizeof(*min_freq_cache));
 	max_freq_cache = calloc(cpu_count, sizeof(*max_freq_cache));
 	boost_cache = calloc(cpu_count, sizeof(*boost_cache));
-	if (!cur_freq_cache || !min_freq_cache || !max_freq_cache || !boost_cache) {
+	policy_identity = calloc(cpu_count, sizeof(*policy_identity));
+	policy_index_size = 1;
+	while (policy_index_size < (unsigned int)cpu_count * 2)
+		policy_index_size *= 2;
+	policy_index = calloc(policy_index_size, sizeof(*policy_index));
+	policy_index_ready = 0;
+	if (!cur_freq_cache || !min_freq_cache || !max_freq_cache || !boost_cache ||
+	    !policy_identity || !policy_index) {
 		/* calloc fds are not initialized yet; free without closing fd 0. */
 		free(cur_freq_cache);
 		free(min_freq_cache);
 		free(max_freq_cache);
 		free(boost_cache);
+		free(policy_identity);
+		free(policy_index);
+		policy_identity = NULL;
+		policy_index = NULL;
+		policy_index_size = 0;
 		cur_freq_cache = min_freq_cache = max_freq_cache = boost_cache = NULL;
 		cpu_count = 0;
 		return -1;
@@ -343,6 +496,12 @@ int init_cpufreq(void)
 		sysfs_counter_init(&max_freq_cache[i]);
 		sysfs_counter_init(&boost_cache[i]);
 	}
+	config_sweep = 0;
+	cpufreq_begin_config_sweep();
+	for (int i = 0; i < cpu_count; i++)
+		verify_config_policy(i);
+	policy_index_ready = 1;
+	rebuild_policy_index();
 
 	uncore_freq_path[0] = '\0';
 	uncore_freq_device[0] = '\0';
@@ -373,6 +532,13 @@ void close_cpufreq(void)
 	free(min_freq_cache);
 	free(max_freq_cache);
 	free(boost_cache);
+	free(policy_identity);
+	free(policy_index);
+	policy_identity = NULL;
+	policy_index = NULL;
+	policy_index_size = 0;
+	policy_index_ready = 0;
+	config_sweep = 0;
 	min_freq_cache = max_freq_cache = boost_cache = NULL;
 	cur_freq_fd_open_count = 0;
 	cur_freq_fd_cap = 0;

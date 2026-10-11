@@ -325,6 +325,24 @@ static void emit_json_record(void *arg)
 	close_machine_json();
 }
 
+static void emit_ndjson_record(void *arg)
+{
+	const struct serializer_args *ctx = arg;
+
+	serialize_ndjson(ctx->rec);
+}
+
+static void emit_two_ndjson_records(void *arg)
+{
+	const struct serializer_args *ctx = arg;
+	struct interval_record rec = *ctx->rec;
+
+	rec.interval = 1;
+	serialize_ndjson(&rec);
+	rec.interval = 2;
+	serialize_ndjson(&rec);
+}
+
 static void emit_text_record(void *arg)
 {
 	const struct serializer_args *ctx = arg;
@@ -1731,6 +1749,118 @@ static void test_empty_json_stream_closes_as_empty_array(void)
 	free(output);
 }
 
+/* Compare JSON tokens while preserving all whitespace inside string values. */
+static char *json_without_layout(const char *output)
+{
+	char *tokens = malloc(strlen(output) + 1);
+	int quoted = 0;
+	int escaped = 0;
+	size_t length = 0;
+
+	assert(tokens != NULL);
+	for (const char *p = output; *p; p++) {
+		if (quoted) {
+			tokens[length++] = *p;
+			if (escaped)
+				escaped = 0;
+			else if (*p == '\\')
+				escaped = 1;
+			else if (*p == '"')
+				quoted = 0;
+		} else if (*p == '"') {
+			quoted = 1;
+			tokens[length++] = *p;
+		} else if (*p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+			tokens[length++] = *p;
+		}
+	}
+	tokens[length] = '\0';
+	return tokens;
+}
+
+static void test_ndjson_matches_json_with_one_complete_object_per_line(void)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[1];
+	struct cpu_freq_info freqs[1];
+	struct serializer_args args;
+	struct armstat_options opts;
+	char *output;
+	char *json;
+	char *ndjson;
+	char *argv[] = {"armstat", "-f", "ndjson", "-s", "all", NULL};
+	char *summary_argv[] = {"armstat", "-S", "-f", "ndjson", NULL};
+	char *empty_argv[] = {"armstat", "-f", "ndjson", "-H", "all", NULL};
+	char *cpu_argv[] = {"armstat", "-f", "ndjson", "-s",
+			   "cpu_busy_percent", NULL};
+	char *pmu_argv[] = {"armstat", "-S", "-f", "ndjson", "-p",
+			   "cycles", NULL};
+	char **views[] = {argv, summary_argv, empty_argv, cpu_argv, pmu_argv};
+	int counts[] = {5, 4, 5, 5, 6};
+
+	for (int view = 0; view < ARRAY_SIZE(views); view++) {
+		opts = parse_test_args(counts[view], views[view]);
+		assert(opts.format == FORMAT_NDJSON);
+		reset_machine_state();
+		make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+		rec.package_count = 1;
+		rec.packages[0].package_id = 7;
+		rec.packages[0].cpu_count = 1;
+		rec.summary.power_mw = NAN;
+		rec.cpu_rows[0].freq.boost = -1;
+		snprintf(rec.cpu_rows[0].freq.governor,
+			 sizeof(rec.cpu_rows[0].freq.governor), "a \"b\"\\c\n\t");
+		args.rec = &rec;
+
+		output = capture_stdout(emit_json_record, &args);
+		json = json_without_layout(output);
+		free(output);
+		assert(json[0] == '[' && json[strlen(json) - 1] == ']');
+		json[strlen(json) - 1] = '\0';
+
+		output = capture_stdout(emit_ndjson_record, &args);
+		assert(output[0] == '{');
+		assert(strchr(output, '\n') == output + strlen(output) - 1);
+		assert(output[strlen(output) - 2] == '}');
+		ndjson = json_without_layout(output);
+		assert(strcmp(json + 1, ndjson) == 0);
+		if (view == 0) {
+			assert(strstr(output, "\"packages\": [") != NULL);
+			assert(strstr(output, "\"governor\": \"a \\\"b\\\"\\\\c\\n\\t\"") != NULL);
+			assert(strstr(output, "\"power\": null") != NULL);
+		}
+		if (view == 3) {
+			assert(strstr(output, "\"cpus\": [") != NULL);
+			assert(strstr(output, "\"summary\": {") == NULL);
+			assert(strstr(output, "\"governor\":") == NULL);
+		}
+		if (view == 4)
+			assert(strstr(output, "\"pmu\": null") != NULL);
+		free(output);
+		free(json);
+		free(ndjson);
+
+		output = capture_stdout(emit_interval_header,
+			 &(struct header_args){&opts, 1.0});
+		assert(output[0] == '\0');
+		free(output);
+	}
+
+	output = capture_stdout(emit_two_ndjson_records, &args);
+	assert(strstr(output, "\"interval\": 1,") != NULL);
+	assert(strstr(output, "\"interval\": 2,") != NULL);
+	assert(strstr(output, "}\n{") != NULL);
+	assert(strchr(strchr(output, '\n') + 1, '\n') ==
+	       output + strlen(output) - 1);
+	free(output);
+	/* NDJSON never opens a JSON array, even after multiple intervals. */
+	output = capture_stdout(emit_close_machine_json, NULL);
+	assert(strcmp(output, "[\n]\n") == 0);
+	free(output);
+}
+
 /* ============================================================================
  * TEST COVERAGE: Text serializer content validation
  * ============================================================================ */
@@ -2693,6 +2823,9 @@ static int run_text_fixture(int argc, char **argv)
 		case FORMAT_JSON:
 			serialize_json(&rec);
 			break;
+		case FORMAT_NDJSON:
+			serialize_ndjson(&rec);
+			break;
 		default:
 			return 2;
 		}
@@ -2999,6 +3132,7 @@ int main(int argc, char **argv)
 	test_selected_json_package_has_unique_package_key();
 	test_empty_json_selection_has_no_dangling_comma();
 	test_empty_json_stream_closes_as_empty_array();
+	test_ndjson_matches_json_with_one_complete_object_per_line();
 	test_text_serializer_emits_column_headers_and_values();
 	test_text_values_refresh_grow_and_reuse_after_cleanup();
 	test_csv_cached_layout_refreshes_values_and_rejects_same_scope_change();

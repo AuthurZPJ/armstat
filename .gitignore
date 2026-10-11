@@ -9,6 +9,10 @@ tests/test_column_selection
 tests/test_core_logic
 tests/test_runtime_smoke
 tests/test_section_policy
+tests/test_command
+tests/test_raw_snapshot
+tests/test_sample_collection
+tests/test_cpuidle_cache
 
 # Python cache
 __pycache__/

@@ -197,11 +197,16 @@ static void pool_free(void)
 	if (pmu_valid_pool) { free(pmu_valid_pool); pmu_valid_pool = NULL; }
 }
 
-/* Forward declarations for slow layer */
+/* Slow housekeeping uses the same bounded work window for config and idle. */
 static int slow_layer_initialized;
 static int slow_cursor;
 static int slow_full_refresh_done;
 static unsigned long long slow_budget_credit;
+static unsigned long long slow_sweep;
+static unsigned long long slow_sweep_started_us;
+static unsigned long long slow_expiry_us;
+static unsigned long long slow_cost_ns;
+static struct sample_cache_slow_stats slow_stats;
 
 static struct slow_data {
 	unsigned int *min_freq;
@@ -210,12 +215,38 @@ static struct slow_data {
 	unsigned char *max_freq_valid;
 	int *boost;
 	char (*governors)[32];
-	int last_cpu_count;
+	int *representatives;
+	unsigned long long (*last_success_us)[4];
+	unsigned long long *read_sweep;
+	unsigned long long *read_generation;
 } slow_data;
 
+enum slow_field {
+	SLOW_MIN,
+	SLOW_MAX,
+	SLOW_GOVERNOR,
+	SLOW_BOOST,
+};
+
 #define SLOW_TARGET_SWEEP_MS_DEFAULT 5000
-#define SLOW_MAX_CPU_BUDGET 32
+#define SLOW_MAX_WORK_US 2000
+#define SLOW_MIN_WORK_US 50
 static int slow_target_sweep_ms = SLOW_TARGET_SWEEP_MS_DEFAULT;
+
+static unsigned long long slow_now_us(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+		return 0;
+	return (unsigned long long)now.tv_sec * 1000000ULL + now.tv_nsec / 1000;
+}
+
+static unsigned long long slow_age_us(unsigned long long now,
+				     unsigned long long then)
+{
+	return now >= then ? now - then : 0;
+}
 
 static int slow_init(int count)
 {
@@ -230,20 +261,30 @@ static int slow_init(int count)
 	slow_data.max_freq_valid = calloc(alloc_count, sizeof(unsigned char));
 	slow_data.boost = calloc(alloc_count, sizeof(int));
 	slow_data.governors = calloc(alloc_count, sizeof(char[32]));
+	slow_data.representatives = calloc(alloc_count, sizeof(int));
+	slow_data.last_success_us = calloc(alloc_count,
+					 sizeof(*slow_data.last_success_us));
+	slow_data.read_sweep = calloc(alloc_count, sizeof(unsigned long long));
+	slow_data.read_generation = calloc(alloc_count, sizeof(unsigned long long));
 	if (!slow_data.min_freq || !slow_data.min_freq_valid ||
 	    !slow_data.max_freq || !slow_data.max_freq_valid ||
-	    !slow_data.boost || !slow_data.governors) {
+	    !slow_data.boost || !slow_data.governors ||
+	    !slow_data.representatives || !slow_data.last_success_us ||
+	    !slow_data.read_sweep || !slow_data.read_generation) {
 		slow_free();
 		return -1;
 	}
 
-	for (int i = 0; i < count; i++)
+	for (int i = 0; i < count; i++) {
 		slow_data.boost[i] = -1;
-
-	slow_data.last_cpu_count = count;
+		slow_data.representatives[i] = i;
+	}
 	slow_cursor = 0;
 	slow_full_refresh_done = 0;
 	slow_budget_credit = 0;
+	slow_sweep = 0;
+	slow_cost_ns = 0;
+	memset(&slow_stats, 0, sizeof(slow_stats));
 
 	{
 		const char *env = getenv("ARMSTAT_SLOW_SWEEP_MS");
@@ -259,155 +300,231 @@ static int slow_init(int count)
 				slow_target_sweep_ms = (int)val;
 		}
 	}
-
+	slow_expiry_us = (unsigned long long)slow_target_sweep_ms * 2000;
 	slow_layer_initialized = 1;
 	return 0;
 }
 
 static void slow_free(void)
 {
-	if (slow_data.min_freq) { free(slow_data.min_freq); slow_data.min_freq = NULL; }
-	if (slow_data.min_freq_valid) {
-		free(slow_data.min_freq_valid);
-		slow_data.min_freq_valid = NULL;
-	}
-	if (slow_data.max_freq) { free(slow_data.max_freq); slow_data.max_freq = NULL; }
-	if (slow_data.max_freq_valid) {
-		free(slow_data.max_freq_valid);
-		slow_data.max_freq_valid = NULL;
-	}
-	if (slow_data.boost) { free(slow_data.boost); slow_data.boost = NULL; }
-	if (slow_data.governors) { free(slow_data.governors); slow_data.governors = NULL; }
+	free(slow_data.min_freq);
+	free(slow_data.min_freq_valid);
+	free(slow_data.max_freq);
+	free(slow_data.max_freq_valid);
+	free(slow_data.boost);
+	free(slow_data.governors);
+	free(slow_data.representatives);
+	free(slow_data.last_success_us);
+	free(slow_data.read_sweep);
+	free(slow_data.read_generation);
 	memset(&slow_data, 0, sizeof(slow_data));
+	memset(&slow_stats, 0, sizeof(slow_stats));
 	slow_cursor = 0;
 	slow_full_refresh_done = 0;
 	slow_budget_credit = 0;
+	slow_sweep = 0;
+	slow_cost_ns = 0;
 	slow_layer_initialized = 0;
 }
 
 static int slow_budget_for_interval(int tracked, unsigned long long delta_us)
 {
 	unsigned long long target_us = (unsigned long long)slow_target_sweep_ms * 1000ULL;
-	unsigned long long budget;
 
-	if (tracked <= 0)
+	if (tracked <= 0 || delta_us == 0)
 		return 0;
-	if (delta_us == 0)
-		return 0;
-
-	/*
-	 * Spread slow-path refreshes over roughly SLOW_TARGET_SWEEP_MS instead of
-	 * rescanning every tracked CPU in one burst. This keeps short sampling
-	 * intervals from showing periodic CPU spikes caused by housekeeping work.
-	 */
 	if (delta_us > target_us)
 		delta_us = target_us;
 	slow_budget_credit += (unsigned long long)tracked * delta_us;
 	if (slow_budget_credit > (unsigned long long)tracked * target_us)
 		slow_budget_credit = (unsigned long long)tracked * target_us;
-	budget = slow_budget_credit / target_us;
-	if (budget > SLOW_MAX_CPU_BUDGET)
-		budget = SLOW_MAX_CPU_BUDGET;
-	if (budget > (unsigned long long)tracked)
-		budget = tracked;
-	slow_budget_credit -= budget * target_us;
-	return (int)budget;
+	return (int)(slow_budget_credit / target_us);
+}
+
+static void slow_begin_sweep(void)
+{
+	if (++slow_sweep == 0) {
+		slow_sweep = 1;
+		memset(slow_data.read_sweep, 0,
+		       get_tracked_cpu_count() * sizeof(*slow_data.read_sweep));
+	}
+	if (freq_collection_mask & COLLECT_FREQ_CONFIG)
+		cpufreq_begin_config_sweep();
+	slow_sweep_started_us = slow_now_us();
 }
 
 static void slow_refresh_cpu(int tracked_idx)
 {
 	unsigned int min_freq;
 	unsigned int max_freq;
+	unsigned long long generation;
+	unsigned long long now;
 	int min_valid;
 	int max_valid;
+	int representative;
 
 	if (!(freq_collection_mask & COLLECT_FREQ_CONFIG) || tracked_idx < 0 ||
 	    tracked_idx >= get_tracked_cpu_count())
 		return;
 
-	read_cpu_min_max_freq_selected(tracked_idx, &min_freq, &min_valid,
+	representative = get_cpufreq_config_representative(tracked_idx);
+	if (representative < 0 || representative >= get_tracked_cpu_count())
+		representative = tracked_idx;
+	slow_data.representatives[tracked_idx] = representative;
+	generation = get_cpufreq_config_generation(representative);
+	if (slow_data.read_sweep[representative] == slow_sweep &&
+	    slow_data.read_generation[representative] == generation)
+		return;
+	slow_data.read_sweep[representative] = slow_sweep;
+	slow_data.read_generation[representative] = generation;
+	slow_stats.config_reads++;
+
+	read_cpu_min_max_freq_selected(representative, &min_freq, &min_valid,
 				     &max_freq, &max_valid,
 				     freq_collection_mask & COLLECT_FREQ_MIN,
 				     freq_collection_mask & COLLECT_FREQ_MAX);
-	if (min_valid) {
-		slow_data.min_freq[tracked_idx] = min_freq;
-		slow_data.min_freq_valid[tracked_idx] = 1;
-	}
-	if (max_valid) {
-		slow_data.max_freq[tracked_idx] = max_freq;
-		slow_data.max_freq_valid[tracked_idx] = 1;
-	}
-	/*
-	 * Boost is a slow-changing capability/configuration bit. A transient read
-	 * failure should not erase a previously known 0/1 value and turn the
-	 * column into "-". Preserve the cached value unless we successfully read
-	 * a new one.
-	 */
-	{
-		int boost;
+	now = slow_now_us();
+	slow_data.min_freq[representative] = min_freq;
+	slow_data.min_freq_valid[representative] = min_valid;
+	slow_data.max_freq[representative] = max_freq;
+	slow_data.max_freq_valid[representative] = max_valid;
+	if (min_valid)
+		slow_data.last_success_us[representative][SLOW_MIN] = now;
+	if (max_valid)
+		slow_data.last_success_us[representative][SLOW_MAX] = now;
+	if (freq_collection_mask & COLLECT_FREQ_BOOST) {
+		int boost = -1;
 
-		if ((freq_collection_mask & COLLECT_FREQ_BOOST) &&
-		    read_cpu_boost(tracked_idx, &boost) == 0)
-			slow_data.boost[tracked_idx] = boost;
+		if (read_cpu_boost(representative, &boost) == 0)
+			slow_data.last_success_us[representative][SLOW_BOOST] = slow_now_us();
+		slow_data.boost[representative] = boost;
 	}
-
-	if (freq_collection_mask & COLLECT_FREQ_GOVERNOR)
-		read_cpu_governor(tracked_idx, slow_data.governors[tracked_idx], 32);
+	if (freq_collection_mask & COLLECT_FREQ_GOVERNOR) {
+		slow_data.governors[representative][0] = '\0';
+		if (read_cpu_governor(representative,
+				      slow_data.governors[representative], 32) == 0)
+			slow_data.last_success_us[representative][SLOW_GOVERNOR] = slow_now_us();
+	}
 }
 
 static void slow_update_all(int tracked)
 {
+	slow_begin_sweep();
 	for (int i = 0; i < tracked; i++)
 		slow_refresh_cpu(i);
-
 	slow_cursor = 0;
 	slow_full_refresh_done = 1;
-}
-
-static void slow_update_budgeted(int tracked, int budget)
-{
-
-	if (tracked <= 0)
-		return;
-
-	if (!slow_full_refresh_done) {
-		slow_update_all(tracked);
-		return;
-	}
-
-	for (int refreshed = 0; refreshed < budget; refreshed++) {
-		if (slow_cursor >= tracked)
-			slow_cursor = 0;
-		slow_refresh_cpu(slow_cursor);
-		slow_cursor++;
-	}
-
+	/* Startup completes before measured sampling; start the timed sweep now. */
+	slow_begin_sweep();
 }
 
 static void maybe_run_slow_refresh(int tracked, unsigned long long delta_us)
 {
+	unsigned long long target_us = (unsigned long long)slow_target_sweep_ms * 1000ULL;
+	unsigned long long started;
+	unsigned long long budget_us;
 	int budget;
+	int idle_enabled;
 
-	if (!slow_layer_initialized)
+	slow_stats.work_us = 0;
+	slow_stats.refreshed_cpus = 0;
+	slow_stats.config_reads = 0;
+	slow_stats.time_budget_us = 0;
+	if (!slow_layer_initialized || tracked <= 0)
 		return;
-
-	if (!slow_full_refresh_done) {
-		slow_update_all(tracked);
-		if (is_cpuidle_enabled() && (cached_residency_mask || cached_usage_mask))
-			refresh_idle_state_disable_cache_budgeted(tracked);
-		return;
-	}
-
-	/*
-	 * Run the slow layer after the fast-path snapshot. This keeps the
-	 * interval-critical data collection deterministic while spreading
-	 * low-frequency configuration refreshes across samples.
-	 */
 	budget = slow_budget_for_interval(tracked, delta_us);
-	if (freq_collection_mask & COLLECT_FREQ_CONFIG)
-		slow_update_budgeted(tracked, budget);
-	if (is_cpuidle_enabled() && (cached_residency_mask || cached_usage_mask))
-		refresh_idle_state_disable_cache_budgeted(budget);
+	idle_enabled = is_cpuidle_enabled() && (cached_residency_mask || cached_usage_mask);
+	if (budget <= 0 || (!(freq_collection_mask & COLLECT_FREQ_CONFIG) && !idle_enabled))
+		return;
+
+	/* Spend at most 1% of the interval, bounded to 50 us .. 2 ms. */
+	budget_us = delta_us / 100;
+	if (budget_us < SLOW_MIN_WORK_US)
+		budget_us = SLOW_MIN_WORK_US;
+	if (budget_us > SLOW_MAX_WORK_US)
+		budget_us = SLOW_MAX_WORK_US;
+	slow_stats.time_budget_us = budget_us;
+	started = slow_now_us();
+	for (int refreshed = 0; refreshed < budget; refreshed++) {
+		unsigned long long before = slow_now_us();
+		unsigned long long elapsed = slow_age_us(before, started);
+		unsigned long long cost_ns;
+
+		if (refreshed && (elapsed >= budget_us ||
+		    slow_cost_ns / 1000 > budget_us - elapsed))
+			break;
+		slow_refresh_cpu(slow_cursor);
+		if (idle_enabled)
+			refresh_idle_state_disable_cache_budgeted(1);
+		slow_stats.refreshed_cpus++;
+		slow_budget_credit -= target_us;
+		if (++slow_cursor == tracked) {
+			slow_cursor = 0;
+			slow_stats.last_sweep_us = slow_age_us(slow_now_us(), slow_sweep_started_us);
+			slow_begin_sweep();
+		}
+		cost_ns = slow_age_us(slow_now_us(), before) * 1000;
+		slow_cost_ns = slow_cost_ns ? (slow_cost_ns * 7 + cost_ns) / 8 : cost_ns;
+	}
+	slow_stats.work_us = slow_age_us(slow_now_us(), started);
+}
+
+static int slow_field_fresh(int representative, int field, unsigned long long now)
+{
+	unsigned long long success = slow_data.last_success_us[representative][field];
+
+	return success && slow_age_us(now, success) <= slow_expiry_us;
+}
+
+static int slow_source_matches(int tracked_idx, int representative)
+{
+	return cpufreq_config_group_matches(tracked_idx, representative) &&
+		slow_data.read_generation[representative] ==
+		get_cpufreq_config_generation(representative);
+}
+
+void get_sample_cache_slow_stats(struct sample_cache_slow_stats *stats)
+{
+	unsigned long long now = (freq_collection_mask & COLLECT_FREQ_CONFIG) ?
+		slow_now_us() : 0;
+	const unsigned int masks[] = {
+		COLLECT_FREQ_MIN, COLLECT_FREQ_MAX, COLLECT_FREQ_GOVERNOR, COLLECT_FREQ_BOOST,
+	};
+
+	if (!stats)
+		return;
+	*stats = slow_stats;
+	stats->max_age_us = 0;
+	stats->stale_cpus = 0;
+	stats->unavailable_cpus = 0;
+	if (!(freq_collection_mask & COLLECT_FREQ_CONFIG))
+		return;
+	for (int i = 0; slow_layer_initialized && i < get_tracked_cpu_count(); i++) {
+		int representative = slow_data.representatives[i];
+		int stale = 0;
+		int unavailable = !slow_source_matches(i, representative);
+
+		for (int field = SLOW_MIN; field <= SLOW_BOOST; field++) {
+			unsigned long long success;
+			unsigned long long age;
+			int valid;
+
+			if (!(freq_collection_mask & masks[field]))
+				continue;
+			success = slow_data.last_success_us[representative][field];
+			age = success ? slow_age_us(now, success) : 0;
+			if (age > stats->max_age_us)
+				stats->max_age_us = age;
+			stale |= success && age > slow_expiry_us;
+			valid = field == SLOW_MIN ? slow_data.min_freq_valid[representative] :
+				field == SLOW_MAX ? slow_data.max_freq_valid[representative] :
+				field == SLOW_GOVERNOR ? !!slow_data.governors[representative][0] :
+				slow_data.boost[representative] >= 0;
+			unavailable |= !valid || !slow_field_fresh(representative, field, now);
+		}
+		stats->stale_cpus += stale;
+		stats->unavailable_cpus += unavailable;
+	}
 }
 
 /*
@@ -416,6 +533,9 @@ static void maybe_run_slow_refresh(int tracked, unsigned long long delta_us)
  */
 static void collect_freq_snapshot(struct sys_snapshot *snapshot, int tracked)
 {
+	unsigned long long now = (freq_collection_mask & COLLECT_FREQ_CONFIG) ?
+		slow_now_us() : 0;
+
 	snapshot->freqs = (freq_collection_mask &
 		(COLLECT_FREQ_CURRENT | COLLECT_FREQ_CONFIG)) ? freqs_pool : NULL;
 	snapshot->uncore_freq_hz = 0;
@@ -441,17 +561,26 @@ static void collect_freq_snapshot(struct sys_snapshot *snapshot, int tracked)
 			read_cpu_freq(i, &snapshot->freqs[i].cur_freq) == 0;
 		if (!snapshot->freqs[i].cur_freq_valid)
 			snapshot->freqs[i].cur_freq = 0;
-		if (slow_layer_initialized && slow_data.min_freq) {
-			snapshot->freqs[i].min_freq = slow_data.min_freq[i];
-			snapshot->freqs[i].min_freq_valid =
-				slow_data.min_freq_valid[i];
-			snapshot->freqs[i].max_freq = slow_data.max_freq[i];
-			snapshot->freqs[i].max_freq_valid =
-				slow_data.max_freq_valid[i];
-			snapshot->freqs[i].boost = slow_data.boost ? slow_data.boost[i] : -1;
+		if (slow_layer_initialized && slow_data.min_freq &&
+		    (freq_collection_mask & COLLECT_FREQ_CONFIG)) {
+			int representative = slow_data.representatives[i];
+			int matches = slow_source_matches(i, representative);
+
+			snapshot->freqs[i].min_freq = slow_data.min_freq[representative];
+			snapshot->freqs[i].min_freq_valid = matches &&
+				slow_data.min_freq_valid[representative] &&
+				slow_field_fresh(representative, SLOW_MIN, now);
+			snapshot->freqs[i].max_freq = slow_data.max_freq[representative];
+			snapshot->freqs[i].max_freq_valid = matches &&
+				slow_data.max_freq_valid[representative] &&
+				slow_field_fresh(representative, SLOW_MAX, now);
+			snapshot->freqs[i].boost = matches &&
+				slow_field_fresh(representative, SLOW_BOOST, now) ?
+				slow_data.boost[representative] : -1;
 			copy_cstring(snapshot->freqs[i].governor,
-				     sizeof(snapshot->freqs[i].governor),
-				     slow_data.governors[i]);
+				     sizeof(snapshot->freqs[i].governor), matches &&
+				     slow_field_fresh(representative, SLOW_GOVERNOR, now) ?
+				     slow_data.governors[representative] : "");
 		} else {
 			snapshot->freqs[i].min_freq = 0;
 			snapshot->freqs[i].min_freq_valid = 0;
@@ -754,6 +883,9 @@ void free_sample_cache(void)
 
 void collect_per_interval_data(struct sys_snapshot *snapshot, unsigned long long delta_us)
 {
+	slow_expiry_us = (unsigned long long)slow_target_sweep_ms * 2000ULL;
+	if (delta_us > slow_expiry_us / 2)
+		slow_expiry_us = delta_us <= ULLONG_MAX / 2 ? delta_us * 2 : ULLONG_MAX;
 	sysfs_counter_begin_sample();
 	cpufreq_begin_sample();
 	/* Collect fast-path data */

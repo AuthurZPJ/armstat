@@ -165,11 +165,14 @@ samples = json.loads(result.stdout)
 assert len(samples) == 3
 timings = re.findall(
     r"^Debug: interval (\d+) collect=(\d+\.\d+) ms "
-    r"aggregate=(\d+\.\d+) ms output=(\d+\.\d+) ms skipped=(\d+)$",
+    r"aggregate=(\d+\.\d+) ms output=(\d+\.\d+) ms skipped=(\d+) "
+    r"slow=(\d+\.\d+) ms budget=(\d+\.\d+) ms refreshed=(\d+) config_reads=(\d+) "
+    r"sweep=(pending|\d+\.\d+ ms) age=(\d+\.\d+) ms stale=(\d+) unavailable=(\d+)$",
     result.stderr, re.MULTILINE,
 )
 assert [int(row[0]) for row in timings] == [1, 2, 3], result.stderr
-assert int(timings[-1][-1]) == 0
+assert int(timings[-1][4]) == 0
+assert all(0 <= float(row[6]) <= 2 for row in timings), timings
 PY
 
 for early_option in --help --version --list; do
