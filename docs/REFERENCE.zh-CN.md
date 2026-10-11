@@ -31,6 +31,7 @@
 | 模块 | 负责的工作 |
 |---|---|
 | `app/armstat_cli.c`、`app/armstat.c` | 参数、启动、采样循环、信号、输出收尾与清理 |
+| `app/command.c` | 命令进程组、启动门、终端访问、信号转发与等待状态 |
 | `core/collector.c` | 编排原始快照，提供共享读取接口 |
 | `core/sample_cache.c` | 复用缓冲区、缓存读取、慢速刷新 |
 | `core/aggregator.c` | 区间增量、有效性、CPU/插槽聚合、提交下一轮基线 |
@@ -40,9 +41,20 @@
 
 采集阶段读取原始样本，聚合阶段计算区间增量、百分比和速率。序列化器使用一份独立记录，
 不持有指向可变快照数据的指针。
+原始诊断在一次快照后直接使用 `output/formatter_raw.c`，不经过区间聚合或显示
+字段筛选。
 
 首份快照建立基线。后续采样时刻锚定单调时钟，采集与输出耗时从下一次等待中
 扣除；错过整个周期时跳过该时刻，不突发追赶。公式始终使用实测 `interval_delta_us`。
+
+命令模式（`armstat [选项] -- command [参数...]`）先完成初始化，再在放行子进程
+执行前建立新基线。等待并回收命令后，结束快照形成一个区间，包含少量采集、启动
+和等待开销。命令独立成进程组，INT/TERM/HUP/QUIT 转发给该组，并保留前台终端
+访问及 shell 停止/继续行为。
+初始化失败时不执行命令。CPU 热插拔重置窗口、采集失败或输出失败返回 1，不声称
+得到有效样本。测量和输出成功时保留命令状态，包括非零退出：找不到命令为 127，
+其他 exec 失败为 126，信号终止为 128 加信号编号。统计仍覆盖所选 CPU/平台，
+不代表仅该进程的工作量。
 
 ### CPU 身份
 
@@ -132,6 +144,8 @@ PMU 采集与原始计数列显示分开控制。默认、`-S`、`-a`、`-s all`
 所选 N 个 CPU 需要 2N 个 perf FD。任一 CPU 组启动失败时，关闭全部自动计数器
 并隐藏 IPC，仅 `-d` 输出诊断。`-H ipc` 关闭自动采集，其他白名单只有选择
 IPC 才采集它。
+`-P`/`--no-perf` 禁止 PMU 初始化及 `--probe` 的 perf 测试；无论选项顺序，
+与显式 PMU/IPC 请求组合都报参数错误。Busy/Idle 来源规则保持不变。
 
 显式 `-I`、`-p` 或 IPC 字段/列组请求保留诊断与不可用列。`-I` 显示原始计数
 及 IPC，单独选择 IPC 不显示原始计数。自定义 `-p` 列表抑制自动 IPC；明确
@@ -188,8 +202,9 @@ JSON/CSV 与随附绘图加载器使用 **schema 第 9 版**。第 8 版 LPI 是
 cpu/core/numa/freq-config/idle-usage 列组启用 CPU 行，插槽字段 ID 与 pkg/package
 启用插槽行。仅属 CPU 的 `Min`、`Governor`、`lpi0_usage` 等别名也启用 CPU 行。
 单独 `-s cpu` 提供常用 CPU 动态指标且不带 SUM，保留显式隐藏请求；组合选择
-按请求的字段与层级输出。独立 PMU/IPC/能量请求保留所需 SUM 输出。展开 CPU 行
-时，现有 CPU 过滤规则仍抑制隐式聚合层级。首个 `-s` 替换之前的视图：
+按请求的字段与层级输出。独立 PMU/IPC/能量请求保留所需 SUM 输出。CPU 过滤后
+展开 CPU 行仍保留所选 CPU 的 SUM；`-s cpu` 快捷视图保持仅 CPU，插槽行按选择
+输出。全局计数器和平台传感器保留自身范围。首个 `-s` 替换之前的视图：
 `-a -s cpu` 使用 CPU 快捷视图，`-s cpu -a` 使用扩展动态视图。
 重复 `-s` 扩展白名单，包括 `-s all` 的完整选择，不会恢复被 `-H` 隐藏的无关
 列组，包括此前显式请求的 PMU、IPC 或能量字段。
@@ -215,7 +230,26 @@ Duration 描述测量窗口，三个时间戳表示同一结束时刻。导出�
 仅 SUM 输出采用连续表格，每个区间一行带时间的数据，适用于默认、`-S` 和只选
 汇总字段的 `-s`。其他视图保留区间标记、实测秒数和空行分隔。文本时间保留
 日期/时区，含三位小数。表头含单位，标签、选择或宽度变化时重印；行标识宽度
-适配稀疏 package ID。Quiet 模式省略标记、时间、表头和启动说明，机器字段 key 不变。
+适配稀疏 package ID。`-q`/`--quiet` 只隐藏启动说明；`--quiet-all` 还省略标记、
+时间和表头，机器字段 key 不变。
+
+文本输出到可取得有效高度和宽度的终端时，默认自动重复表头。仅 SUM 视图跨区间
+累计屏幕行预算；其他视图在每个区间的各段起始打印表头，较长的 CPU/package 表在区间内
+继续重印。每个区间读取终端尺寸以跟随窗口变化；按所选字段、PMU、行标识及仅
+SUM 视图的时间列宽估算换行，并预留两行屏幕空间。若放不下一个表头加一条数据，
+停止区间内及 SUM 滚动重印，仍保留启动、布局变化和各段起始的表头。
+这只控制表头位置，不裁列、分页或重绘屏幕。显式 `-N N` 覆盖此策略：正数每 N
+个样本重复，`-N 0` 仅在启动和布局变化
+时打印。管道、重定向及无法取得有效尺寸的终端默认采用后者；`--quiet-all` 始终省略区间表头。
+
+`-D`/`--Dump` 使用独立诊断文本格式，不睡眠，只收集一次后端可用的 proc/sysfs
+来源，忽略视图/字段选择；`-c` 仍限定 CPU。正文包含累计 procstat/schedstat、
+cpuidle 计数、CPU 配置、内存读取字节和当前传感器，并标明单位。
+Dump 无需切换来源即可读取 schedstat，并包含最多 16 个 cpuidle 状态，超出常规
+八列 LPI 的显示范围。不计算区间增量、速率、百分比或能量，也不打开 perf 事件。
+quiet 选项不隐藏诊断正文，`-N` 无效。
+Dump 与显式 `-i`/`-n`、命令、`--probe`、`-l`、非文本格式和显式 PMU/IPC
+请求冲突；单次区间采样改用 `-n 1`。
 
 ### JSON
 
@@ -249,9 +283,27 @@ PMU 列为 `pmu.<event>`，混合时为 `summary.pmu.<event>` / `cpu.pmu.<event>
 
 ### 输出生命周期
 
-已有输出目标只在初始化、基线采集与格式化缓冲区分配成功后打开。启动成功后
-逐步写入；后续失败保留已写前缀并返回非零状态。所有成功操作，包括 help/list/probe，
+`-o`/`--out` 指定统计文件。周期统计默认输出到 stdout，命令统计默认输出到
+stderr，子进程保留原有 stdout/stderr；默认统计会与子进程 stderr 共流，命令
+JSON/CSV 应写入文件。命令模式要求显式 `--`，拒绝显式 `-i`/`-n`、`-D`、
+`--probe` 和 `-l`。
+
+已有输出目标只在初始化与基线采集成功后打开；区间输出还要求格式化缓冲区分配
+成功。启动成功后逐步写入；后续失败保留已写前缀并返回非零状态。所有成功操作，
+包括 help/list/probe，
 都要求 stdout 刷新检查成功。SIGPIPE 按 EPIPE 处理，使资源清理后再退出。
+
+### CLI 迁移
+
+规范选项为 `-n`/`--num_iterations`、`-N`/`--header_iterations`、
+`-S`/`--Summary`、`-J`/`--Joules`、`-o`/`--out` 和 `-D`/`--Dump`。
+长选项区分大小写，旧拼写与 `-O` 不再接受。探测只用 `--probe`，`-P` 现禁用
+perf。`-q` 保留文本表格，原来无装饰的文本输出改用 `--quiet-all`。
+
+CLI 采用部分 turbostat 惯例，保留原生视图、格式和一秒区间。`Freq` 是 sysfs
+瞬时采样，不是 Avg_MHz/Bzy_MHz；默认 Busy 来自软件 procstat 记账，不是硬件
+C0。LPI 列与 Idle% 独立。功耗为 mW，`-J` 在旁边增加估算的区间焦耳数。README
+提供简短迁移表。
 
 ## 导出画图
 
@@ -261,8 +313,8 @@ PMU 列为 `pmu.<event>`，混合时为 `summary.pmu.<event>` / `cpu.pmu.<event>
 python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install matplotlib
-armstat -S -a -f json -O summary.json -i 1 -n 60
-armstat -a -f csv -O cpus.csv -i 1 -n 60
+armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --y power --y2 temp0
 armstat-plot-cpu cpus.csv --preset busy --top 8
 ```

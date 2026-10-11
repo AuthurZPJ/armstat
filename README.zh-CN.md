@@ -22,7 +22,7 @@ make
 ./armstat --probe
 ./armstat -i 1 -n 5
 ./armstat -a -i 1 -n 5
-./armstat -S -a -f json -O summary.json -i 1 -n 5
+./armstat -S -a -f json -o summary.json -i 1 -n 5
 sudo make install
 ```
 
@@ -46,14 +46,17 @@ sudo make install
 | `-s all` | 完整基础视图，包含插槽行、配置与 LPI usage |
 | 显式 `-s` | 所选列组或字段要求的层级 |
 
-第一条结果在一个完整区间之后输出。`-D` 测量一个区间后退出，`-n 0` 持续运行
-到收到中断。默认区间为一秒，接受 `0.000001`–`31536000` 秒。比率公式使用
+周期采样的第一条结果在一个完整区间之后输出。`-n 1` 测量一个区间后退出，
+`-n 0` 持续运行到收到中断。默认区间为一秒，接受 `0.000001`–`31536000` 秒。比率公式使用
 实测窗口，它可能与请求的区间时长不同。
 
 只输出 `SUM` 时，文本每个区间输出一行带时间的数据；其他视图按区间分块，
 标明时间与实测时长。文本时间保留日期和时区，小数精简为毫秒。
-表头带单位，例如 `CtxSw[/int]` 表示本区间内的计数。`-q` 省略启动说明、表头、
-时间和区间标记。`-N N` 每 N 个样本重复表头；布局变化也会触发新表头。
+表头带单位，例如 `CtxSw[/int]` 表示本区间内的计数。`-q` 只隐藏启动说明；
+`--quiet-all` 还省略表头、时间和区间标记。能取得有效尺寸的交互式终端默认按
+屏幕高度自动重复表头；
+`-N N` 改为每 N 个样本重复，`-N 0` 关闭自动重复。重定向、管道或无法取得有效
+尺寸的终端，默认只在启动和布局变化时打印表头，也可用 `-N N` 指定重复间隔。
 
 `SUM` 中的字段按各自规则汇总：
 
@@ -114,7 +117,9 @@ JSON 中为 `null`，CSV 中为空。没有 cpuidle 支持时，LPI 列隐藏，
 ## 常用命令
 
 ```bash
-armstat -D                              # 测量一个完整区间
+armstat -n 1                           # 测量一个完整区间
+armstat -D                              # 立即读取原始 proc/sysfs 快照
+armstat -q -- sleep 2                    # 围绕命令执行测量一个区间
 armstat -S -a -i 1 -n 10                # 扩展汇总字段
 armstat -a -c 0,1,4-7                   # 选择 CPU
 armstat -s cpu                         # 常用 CPU 指标，不带 SUM
@@ -127,14 +132,16 @@ armstat -s pkg_freq_mhz                 # 仅插槽频率
 armstat -s power,temp                   # 功耗与温度
 armstat -H temp                         # 隐藏温度
 armstat -H ipc                          # 不自动采集 IPC
+armstat -P                             # 禁用 perf PMU 采集
 armstat -s ipc                          # 仅汇总 IPC，明确报告采集问题
 armstat -I                             # 周期、指令与 IPC
 armstat -J                             # 区间能量
 ```
 
 `--cpu` 过滤采样，包括 PMU 资源和由 CPU 数据计算的汇总值；平台传感器和全局
-计数器仍保留各自范围。默认汇总基于所选 CPU。使用 CPU 过滤并显式展开 CPU
-行时，隐式聚合行会被抑制；需要过滤后的汇总时使用 `-S --cpu ...`。
+计数器仍保留各自范围。默认汇总基于所选 CPU，展开 CPU 行后仍保留，例如
+`-a -c 0-3`；插槽行继续按显式选择输出。`-s cpu` 仍仅输出 CPU 行；只需过滤后
+的汇总时使用 `-S --cpu ...`。
 
 `freq` 选择当前频率与 UncoreFreq，`idle` 选择 LPI 驻留及 Busy/Idle/IOWait。
 `freq-config`、`idle-usage` 分别选择 CPU 配置和状态进入速率。`-a` 省略这两组
@@ -148,7 +155,7 @@ CPU 字段 ID 请求 CPU 行；仅属 CPU 的别名，如 `Min`、`lpi0_usage`�
 `core`、`numa`、`freq-config`、`idle-usage` 自动启用
 CPU 行。单独 `-s cpu` 提供常用动态指标且不带 SUM，组合选择按请求的字段与
 层级输出；快捷默认不会重新启用显式 `-H` 排除的字段。独立 `-p`、`-I`、`-J`
-请求保留所需的 SUM 输出，仍受 CPU 过滤规则约束。
+请求保留所需的 SUM 输出。
 
 首个 `-s` 替换之前的视图设置：`-a -s cpu` 使用 CPU 快捷视图，`-s cpu -a`
 使用扩展动态视图。
@@ -161,6 +168,42 @@ CPU，以及不能输出任何行的选择都会在启动时失败。
 
 `armstat --list` 列出字段 ID、层级、单位、文本标签、JSON key、列组和 PMU
 名称。脚本中优先使用稳定字段 ID。`armstat --help` 列出完整选项。
+
+### 命令模式与原始快照
+
+`armstat [选项] -- command [参数...]` 围绕命令执行测量一个区间，包含少量采集、
+启动和等待开销。统计覆盖所选 CPU 和平台来源，不限于该命令的进程。默认将
+统计写到 stderr，命令保留原有
+stdout 和 stderr；JSON/CSV 建议用 `-o` 写文件，避免混入命令的 stderr。
+命令模式不能与显式 `-i`、`-n`、`-D`、`--probe` 或 `-l` 组合。
+
+初始化失败时不执行命令。测量成功后，即使命令失败也输出统计，并返回命令的
+退出码：找不到命令为 127，其他 exec 失败为 126，被信号终止为 128 加信号编号。
+监控或输出失败返回 1。INT、TERM、HUP、QUIT 转发给命令的进程组，保留前台
+终端访问和 shell 作业控制。
+
+`-D`/`--Dump` 不等待区间，立即输出一份诊断文本，包含累计计数器和当前传感器
+读数并标明单位，不计算增量或利用率。`-c` 限定 CPU，视图和字段选择不限制快照。
+它不能与命令、显式 `-i`/`-n`、`--probe`、`-l`、非文本格式或显式 PMU/IPC
+请求组合；`-q` 和 `-N` 不改变诊断正文。
+
+### 从 turbostat 迁移
+
+规范选项为 `-n`/`--num_iterations`、`-N`/`--header_iterations`、
+`-S`/`--Summary`、`-J`/`--Joules`、`-o`/`--out` 和 `-D`/`--Dump`。
+长选项区分大小写，旧拼写和 `-O` 不再接受。`-P`/`--no-perf` 禁用 PMU 采集
+及 `--probe` 的 perf 测试，与显式 PMU/IPC 请求冲突；探测只用 `--probe`。
+Busy/Idle 来源选择规则保持不变。
+
+armstat 保留自己的列组、格式和默认一秒区间，并非完全兼容的替代品。相近字段
+应按以下口径解读：
+
+| turbostat 概念 | armstat 含义 |
+|---|---|
+| `Avg_MHz` / `Bzy_MHz` | `Freq` 是当前 sysfs 采样值，不是区间平均或忙时频率 |
+| 硬件 C0 `Busy%` | 默认 `Busy%` 来自软件 `/proc/stat` 记账 |
+| 空闲驻留 | `LPI-N` 是独立 cpuidle 区间统计，合计无需等于 `Idle%` |
+| 功率 W / 能量 J | `Power` 使用 mW；`-J` 在功耗旁增加估算的区间 `Energy[J]` |
 
 ### PMU
 
@@ -189,14 +232,14 @@ IPC，不增加原始计数列或 CPU 行。所选 N 个 CPU 需要 2N 个 perf 
 ## 导出与绘图
 
 ```bash
-armstat -S -a -f json -O summary.json -i 1 -n 60
-armstat -a -f csv -O cpus.csv -i 1 -n 60
+armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --preset freq
 armstat-plot-cpu cpus.csv --preset busy --top 8
 armstat-plot-cpu cpus.csv --group-by node --y busy
 ```
 
-`-O` 是 `-o` 的别名。JSON 是区间对象数组，CSV 按选择输出汇总、插槽、CPU
+`-o`/`--out` 将统计写入文件。JSON 是区间对象数组，CSV 按选择输出汇总、插槽、CPU
 或混合行。两者都含 `schema_version=9`、区间编号、实测时长和时间戳。随附
 绘图加载器只接受第 9 版。
 默认 JSON 只包含 `summary`，默认 CSV 使用 `Scope=SUM` 的汇总布局；显式选择

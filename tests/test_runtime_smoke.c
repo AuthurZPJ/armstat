@@ -109,7 +109,7 @@ static void reset_test_state(void)
 	set_text_quiet(0);
 	set_section_summary_mode(0);
 	set_section_default_summary_output(1);
-	set_text_header_interval(0);
+	set_text_header_interval(TEXT_HEADER_AUTO);
 	enable_pmu(0);
 	set_busy_source_mode(BUSY_SOURCE_AUTO);
 	set_cpu_inventory_filter(NULL);
@@ -468,7 +468,214 @@ static void test_pmu_event_parse_validation(void)
 	assert(resolve_pmu_event("0x11junk", &type, &config) < 0);
 }
 
-static void test_quiet_modes_suppress_startup_header(void)
+struct cli_error_args {
+	int argc;
+	char **argv;
+	struct armstat_options opts;
+	int result;
+};
+
+static void emit_cli_parse(void *arg)
+{
+	struct cli_error_args *ctx = arg;
+
+	ctx->result = parse_test_args_result(ctx->argc, ctx->argv, &ctx->opts);
+}
+
+static void emit_cli_parse_without_help(void *arg)
+{
+	char *help = capture_stdout(emit_cli_parse, arg);
+
+	free(help);
+}
+
+static int test_argc(char **argv)
+{
+	int argc = 0;
+
+	while (argv[argc])
+		argc++;
+	return argc;
+}
+
+static struct armstat_options assert_cli_error(char **argv, const char *message)
+{
+	struct cli_error_args args = { .argc = test_argc(argv), .argv = argv };
+	char *error = capture_stderr(emit_cli_parse_without_help, &args);
+
+	assert(args.result < 0);
+	if (message)
+		assert(strstr(error, message) != NULL);
+	free(error);
+	return args.opts;
+}
+
+static void test_canonical_long_options_replace_old_spellings(void)
+{
+	char *canonical[] = {
+		"armstat", "--num_iterations", "9", "--header_iterations", "2",
+		"--Summary", "--Joules", "--out", "selected-output", "--no-perf", NULL,
+	};
+	char *old[][4] = {
+		{"armstat", "--num-iterations", "1", NULL},
+		{"armstat", "--header-iterations", "1", NULL},
+		{"armstat", "--summary", NULL},
+		{"armstat", "--joules", NULL},
+		{"armstat", "--output", "output", NULL},
+		{"armstat", "--export", "output", NULL},
+		{"armstat", "--dump", NULL},
+		{"armstat", "-O", "output", NULL},
+	};
+	char *dump[] = {"armstat", "--Dump", NULL};
+	char *probe_before[] = {"armstat", "--probe", "-P", NULL};
+	char *probe_after[] = {"armstat", "-P", "--probe", NULL};
+	char *source[] = {"armstat", "-P", "--busy-source", "task-clock", NULL};
+	struct armstat_options opts = parse_test_args(test_argc(canonical), canonical);
+
+	assert(opts.iterations == 9 && opts.header_interval == 2);
+	assert(opts.summary_mode == 1 && opts.no_perf == 1);
+	assert(strcmp(opts.output_file, "selected-output") == 0);
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "power_mw"));
+	assert(scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "energy_joules"));
+	assert(opts.command_argv == NULL);
+	for (int i = 0; i < ARRAY_SIZE(old); i++)
+		assert_cli_error(old[i], NULL);
+
+	/* This verifies raw-mode selection only; raw serialization has its own tests. */
+	opts = parse_test_args(test_argc(dump), dump);
+	assert(opts.dump_raw == 1 && opts.pmu_events == NULL && !opts.pmu_auto);
+	opts = parse_test_args(test_argc(probe_before), probe_before);
+	assert(opts.probe_only == 1 && opts.no_perf == 1);
+	opts = parse_test_args(test_argc(probe_after), probe_after);
+	assert(opts.probe_only == 1 && opts.no_perf == 1);
+	opts = parse_test_args(test_argc(source), source);
+	assert(opts.no_perf == 1 && get_busy_source_mode() == BUSY_SOURCE_TASK_CLOCK);
+}
+
+static void test_no_perf_rejects_explicit_requests_in_both_orders(void)
+{
+	char *requests[][8] = {
+		{"-I", NULL},
+		{"-p", "cycles", NULL},
+		{"-s", "ipc", NULL},
+		{"-s", "IPC", NULL},
+		{"-s", "cpu_ipc", NULL},
+		{"-s", "pmu", NULL},
+		{"-s", "all,ipc", NULL},
+		{"-s", "ipc", "-a", NULL},
+		{"-I", "-H", "ipc,pmu", NULL},
+		{"-s", "ipc", "-H", "ipc", "-s", "freq", NULL},
+	};
+
+	for (int i = 0; i < ARRAY_SIZE(requests); i++) {
+		for (int first = 0; first < 2; first++) {
+			char *argv[12] = {"armstat"};
+			int argc = 1;
+
+			if (first)
+				argv[argc++] = "-P";
+			for (int j = 0; requests[i][j]; j++)
+				argv[argc++] = requests[i][j];
+			if (!first)
+				argv[argc++] = "-P";
+			assert_cli_error(argv, "--no-perf cannot be combined");
+		}
+	}
+}
+
+static void test_raw_dump_rejects_interval_and_perf_options(void)
+{
+	char *conflicts[][4] = {
+		{"-i", "1", NULL},
+		{"-n", "0", NULL},
+		{"--probe", NULL},
+		{"-l", NULL},
+		{"-f", "json", NULL},
+		{"-f", "csv", NULL},
+		{"-I", NULL},
+		{"-p", "cycles", NULL},
+		{"-s", "ipc", NULL},
+	};
+	char *valid[][6] = {
+		{"armstat", "-D", "-P", NULL},
+		{"armstat", "-D", "-s", "all", NULL},
+		{"armstat", "-D", "-N", "0", "-q", NULL},
+	};
+
+	for (int i = 0; i < ARRAY_SIZE(conflicts); i++) {
+		for (int first = 0; first < 2; first++) {
+			char *argv[8] = {"armstat"};
+			int argc = 1;
+
+			if (first)
+				argv[argc++] = "-D";
+			for (int j = 0; conflicts[i][j]; j++)
+				argv[argc++] = conflicts[i][j];
+			if (!first)
+				argv[argc++] = "-D";
+			assert_cli_error(argv, "--Dump requires text");
+		}
+	}
+	for (int i = 0; i < ARRAY_SIZE(valid); i++) {
+		struct armstat_options opts = parse_test_args(test_argc(valid[i]), valid[i]);
+
+		assert(opts.dump_raw == 1 && opts.pmu_events == NULL && !opts.pmu_auto);
+	}
+}
+
+static void test_command_separator_preserves_arguments_and_rejects_conflicts(void)
+{
+	char *command[] = {
+		"armstat", "-P", "--", "printf", "-i", "1", "--num_iterations",
+		"7", "--quiet-all", "--", NULL,
+	};
+	char *dash_file[] = {"armstat", "-o", "--", NULL};
+	char *dash_file_command[] = {"armstat", "-o", "--", "--", "printf", NULL};
+	char *headers[] = {"armstat", "-N", "0", "-P", "--", "true", NULL};
+	char *bare[] = {"armstat", "printf", "-n", "7", NULL};
+	char *empty[] = {"armstat", "--", NULL};
+	char *empty_name[] = {"armstat", "--", "", NULL};
+	char *conflicts[][4] = {
+		{"-i", "1", NULL},
+		{"--interval=1", NULL},
+		{"-n", "0", NULL},
+		{"--num_iterations", "0", NULL},
+		{"-D", NULL},
+		{"--Dump", NULL},
+		{"--probe", NULL},
+		{"-l", NULL},
+	};
+	struct armstat_options opts = parse_test_args(test_argc(command), command);
+
+	assert(opts.command_argv == command + 3);
+	for (int i = 3; command[i]; i++)
+		assert(opts.command_argv[i - 3] == command[i]);
+	assert(opts.interval == default_options.interval && opts.iterations == 0);
+	assert(opts.quiet_all == 0 && opts.no_perf == 1);
+	opts = parse_test_args(test_argc(dash_file), dash_file);
+	assert(strcmp(opts.output_file, "--") == 0 && opts.command_argv == NULL);
+	opts = parse_test_args(test_argc(dash_file_command), dash_file_command);
+	assert(strcmp(opts.output_file, "--") == 0);
+	assert(opts.command_argv == dash_file_command + 4);
+	opts = parse_test_args(test_argc(headers), headers);
+	assert(opts.header_interval == 0 && opts.command_argv == headers + 5);
+	opts = assert_cli_error(bare, "Use -- before a command");
+	assert(opts.iterations == 0);
+	assert_cli_error(empty, "-- requires a command");
+	assert_cli_error(empty_name, "-- requires a command");
+	for (int i = 0; i < ARRAY_SIZE(conflicts); i++) {
+		char *argv[8] = {"armstat"};
+		int argc = 1;
+
+		for (int j = 0; conflicts[i][j]; j++)
+			argv[argc++] = conflicts[i][j];
+		argv[argc++] = "--";
+		argv[argc++] = "true";
+		assert_cli_error(argv, "command mode cannot be combined");
+	}
+}
+
+static void test_quiet_and_quiet_all_have_distinct_text_output(void)
 {
 	struct armstat_options opts;
 	struct interval_record rec;
@@ -480,15 +687,18 @@ static void test_quiet_modes_suppress_startup_header(void)
 	struct header_args hargs;
 	char *output;
 	char *quiet_argv[] = {"armstat", "-q", NULL};
-	char *dump_argv[] = {"armstat", "-D", NULL};
 	char *quiet_header_argv[] = {"armstat", "-q", "-N", "1", NULL};
-	char *dump_header_argv[] = {"armstat", "-D", "-N", "1", NULL};
-	char *quiet_dump_argv[] = {"armstat", "-D", "-q", NULL};
+	char *quiet_all[] = {"armstat", "--quiet-all", NULL};
+	char *quiet_all_then_quiet[] = {"armstat", "--quiet-all", "-q", NULL};
+	char *quiet_then_quiet_all[] = {"armstat", "-q", "--quiet-all", NULL};
+	char **fully_quiet[] = {quiet_all, quiet_all_then_quiet, quiet_then_quiet_all};
+	int counts[] = {2, 3, 3};
 
 	hargs.opts = &opts;
 	hargs.interval = 1.0;
 
 	assert(parse_test_args_result(2, quiet_argv, &opts) == 0);
+	assert(opts.quiet == 1 && opts.quiet_all == 0);
 	output = capture_stdout(emit_interval_header, &hargs);
 	assert(strcmp(output, "") == 0);
 	free(output);
@@ -496,37 +706,34 @@ static void test_quiet_modes_suppress_startup_header(void)
 	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
 	args.rec = &rec;
 	output = capture_stdout(emit_text_record, &args);
-	assert(strstr(output, "CPU") == NULL);
-	assert(strstr(output, "Freq[MHz]") == NULL);
-	assert(strstr(output, "armstat") == NULL);
-	free(output);
-
-	assert(parse_test_args_result(2, dump_argv, &opts) == 0);
-	assert(opts.dump_once == 1);
-	assert(opts.quiet == 0);
-	output = capture_stdout(emit_interval_header, &hargs);
-	assert(strstr(output, "armstat - ARM Server Performance Monitor") != NULL);
-	free(output);
-	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
-	args.rec = &rec;
-	output = capture_stdout(emit_text_record, &args);
+	assert(strstr(output, "Timestamp") != NULL);
 	assert(strstr(output, "Freq[MHz]") != NULL);
+	assert(strstr(output, ".123+00:00") != NULL);
+	assert(strstr(output, "armstat") == NULL);
 	free(output);
 
 	assert(parse_test_args_result(4, quiet_header_argv, &opts) == 0);
 	output = capture_stdout(emit_interval_header, &hargs);
 	assert(strcmp(output, "") == 0);
 	free(output);
-
-	assert(parse_test_args_result(4, dump_header_argv, &opts) == 0);
-	output = capture_stdout(emit_interval_header, &hargs);
-	assert(strstr(output, "armstat - ARM Server Performance Monitor") != NULL);
+	output = capture_stdout(emit_two_text_records, &args);
+	assert(count_output_matches(output, "Timestamp") == 2);
+	assert(count_output_matches(output, ".123+00:00") == 2);
 	free(output);
 
-	assert(parse_test_args_result(3, quiet_dump_argv, &opts) == 0);
-	output = capture_stdout(emit_interval_header, &hargs);
-	assert(strcmp(output, "") == 0);
-	free(output);
+	for (int i = 0; i < ARRAY_SIZE(fully_quiet); i++) {
+		assert(parse_test_args_result(counts[i], fully_quiet[i], &opts) == 0);
+		assert(opts.quiet == 1 && opts.quiet_all == 1);
+		output = capture_stdout(emit_interval_header, &hargs);
+		assert(output[0] == '\0');
+		free(output);
+		output = capture_stdout(emit_text_record, &args);
+		assert(strstr(output, "Timestamp") == NULL);
+		assert(strstr(output, "Freq[MHz]") == NULL);
+		assert(strstr(output, ".123+00:00") == NULL);
+		assert(strncmp(output, "SUM", 3) == 0);
+		free(output);
+	}
 }
 
 static void test_interval_header_preserves_subsecond_precision(void)
@@ -765,6 +972,54 @@ static void test_unselected_ipc_does_not_initialize_perf(void)
 		assert(diagnostics[0] == '\0');
 		free(diagnostics);
 	}
+}
+
+static void seed_pmu_metadata_without_opening_counters(void)
+{
+	close_pmu_events();
+	assert(set_cpu_inventory_filter("1023") == 0);
+	seed_single_cpu_inventory();
+	assert(get_tracked_cpu_count() == 0);
+	set_pmu_diagnostics(0);
+	assert(init_pmu_events("cycles,instructions") < 0);
+	assert(get_pmu_event_count() == 2);
+	assert(!pmu_is_active());
+	assert(set_cpu_inventory_filter(NULL) == 0);
+	seed_single_cpu_inventory();
+}
+
+static void test_no_perf_and_raw_dump_clear_metadata_without_initialization(void)
+{
+	char *no_perf[] = {"armstat", "-P", NULL};
+	char *no_perf_probe[] = {"armstat", "--probe", "-P", NULL};
+	char *raw_dump[] = {"armstat", "-D", NULL};
+	char **modes[] = {no_perf, no_perf_probe, raw_dump};
+
+	for (int i = 0; i < ARRAY_SIZE(modes); i++) {
+		struct armstat_options opts;
+		int result;
+		char *diagnostics;
+
+		assert(parse_test_args_result(test_argc(modes[i]), modes[i], &opts) == 0);
+		seed_pmu_metadata_without_opening_counters();
+		/* The startup API must also defend callers that have not applied defaults. */
+		diagnostics = capture_pmu_startup(&opts, -1, &result);
+		assert(result == 0 && synthetic_pmu_init_calls == 0);
+		assert(diagnostics[0] == '\0' && get_pmu_event_count() == 0);
+		free(diagnostics);
+
+		seed_pmu_metadata_without_opening_counters();
+		assert(apply_default_pmu_events(&opts) == 0);
+		assert(opts.pmu_auto == 0 && opts.pmu_events == NULL);
+		assert(get_pmu_event_count() == 0 && rebuild_pmu_events() == 0);
+		assert(!scope_has_enabled_field(FIELD_SCOPE_SYSTEM, "ipc"));
+		assert(!scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_ipc"));
+		diagnostics = capture_pmu_startup(&opts, -1, &result);
+		assert(result == 0 && synthetic_pmu_init_calls == 0);
+		assert(diagnostics[0] == '\0');
+		free(diagnostics);
+	}
+	set_pmu_diagnostics(1);
 }
 
 static void test_explicit_pmu_failure_keeps_requested_columns(void)
@@ -1112,6 +1367,71 @@ static void test_cpu_shortcut_retains_hidden_fields_and_independent_requests(voi
 	parse_test_args(4, narrow);
 	assert(section_emit_default_summary() == 0);
 	assert(scope_has_enabled_field(FIELD_SCOPE_CPU, "cpu_busy_percent"));
+}
+
+static void test_cpu_filter_preserves_selected_scopes_in_all_serializers(void)
+{
+	char *live[] = {"armstat", "-a", "-c", "0", "-P", NULL};
+	char *full[] = {"armstat", "-s", "all", "-c", "0", "-P", NULL};
+	char *cpu[] = {"armstat", "-s", "cpu", "-c", "0", "-P", NULL};
+	char *package[] = {"armstat", "-s", "pkg", "-c", "0", "-P", NULL};
+	char *summary[] = {"armstat", "-s", "sysstat", "-c", "0", "-P", NULL};
+	struct {
+		char **argv;
+		int summary;
+		int package;
+		int cpu;
+	} cases[] = {
+		{live, 1, 0, 1},
+		{full, 1, 1, 1},
+		{cpu, 0, 0, 1},
+		{package, 0, 1, 0},
+		{summary, 1, 0, 0},
+	};
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[1];
+	struct cpu_freq_info freqs[1];
+	struct serializer_args args;
+
+	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	rec.package_count = 1;
+	rec.packages[0].package_id = 0;
+	rec.packages[0].cpu_count = 1;
+	rec.packages[0].avg_mhz = 2200;
+	args.rec = &rec;
+	for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+		char *output;
+
+		parse_test_args(test_argc(cases[i].argv), cases[i].argv);
+		assert(section_emit_default_summary() == cases[i].summary);
+		assert(section_emit_package() == cases[i].package);
+		assert(section_emit_cpu() == cases[i].cpu);
+		reset_machine_state();
+		output = capture_stdout(emit_json_record, &args);
+		assert((strstr(output, "\"summary\": {") != NULL) == cases[i].summary);
+		assert((strstr(output, "\"packages\": [") != NULL) == cases[i].package);
+		assert((strstr(output, "\"cpus\": [") != NULL) == cases[i].cpu);
+		free(output);
+
+		reset_machine_state();
+		output = capture_stdout(emit_csv_mixed_scope, &args);
+		assert((strstr(output, ",SUM,") != NULL) == cases[i].summary);
+		if (cases[i].summary + cases[i].package + cases[i].cpu > 1) {
+			assert((strstr(output, ",PKG,") != NULL) == cases[i].package);
+			assert((strstr(output, ",CPU,") != NULL) == cases[i].cpu);
+		}
+		assert_csv_rows_are_rectangular(output);
+		free(output);
+
+		output = capture_stdout(emit_text_record, &args);
+		assert((strstr(output, "SUM") != NULL) == cases[i].summary);
+		assert((strstr(output, "Pkg0") != NULL) == cases[i].package);
+		assert((strstr(output, "\n0    ") != NULL) == cases[i].cpu);
+		free(output);
+	}
+	reset_machine_state();
 }
 
 static void test_mixed_scope_csv_serializer_uses_scoped_headers(void)
@@ -2313,15 +2633,98 @@ static void test_lpi_records_preserve_independent_states(void)
 	free_interval_record(rec);
 }
 
-int main(void)
+/* Driven by test_text_terminal.py through a real PTY or a redirected pipe. */
+static int run_text_fixture(int argc, char **argv)
+{
+	struct interval_record rec;
+	struct sys_snapshot raw;
+	struct interval_stats stats;
+	struct cpu_row cpu_rows[128];
+	struct cpu_freq_info freqs[1];
+	struct cpu_inventory_seed cpus[128];
+	struct armstat_options opts;
+	char command[32];
+	int count;
+	int tracked;
+
+	if (argc < 2)
+		return 2;
+	count = atoi(argv[1]);
+	if (count < 1 || count > ARRAY_SIZE(cpu_rows))
+		return 2;
+	opts = parse_test_args(argc - 1, argv + 1);
+	make_synthetic_record(&rec, &raw, &stats, cpu_rows, freqs);
+	if (opts.pmu_events && !opts.pmu_auto) {
+		set_pmu_diagnostics(0);
+		(void)init_pmu_events(opts.pmu_events);
+		rec.pmu_event_count = get_pmu_event_count();
+	}
+	for (int i = 0; i < count; i++)
+		cpus[i] = (struct cpu_inventory_seed){i, 1, 1, i, i, 0};
+	assert(cpu_inventory_seed(cpus, count) == 0);
+	tracked = get_tracked_cpu_count();
+	for (int i = 0; i < tracked; i++) {
+		int cpu_id = get_cpu_id_by_tracked_idx(i);
+
+		cpu_rows[i] = cpu_rows[0];
+		cpu_rows[i].tracked_idx = i;
+		cpu_rows[i].freq.cpu_id = cpu_id;
+		rec.packages[i].package_id = cpu_id;
+		rec.packages[i].cpu_count = 1;
+		rec.packages[i].avg_mhz = 2200;
+		rec.packages[i].idle_percent = 98;
+		rec.packages[i].busy_percent = 2;
+	}
+	rec.cpu_row_count = tracked;
+	rec.package_count = tracked;
+	reset_machine_state();
+	while (fgets(command, sizeof(command), stdin)) {
+		if (strcmp(command, "quit\n") == 0)
+			break;
+		if (strcmp(command, "emit\n") != 0)
+			return 2;
+		switch (opts.format) {
+		case FORMAT_TEXT:
+			serialize_text(&rec);
+			break;
+		case FORMAT_CSV:
+			assert(serialize_csv(&rec) == 0);
+			break;
+		case FORMAT_JSON:
+			serialize_json(&rec);
+			break;
+		default:
+			return 2;
+		}
+		assert(fflush(stdout) == 0);
+		fputs("ready\n", stderr);
+		assert(fflush(stderr) == 0);
+		rec.interval++;
+		rec.timestamp++;
+		rec.timestamp_ns += 1000000000ULL;
+	}
+	if (opts.format == FORMAT_JSON)
+		close_machine_json();
+	close_pmu_events();
+	return 0;
+}
+
+int main(int argc, char **argv)
 {
 	assert(setenv("TZ", "UTC0", 1) == 0);
 	tzset();
+	if (argc > 1 && strcmp(argv[1], "--text-fixture") == 0)
+		return run_text_fixture(argc - 1, argv + 1);
+	assert(argc == 1);
 	test_invalid_interval_args_fail();
 	test_cpu_filter_parse_validation();
 	test_column_list_parse_validation();
 	test_pmu_event_parse_validation();
-	test_quiet_modes_suppress_startup_header();
+	test_canonical_long_options_replace_old_spellings();
+	test_no_perf_rejects_explicit_requests_in_both_orders();
+	test_raw_dump_rejects_interval_and_perf_options();
+	test_command_separator_preserves_arguments_and_rejects_conflicts();
+	test_quiet_and_quiet_all_have_distinct_text_output();
 	test_interval_header_preserves_subsecond_precision();
 	test_list_counters_includes_full_pmu_catalog();
 	test_schedstat_invalid_falls_back_to_procstat();
@@ -2329,6 +2732,7 @@ int main(void)
 	test_automatic_ipc_success_preserves_selected_scopes();
 	test_automatic_ipc_failure_hides_fields_and_clears_events();
 	test_unselected_ipc_does_not_initialize_perf();
+	test_no_perf_and_raw_dump_clear_metadata_without_initialization();
 	test_explicit_pmu_failure_keeps_requested_columns();
 	test_explicit_ipc_event_merge_and_hide_order();
 	test_parse_summary_all_keeps_base_groups_only();
@@ -2340,6 +2744,7 @@ int main(void)
 	test_parse_probe_and_busy_source();
 	test_live_and_full_selection_have_distinct_data_surfaces();
 	test_cpu_shortcut_retains_hidden_fields_and_independent_requests();
+	test_cpu_filter_preserves_selected_scopes_in_all_serializers();
 	test_mixed_scope_csv_serializer_uses_scoped_headers();
 	test_summary_json_serializer_emits_schema_and_summary_only();
 	test_unavailable_sensor_values_are_not_fake_zeroes();

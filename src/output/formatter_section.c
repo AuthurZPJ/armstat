@@ -14,7 +14,6 @@
 
 #include "formatter_section.h"
 #include "formatter.h"
-#include "cpu_inventory.h"
 
 /* Section emission state, configured by the CLI (-S / -a). */
 static int summary_mode = 0;
@@ -47,13 +46,7 @@ int section_emit_package(void)
 	/*
 	 * Package aggregation rows are opt-in via -s all, -s package, or an exact
 	 * package field. Keep their row switch separate from CPU package identity.
-	 *
-	 * With --cpu, avoid implicitly mixing filtered CPU rows with aggregate
-	 * rows. An explicit package-only selection remains useful and is computed
-	 * over the filtered tracked CPU set.
 	 */
-	if (cpu_inventory_filter_is_active() && section_emit_cpu())
-		return 0;
 	return package_output && show_package &&
 		any_fields_enabled(FIELD_SCOPE_PACKAGE);
 }
@@ -63,7 +56,7 @@ int section_emit_default_summary(void)
 	if (summary_mode || !default_summary_output ||
 	    (!any_fields_enabled(FIELD_SCOPE_SYSTEM) && !show_pmu))
 		return 0;
-	return !cpu_inventory_filter_is_active() || !section_emit_cpu();
+	return 1;
 }
 
 int section_emit_mixed_csv(void)

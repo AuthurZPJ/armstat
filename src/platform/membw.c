@@ -95,7 +95,7 @@ int init_mem_bw(void)
 	mem_bw_support = scan_mem_bw_counters();
 
 	if (mem_bw_support && mem_bw_read_path[0])
-		mem_bw_read_fd = open(mem_bw_read_path, O_RDONLY);
+		mem_bw_read_fd = open(mem_bw_read_path, O_RDONLY | O_CLOEXEC);
 
 	return mem_bw_support ? 0 : -1;
 }
@@ -125,7 +125,7 @@ int read_mem_bw_raw_checked(unsigned long long *counter)
 
 	if (mem_bw_read_path[0] &&
 	    sysfs_read_ull_checked(mem_bw_read_path, &total) == 0) {
-		mem_bw_read_fd = open(mem_bw_read_path, O_RDONLY);
+		mem_bw_read_fd = open(mem_bw_read_path, O_RDONLY | O_CLOEXEC);
 		*counter = total;
 		return 0;
 	}

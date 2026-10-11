@@ -117,7 +117,7 @@ static int get_state_time_fd(int tracked_idx, int state)
 	snprintf(sub, sizeof(sub), "cpuidle/state%d/time", state);
 	if (cpu_sysfs_path(cpu_id, sub, path, sizeof(path)) < 0)
 		return -1;
-	fd = open(path, O_RDONLY);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (fd >= 0) {
 		state_time_fds[idx] = fd;
 		state_time_fd_open_count++;

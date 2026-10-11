@@ -18,6 +18,7 @@
 #include <time.h>
 #include <limits.h>
 #include <sys/resource.h>
+#include <fcntl.h>
 
 #include "armstat_cli.h"
 #include "collector.h"
@@ -32,6 +33,9 @@
 #include "sysstat.h"
 #include "idle_backend.h"
 #include "sampling_deadline.h"
+#include "command.h"
+#include "formatter_raw.h"
+#include "sample_cache.h"
 
 #define PROBE_SCHEMA_VERSION 1
 
@@ -172,7 +176,7 @@ static int run_probe(struct armstat_options *opts)
 
 	idle_backend_name = probe_idle_backend_name();
 
-	if (probe_pmu_event("cycles") == 0) {
+	if (!opts->no_perf && probe_pmu_event("cycles") == 0) {
 		pmu_available = 1;
 	}
 
@@ -233,7 +237,9 @@ static int run_probe(struct armstat_options *opts)
 		printf("  mem_bw_note: ambiguous; expected exactly one "
 		       "mem_bytes_read source\n");
 	printf("  pmu_cycles: %s\n", probe_yes_no(pmu_available));
-	if (!pmu_available)
+	if (opts->no_perf)
+		printf("  pmu_note: disabled by --no-perf; perf was not probed\n");
+	else if (!pmu_available)
 		printf("  pmu_note: unavailable; check perf permissions, kernel PMU "
 		       "support, and perf_event_open(2)\n");
 	if (finalize_stdout_output() < 0)
@@ -254,6 +260,26 @@ out:
 static int init_modules(struct armstat_options *opts, struct sys_snapshot *snapshot)
 {
 	int original_priority;
+
+	set_diagnostic_counter_collection(opts->dump_raw);
+
+	/* Diagnostic snapshots collect all available proc/sysfs sources. */
+	if (opts->dump_raw) {
+		clear_columns();
+		set_section_summary_mode(0);
+		set_section_default_summary_output(1);
+		enable_cpu(1);
+		enable_freq(1);
+		enable_freq_config(1);
+		enable_idle(1);
+		enable_idle_usage(1);
+		enable_iowait(1);
+		enable_cpuidle(1);
+		enable_power(1);
+		enable_temp(1);
+		enable_sysstat(1);
+		enable_membw(1);
+	}
 
 	/* Initialize subsystems */
 	if (opts->debug) fprintf(stderr, "Initializing collector...\n");
@@ -295,7 +321,7 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 
 	initialize_selected_pmu(opts, init_pmu_events);
 
-	if (!section_has_output()) {
+	if (!opts->dump_raw && !section_has_output()) {
 		fprintf(stderr,
 			"Error: selected columns cannot produce data in this mode/platform\n"
 			"  Use --list for field scopes and --probe for platform capabilities.\n");
@@ -322,8 +348,10 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	 */
 	#define SAMPLING_NICE_VALUE (-20)  /* highest normal nice priority */
 
-	original_priority = boost_sampling_priority(SAMPLING_NICE_VALUE);
-	if (opts->debug) {
+	original_priority = -21;
+	if (!opts->command_argv && !opts->dump_raw)
+		original_priority = boost_sampling_priority(SAMPLING_NICE_VALUE);
+	if (opts->debug && !opts->command_argv && !opts->dump_raw) {
 		if (original_priority < -20)
 			fprintf(stderr, "Priority boost unavailable; continuing at current nice\n");
 		else
@@ -336,6 +364,8 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 		fprintf(stderr, "Error: failed to collect baseline snapshot\n");
 		return -1;
 	}
+	if (opts->dump_raw)
+		return open_output_stream(opts->output_file);
 
 	/* Allocate per-CPU record storage only when this mode can emit CPU rows. */
 	if (setup_formatter_pool(!section_is_summary_mode() && section_emit_cpu() ?
@@ -357,9 +387,16 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	/* Preserve an existing output file unless initialization fully succeeds. */
 	if (open_output_stream(opts->output_file) < 0)
 		return -1;
+	if (opts->command_argv && !opts->output_file &&
+	    dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
+		fprintf(stderr, "Error: cannot direct command statistics to stderr: %s\n",
+			strerror(errno));
+		return -1;
+	}
 
 	/* Print interval header only after stdout is on its final destination. */
-	print_interval_header(opts, opts->interval);
+	if (!opts->command_argv)
+		print_interval_header(opts, opts->interval);
 
 	return 0;
 }
@@ -447,10 +484,6 @@ static int run_loop(struct armstat_options *opts, struct sys_snapshot *snapshot)
 	unsigned long long iteration = 1;
 	int sleep_result;
 	int status = 0;
-
-	/* -D overrides -n: always dump exactly one interval */
-	if (opts->dump_once)
-		opts->iterations = 1;
 
 	interval_ns = (unsigned long long)(opts->interval * 1000000000.0 + 0.5);
 	if (interval_ns == 0)
@@ -569,6 +602,64 @@ out:
 	return status;
 }
 
+static int command_baseline(void *context)
+{
+	struct sys_snapshot *snapshot = context;
+	struct interval_stats stats;
+
+	if (done || collect_snapshot(snapshot) < 0) {
+		fprintf(stderr, "Error: failed to collect command baseline\n");
+		return -1;
+	}
+	/* Exclude initialization and reset energy/counter baselines at launch. */
+	reset_aggregator();
+	snapshot->interval_delta_us = 0;
+	calculate_interval_stats(snapshot, &stats);
+	return 0;
+}
+
+static int run_command(struct armstat_options *opts,
+		       struct sys_snapshot *snapshot, int child_stdout_fd)
+{
+	struct interval_stats stats;
+	struct interval_record *rec;
+	int command_status;
+	int output_status = 0;
+
+	command_status = run_monitored_command(opts->command_argv, child_stdout_fd,
+					       command_baseline, snapshot);
+	if (command_status < 0)
+		return -1;
+	if (collect_snapshot(snapshot) < 0) {
+		fprintf(stderr, "Error: failed to collect command completion snapshot\n");
+		return -1;
+	}
+	if (!sys_snapshot_get_interval_delta_us(snapshot)) {
+		fprintf(stderr, "Error: command interval unavailable after CPU topology change\n");
+		return -1;
+	}
+	calculate_interval_stats(snapshot, &stats);
+	rec = build_interval_record(snapshot, &stats, 1);
+	if (!rec) {
+		fprintf(stderr, "Error: failed to build command output record\n");
+		return -1;
+	}
+	if (opts->format == FORMAT_JSON) {
+		serialize_json(rec);
+		close_machine_json();
+	} else if (opts->format == FORMAT_CSV) {
+		output_status = serialize_csv(rec);
+	} else {
+		/* The banner reports the measured window, rather than the default -i. */
+		print_interval_header(opts, snapshot->interval_delta_us / 1000000.0);
+		serialize_text(rec);
+	}
+	free_interval_record(rec);
+	if (finalize_stdout_output() < 0 || output_status < 0)
+		return -1;
+	return command_status;
+}
+
 /* ============================================================================
  * CLEANUP
  * ============================================================================ */
@@ -598,6 +689,7 @@ int main(int argc, char *argv[])
 	struct sys_snapshot snapshot;
 	int parse_result;
 	int run_result;
+	int child_stdout_fd = -1;
 
 	/* Turn a closed output pipe into a checked EPIPE and orderly cleanup. */
 	if (ignore_sigpipe() < 0)
@@ -628,18 +720,42 @@ int main(int argc, char *argv[])
 
 	if (opts.probe_only)
 		return run_probe(&opts) < 0 ? 1 : 0;
+	if (opts.command_argv) {
+		/* Save command stdout before the monitor opens or redirects its output. */
+		child_stdout_fd = dup(STDOUT_FILENO);
+		if (child_stdout_fd < 0 ||
+		    fcntl(child_stdout_fd, F_SETFD, FD_CLOEXEC) < 0) {
+			fprintf(stderr, "Error: cannot preserve command stdout: %s\n",
+				strerror(errno));
+			if (child_stdout_fd >= 0)
+				close(child_stdout_fd);
+			return 1;
+		}
+	}
 
 	/* Initialize all modules */
 	if (init_modules(&opts, &snapshot) < 0) {
 		cleanup_modules(&opts);
+		if (child_stdout_fd >= 0)
+			close(child_stdout_fd);
 		return 1;
 	}
 
 	/* Run main sampling loop */
-	run_result = run_loop(&opts, &snapshot);
+	if (opts.dump_raw) {
+		run_result = serialize_raw_snapshot(&snapshot);
+		if (finalize_stdout_output() < 0)
+			run_result = -1;
+	} else if (opts.command_argv) {
+		run_result = run_command(&opts, &snapshot, child_stdout_fd);
+	} else {
+		run_result = run_loop(&opts, &snapshot);
+	}
+	if (child_stdout_fd >= 0)
+		close(child_stdout_fd);
 
 	/* Cleanup */
 	cleanup_modules(&opts);
 
-	return run_result < 0 ? 1 : 0;
+	return run_result < 0 ? 1 : run_result;
 }

@@ -173,7 +173,10 @@ int setup_formatter_pool(int max_cpus);
 /*
  * Text serializer configuration
  */
+#define TEXT_HEADER_AUTO (-1)
+/* Suppress all text presentation; the CLI banner-only -q does not use this. */
 void set_text_quiet(int quiet);
+/* TEXT_HEADER_AUTO uses terminal geometry; nonnegative values count samples. */
 void set_text_header_interval(int interval);
 
 /* CPU list filtering now lives in cpu_inventory; see cpu_inventory.h */

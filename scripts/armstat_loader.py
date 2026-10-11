@@ -356,7 +356,7 @@ def count_csv_summary_samples(path: Path) -> int:
             {"schema_version", "interval", "Scope"},
             path,
             "summary",
-            "armstat -S -f csv -O summary.csv",
+            "armstat -S -f csv -o summary.csv",
         )
         for item in reader:
             validate_csv_row_shape(item, path, reader.line_num)
@@ -378,7 +378,7 @@ def count_csv_cpu_samples(path: Path) -> int:
             {"schema_version", "interval", "CPU"},
             path,
             "per-CPU",
-            "armstat -a -f csv -O cpus.csv",
+            "armstat -a -f csv -o cpus.csv",
         )
         is_mixed_scope = reader.fieldnames and "Scope" in reader.fieldnames
         for item in reader:
@@ -490,7 +490,7 @@ def load_json_summary(path: Path) -> SeriesData:
     if not rows:
         raise SystemExit(
             f"{path} does not contain summary records. "
-            "Use summary JSON export, for example: armstat -S -f json -O summary.json"
+            "Use summary JSON export, for example: armstat -S -f json -o summary.json"
         )
 
     x_values, x_label = finalize_x_axis(x_values, sample_values)
@@ -524,7 +524,7 @@ def load_csv_summary(path: Path, sample_range: Optional[str] = None) -> SeriesDa
             {"schema_version", "interval", "Scope"},
             path,
             "summary",
-            "armstat -S -f csv -O summary.csv",
+            "armstat -S -f csv -o summary.csv",
         )
         is_mixed_scope = {"CPU", "Package"}.issubset(fieldnames)
 
@@ -672,7 +672,7 @@ def load_json_cpu_series(path: Path) -> CpuSeriesData:
     if not samples:
         raise SystemExit(
             f"{path} does not contain per-CPU JSON records. "
-            "Use CPU JSON export, for example: armstat -a -f json -O cpus.json"
+            "Use CPU JSON export, for example: armstat -a -f json -o cpus.json"
         )
 
     x_values, x_label = finalize_x_axis(x_values, sample_values)
@@ -710,7 +710,7 @@ def load_csv_cpu_series(path: Path, sample_range: Optional[str] = None) -> CpuSe
             {"schema_version", "interval", "CPU"},
             path,
             "per-CPU",
-            "armstat -a -f csv -O cpus.csv",
+            "armstat -a -f csv -o cpus.csv",
         )
 
         current_key: Optional[Tuple[object, object, object, object]] = None

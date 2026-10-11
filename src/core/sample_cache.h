@@ -42,4 +42,7 @@ void collect_per_interval_data(struct sys_snapshot *snapshot, unsigned long long
  */
 int is_sample_cache_initialized(void);
 
+/* Include schedstat counters in diagnostic snapshots regardless of Busy source. */
+void set_diagnostic_counter_collection(int enable);
+
 #endif /* ARMSTAT_SAMPLE_CACHE_H */

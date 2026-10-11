@@ -9,7 +9,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "formatter.h"
 #include "formatter_machine.h"
@@ -19,9 +21,12 @@
 #include "topology.h"
 #include "cpu_inventory.h"
 
-/* Text formatter state */
+/* Text formatter state; quiet_mode corresponds to --quiet-all. */
 static int quiet_mode = 0;
-static int header_interval = 0;
+static int header_interval = TEXT_HEADER_AUTO;
+static int summary_screen_lines;
+static int previous_terminal_rows;
+static int previous_terminal_columns;
 
 #define TEXT_COLUMN_GAP 2
 #define TEXT_ROW_KEY_WIDTH 5
@@ -41,9 +46,58 @@ struct text_layout {
 	int pmu_count;
 };
 
+struct text_terminal {
+	int page_lines;
+	int columns;
+	int changed;
+};
+
 static struct text_layout previous_layouts[3];
 static int previous_layout_valid;
 static int previous_compact_summary;
+
+static int read_text_terminal(struct text_terminal *terminal)
+{
+	struct winsize size;
+	int fd = fileno(stdout);
+
+	if (quiet_mode || header_interval != TEXT_HEADER_AUTO ||
+	    !isatty(fd) || ioctl(fd, TIOCGWINSZ, &size) < 0 ||
+	    !size.ws_row || !size.ws_col) {
+		summary_screen_lines = 0;
+		previous_terminal_rows = 0;
+		previous_terminal_columns = 0;
+		return 0;
+	}
+
+	/* Leave space for the interval marker and the terminal's current line. */
+	terminal->page_lines = size.ws_row > 2 ? size.ws_row - 2 : 1;
+	terminal->columns = size.ws_col;
+	terminal->changed = previous_terminal_rows != size.ws_row ||
+		previous_terminal_columns != size.ws_col;
+	if (terminal->changed)
+		summary_screen_lines = 0;
+	previous_terminal_rows = size.ws_row;
+	previous_terminal_columns = size.ws_col;
+	return 1;
+}
+
+static int text_screen_lines(const struct text_layout *layout,
+			     const struct text_terminal *terminal,
+			     int compact_summary, int include_pmu)
+{
+	int width = layout->row_key_width;
+
+	if (compact_summary)
+		width += TEXT_TIMESTAMP_WIDTH + TEXT_COLUMN_GAP;
+	for (int i = 0; i < layout->count; i++)
+		width += TEXT_COLUMN_GAP + layout->widths[i];
+	if (include_pmu)
+		for (int i = 0; i < layout->pmu_count; i++)
+			width += TEXT_COLUMN_GAP + layout->pmu_widths[i];
+
+	return terminal->columns > 0 ? (width - 1) / terminal->columns + 1 : 1;
+}
 
 static int compact_summary_view(int emit_summary, int emit_package, int emit_cpu)
 {
@@ -460,8 +514,10 @@ void serialize_text(const struct interval_record *rec)
 	int emit_package;
 	int emit_cpu;
 	int compact_summary;
+	int automatic_headers;
 	int section_count;
 	int section_index;
+	struct text_terminal terminal = {0};
 	struct text_layout summary_layout;
 	struct text_layout package_layout;
 	struct text_layout cpu_layout;
@@ -481,6 +537,7 @@ void serialize_text(const struct interval_record *rec)
 		build_text_layout(&package_layout, FIELD_SCOPE_PACKAGE, rec);
 	if (emit_cpu)
 		build_text_layout(&cpu_layout, FIELD_SCOPE_CPU, rec);
+	automatic_headers = read_text_terminal(&terminal);
 
 	print_header = (!quiet_mode && iteration == 1);
 	if (!quiet_mode && header_interval > 0 &&
@@ -492,6 +549,8 @@ void serialize_text(const struct interval_record *rec)
 	    memcmp(&package_layout, &previous_layouts[1], sizeof(package_layout)) ||
 	    memcmp(&cpu_layout, &previous_layouts[2], sizeof(cpu_layout))))
 		print_header = 1;
+	if (automatic_headers && terminal.changed)
+		print_header = 1;
 	previous_layouts[0] = summary_layout;
 	previous_layouts[1] = package_layout;
 	previous_layouts[2] = cpu_layout;
@@ -501,7 +560,7 @@ void serialize_text(const struct interval_record *rec)
 	/*
 	 * A single SUM uses a continuous table regardless of how it was selected.
 	 * Other views retain interval blocks so multiple rows stay attributable
-	 * to their sample. Quiet mode omits timestamps and block markers.
+	 * to their sample. --quiet-all omits timestamps and block markers.
 	 */
 	if (!quiet_mode && !compact_summary) {
 		char timestamp[64];
@@ -516,9 +575,22 @@ void serialize_text(const struct interval_record *rec)
 
 	if (compact_summary) {
 		/* Single summary: one data row per interval. */
-		if (print_header)
+		int screen_lines = automatic_headers ?
+			text_screen_lines(&summary_layout, &terminal, 1, 1) : 0;
+
+		if (automatic_headers && screen_lines * 2 <= terminal.page_lines &&
+		    (!summary_screen_lines ||
+		    summary_screen_lines + screen_lines > terminal.page_lines))
+			print_header = 1;
+		if (print_header) {
 			serialize_text_summary_header(&summary_layout, compact_summary);
+			summary_screen_lines = screen_lines;
+		}
 		serialize_text_summary_row(rec, &summary_layout, compact_summary);
+		if (automatic_headers && screen_lines * 2 <= terminal.page_lines)
+			summary_screen_lines += screen_lines;
+		else
+			summary_screen_lines = 0;
 	} else {
 		/*
 		 * Mixed scope: keep each section self-contained so the SUM, Pkg,
@@ -528,6 +600,9 @@ void serialize_text(const struct interval_record *rec)
 		 */
 		section_count = emit_summary + emit_package + emit_cpu;
 		section_index = 0;
+		summary_screen_lines = 0;
+		if (automatic_headers)
+			print_header = 1;
 
 		if (emit_summary) {
 			section_index++;
@@ -540,21 +615,45 @@ void serialize_text(const struct interval_record *rec)
 		}
 
 		if (emit_package) {
+			int screen_lines = automatic_headers ?
+				text_screen_lines(&package_layout, &terminal, 0, 0) : 0;
+			int page_lines = screen_lines;
+
 			section_index++;
 			if (print_header)
 				serialize_text_package_header(&package_layout);
-			for (int pkg = 0; pkg < rec->package_count; pkg++)
+			for (int pkg = 0; pkg < rec->package_count; pkg++) {
+				if (automatic_headers && pkg > 0 &&
+				    screen_lines * 2 <= terminal.page_lines &&
+				    page_lines + screen_lines > terminal.page_lines) {
+					serialize_text_package_header(&package_layout);
+					page_lines = screen_lines;
+				}
 				serialize_text_package_row(rec, pkg, &package_layout);
+				page_lines += screen_lines;
+			}
 			if (section_index < section_count)
 				printf("\n");
 		}
 
 		if (emit_cpu) {
+			int screen_lines = automatic_headers ?
+				text_screen_lines(&cpu_layout, &terminal, 0, 1) : 0;
+			int page_lines = screen_lines;
+
 			section_index++;
 			if (print_header)
 				serialize_text_cpu_header(&cpu_layout);
-			for (int i = 0; i < rec->cpu_row_count; i++)
+			for (int i = 0; i < rec->cpu_row_count; i++) {
+				if (automatic_headers && i > 0 &&
+				    screen_lines * 2 <= terminal.page_lines &&
+				    page_lines + screen_lines > terminal.page_lines) {
+					serialize_text_cpu_header(&cpu_layout);
+					page_lines = screen_lines;
+				}
 				serialize_text_cpu_row(rec, i, &cpu_layout);
+				page_lines += screen_lines;
+			}
 		}
 	}
 
@@ -569,9 +668,15 @@ void set_text_quiet(int quiet)
 {
 	quiet_mode = quiet;
 	previous_layout_valid = 0;
+	summary_screen_lines = 0;
+	previous_terminal_rows = 0;
+	previous_terminal_columns = 0;
 }
 
 void set_text_header_interval(int interval)
 {
 	header_interval = interval;
+	summary_screen_lines = 0;
+	previous_terminal_rows = 0;
+	previous_terminal_columns = 0;
 }

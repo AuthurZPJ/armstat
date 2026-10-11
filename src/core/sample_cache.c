@@ -38,6 +38,12 @@ static uint64_t (*pmu_pool)[MAX_PMU_EVENTS];
 static unsigned char *pmu_valid_pool;
 
 static int cache_initialized;
+static int diagnostic_counter_collection;
+
+void set_diagnostic_counter_collection(int enable)
+{
+	diagnostic_counter_collection = !!enable;
+}
 
 static void pool_free(void);
 static void slow_free(void);
@@ -495,7 +501,8 @@ static void collect_system_counter_snapshot(struct sys_snapshot *snapshot)
 				snapshot->authoritative_procstat_valid[i] = 1;
 		}
 
-		if (!need_idle || !busy_source_uses_schedstat_cpu(cpu_id))
+		if (!diagnostic_counter_collection &&
+		    (!need_idle || !busy_source_uses_schedstat_cpu(cpu_id)))
 			continue;
 
 		if (schedstat_limit < 0) {
@@ -581,6 +588,10 @@ static void collect_sample_data(struct sys_snapshot *snapshot)
 
 	section_get_idle_collection_masks(&idle_residency_mask,
 					  &idle_usage_mask);
+	if (diagnostic_counter_collection) {
+		idle_residency_mask = (1U << MAX_IDLE_STATES) - 1U;
+		idle_usage_mask = idle_residency_mask;
+	}
 
 	collect_freq_snapshot(snapshot, tracked);
 	collect_idle_snapshot(snapshot, tracked, snapshot->interval_delta_us,

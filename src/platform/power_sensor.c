@@ -183,7 +183,7 @@ static int read_cached_sensor_ull(int *fd, const char *path,
 		return -1;
 
 	/* Best effort: restore the fast-path descriptor after a transient error. */
-	*fd = open(path, O_RDONLY);
+	*fd = open(path, O_RDONLY | O_CLOEXEC);
 	return 0;
 }
 
@@ -201,7 +201,7 @@ static int read_cached_sensor_int(int *fd, const char *path, int *value)
 	if (sysfs_read_int_checked(path, value) < 0)
 		return -1;
 
-	*fd = open(path, O_RDONLY);
+	*fd = open(path, O_RDONLY | O_CLOEXEC);
 	return 0;
 }
 
@@ -270,7 +270,7 @@ static int discover_package_power_sensor(void)
 
 	copy_sysfs_path(package_power_sensor.sensor_path, matched_path);
 	package_power_sensor.is_microwatts = 1;
-	package_power_fd = open(matched_path, O_RDONLY);
+	package_power_fd = open(matched_path, O_RDONLY | O_CLOEXEC);
 	package_power_available = 1;
 	return 0;
 }
@@ -297,7 +297,7 @@ static void discover_numa_temp_sensors_direct_index(void)
 		sensor = &numa_temp_sensors[numa_temp_sensor_count];
 		copy_sysfs_path(sensor->sensor_path, temp_path);
 		sensor->numa_node = zone;
-		numa_temp_fds[numa_temp_sensor_count] = open(temp_path, O_RDONLY);
+		numa_temp_fds[numa_temp_sensor_count] = open(temp_path, O_RDONLY | O_CLOEXEC);
 		numa_temp_sensor_count++;
 		numa_temp_sensor_mask |= 1U << zone;
 		if (zone + 1 > numa_temp_span)

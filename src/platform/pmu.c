@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <ctype.h>
 #include <sys/resource.h>
+#include <fcntl.h>
 
 #include "pmu.h"
 #include "cpu_inventory.h"
@@ -161,7 +162,7 @@ static int perf_event_open_compat(struct perf_event_attr *attr, int cpu_id,
 	local_attr = *attr;
 	fd = perf_event_open(&local_attr, -1, cpu_id, group_fd, 0);
 	if (fd >= 0)
-		return (int)fd;
+		goto opened;
 
 	/*
 	 * Older kernels reject unsupported perf_event_attr sizes with E2BIG and
@@ -179,10 +180,20 @@ static int perf_event_open_compat(struct perf_event_attr *attr, int cpu_id,
 
 		fd = perf_event_open(&local_attr, -1, cpu_id, group_fd, 0);
 		if (fd >= 0)
-			return (int)fd;
+			goto opened;
 	}
 
 	return -1;
+
+opened:
+	if (fcntl((int)fd, F_SETFD, FD_CLOEXEC) < 0) {
+		int saved_errno = errno;
+
+		close((int)fd);
+		errno = saved_errno;
+		return -1;
+	}
+	return (int)fd;
 }
 
 struct perf_group_read_data {

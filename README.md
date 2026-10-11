@@ -25,7 +25,7 @@ make
 ./armstat --probe
 ./armstat -i 1 -n 5
 ./armstat -a -i 1 -n 5
-./armstat -S -a -f json -O summary.json -i 1 -n 5
+./armstat -S -a -f json -o summary.json -i 1 -n 5
 sudo make install
 ```
 
@@ -50,17 +50,22 @@ the collector itself has no Python dependency. See the reference for
 | `-s all` | Full base view, including package rows, configuration, and LPI usage |
 | Explicit `-s` | Scopes requested by the selected groups or fields |
 
-The first result follows one complete interval. `-D` measures one interval and
-exits; `-n 0` runs until interrupted. The default interval is one second;
-the accepted range is `0.000001`–`31536000` seconds. Rate formulas use the
+The first periodic result follows one complete interval. `-n 1` measures one
+interval and exits; `-n 0` runs until interrupted. The default interval is one
+second; the accepted range is `0.000001`–`31536000` seconds. Rate formulas use the
 measured window, which can differ from the requested interval.
 
 When only `SUM` is emitted, text uses one timestamped data row per interval.
 Other views use interval blocks with timestamps and measured duration. Text
 timestamps retain the date and timezone at millisecond precision. Headers
-include units; `CtxSw[/int]`, for example, means a count over the interval. `-q` omits
-the banner, headers, timestamps, and interval markers. `-N N` repeats headers
-every N samples; layout changes also trigger a new header.
+include units; `CtxSw[/int]`, for example, means a count over the interval.
+`-q` hides only the startup banner; `--quiet-all` also hides headers,
+timestamps, and interval markers. In an interactive
+terminal with a reported height and width, headers repeat automatically
+according to the screen height.
+`-N N` overrides this with a repeat every N samples; `-N 0` disables automatic
+repeats. Redirected or piped output, or a terminal with no usable dimensions,
+prints headers only at startup and on layout changes unless `-N N` is set.
 
 `SUM` combines fields with different scopes:
 
@@ -131,7 +136,9 @@ discovery, startup fails.
 ## Common Commands
 
 ```bash
-armstat -D                              # One complete interval
+armstat -n 1                           # One complete interval
+armstat -D                              # Immediate raw proc/sysfs snapshot
+armstat -q -- sleep 2                    # One interval around a command
 armstat -S -a -i 1 -n 10                # Expanded summary
 armstat -a -c 0,1,4-7                   # Selected CPUs
 armstat -s cpu                         # Useful CPU metrics without SUM
@@ -144,6 +151,7 @@ armstat -s pkg_freq_mhz                 # Package frequency only
 armstat -s power,temp                   # Power and temperature
 armstat -H temp                         # Hide temperature
 armstat -H ipc                          # Skip automatic IPC collection
+armstat -P                             # Disable perf-backed PMU collection
 armstat -s ipc                          # IPC summary, with explicit diagnostics
 armstat -I                             # Cycles, instructions, and IPC
 armstat -J                             # Interval energy
@@ -151,9 +159,9 @@ armstat -J                             # Interval energy
 
 `--cpu` filters sampling, including PMU resources and CPU-derived aggregates.
 Platform sensors and global counters retain their own scope. The default
-summary covers the selected CPUs. When CPU rows are explicitly
-expanded with a CPU filter, implicit aggregate rows are suppressed; use
-`-S --cpu ...` for a filtered summary.
+summary covers the selected CPUs and remains visible alongside expanded CPU
+rows, for example `-a -c 0-3`. Package rows still follow explicit selection.
+`-s cpu` remains a CPU-only view; use `-S --cpu ...` for a filtered summary alone.
 
 `freq` selects current frequency and UncoreFreq; `idle` selects LPI residency
 and Busy/Idle/IOWait. `freq-config` and `idle-usage` separately select CPU
@@ -170,7 +178,7 @@ Shared aliases do not expand row scopes; request CPU rows with `cpu`, `core`,
 automatically enable CPU rows. `-s cpu` alone supplies the usual live metrics
 without SUM; combined selections use the requested fields and scopes. Its
 defaults preserve explicit `-H` exclusions. Independent `-p`, `-I`, and `-J`
-requests retain their required SUM output, subject to CPU filtering.
+requests retain their required SUM output.
 
 The first `-s` replaces earlier view settings: `-a -s cpu` selects the CPU
 shortcut, while `-s cpu -a` selects the expanded live view.
@@ -185,6 +193,49 @@ matches, and selections that cannot emit any row are startup errors.
 Use `armstat --list` for field IDs, scopes, units, text labels, JSON keys,
 column groups, and PMU names. Stable field IDs are the clearest script tokens.
 `armstat --help` lists all options.
+
+### Command Mode and Raw Snapshots
+
+`armstat [options] -- command [args...]` measures one interval around the
+command's execution, including small collection, launch, and wait overheads.
+Statistics cover the selected CPUs and platform sources,
+not only the command's process. They go to stderr by default; the command
+keeps its original stdout and stderr. Use `-o` for JSON/CSV so command stderr
+cannot mix with the statistics. Explicit `-i`, `-n`, `-D`, `--probe`, and
+`-l` cannot be combined with a command.
+
+Initialization failure prevents command execution. After a successful
+measurement, statistics are emitted even if the command fails, and armstat
+returns its exit code: 127 when not found, 126 for other exec failures, or
+128 plus the signal number if terminated by a signal. Monitoring/output
+failure returns 1. INT, TERM, HUP, and QUIT are forwarded to the command's
+process group; foreground terminal access and shell job control are preserved.
+
+`-D`/`--Dump` immediately prints one diagnostic text snapshot without waiting
+for an interval. It reports cumulative counters and current sensors, with
+labelled units, rather than deltas or utilization percentages. `-c` limits CPU
+sources; view/field selections do not restrict the dump. It cannot be combined
+with a command, explicit `-i`/`-n`, `--probe`, `-l`, non-text formats, or explicit
+PMU/IPC requests. `-q` and `-N` do not alter its diagnostic body.
+
+### For turbostat Users
+
+Canonical aliases are `-n`/`--num_iterations`, `-N`/`--header_iterations`,
+`-S`/`--Summary`, `-J`/`--Joules`, `-o`/`--out`, and `-D`/`--Dump`.
+Long options are case-sensitive; previous spellings and `-O` are no longer
+accepted. `-P`/`--no-perf` disables PMU collection and the perf check in
+`--probe`; explicit PMU/IPC requests conflict with it. Probe is available only
+as `--probe`. Busy/Idle source selection is unchanged.
+
+armstat retains its own field groups, formats, and one-second default; it is
+not a fully compatible replacement. Read familiar-looking fields as follows:
+
+| turbostat concept | armstat meaning |
+|---|---|
+| `Avg_MHz` / `Bzy_MHz` | `Freq` is a current sysfs sample, not an interval or busy frequency |
+| Hardware C0 `Busy%` | Default `Busy%` uses software `/proc/stat` accounting |
+| Idle residency | `LPI-N` is a separate cpuidle interval statistic; its sum need not equal `Idle%` |
+| Power in W / energy in J | `Power` uses mW; `-J` adds estimated interval `Energy[J]` alongside power |
 
 ### PMU
 
@@ -219,15 +270,15 @@ file-descriptor capacity.
 ## Export and Plot
 
 ```bash
-armstat -S -a -f json -O summary.json -i 1 -n 60
-armstat -a -f csv -O cpus.csv -i 1 -n 60
+armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --preset freq
 armstat-plot-cpu cpus.csv --preset busy --top 8
 armstat-plot-cpu cpus.csv --group-by node --y busy
 ```
 
-`-O` is an alias of `-o`. JSON is an array of interval objects; CSV uses
-summary, package, CPU, or mixed rows according to the selected scopes. Both
+`-o`/`--out` writes statistics to a file. JSON is an array of interval objects;
+CSV uses summary, package, CPU, or mixed rows according to the selected scopes. Both
 carry `schema_version=9`, interval number, measured duration, and timestamps.
 The bundled plot loaders accept version 9 only.
 Default JSON includes only `summary`; default CSV uses the summary layout with

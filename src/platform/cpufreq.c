@@ -148,7 +148,7 @@ int read_cpu_freq(int tracked_idx, unsigned int *freq)
 			cpu_sysfs_path(cpu_id, "cpufreq/cpuinfo_cur_freq",
 				       path, sizeof(path));
 			if (cur_freq_fd_open_count < MAX_CUR_FREQ_FDS)
-				fd = open(path, O_RDONLY);
+				fd = open(path, O_RDONLY | O_CLOEXEC);
 			if (fd >= 0) {
 				cur_freq_fds[tracked_idx] = fd;
 				cur_freq_fd_open_count++;
@@ -276,7 +276,7 @@ int read_uncore_freq(unsigned long long *freq_hz)
 		return -1;
 
 	if (uncore_freq_fd < 0)
-		uncore_freq_fd = open(uncore_freq_path, O_RDONLY);
+		uncore_freq_fd = open(uncore_freq_path, O_RDONLY | O_CLOEXEC);
 
 	if (uncore_freq_fd >= 0) {
 		if (fd_read_ull_checked(uncore_freq_fd, &value) == 0 && value > 0) {

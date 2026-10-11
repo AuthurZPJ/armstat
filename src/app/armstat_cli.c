@@ -38,9 +38,10 @@
 struct armstat_options default_options = {
 	.interval = 1.0,
 	.iterations = 0,
-	.header_interval = 0,
+	.header_interval = TEXT_HEADER_AUTO,
 	.output_file = NULL,
 	.quiet = 0,
+	.quiet_all = 0,
 	.summary_mode = 0,
 	.format = 0,  /* FORMAT_TEXT */
 	.cpu_filter = NULL,
@@ -48,26 +49,33 @@ struct armstat_options default_options = {
 	.pmu_events = NULL,
 	.ipc_requested = 0,
 	.pmu_auto = 0,
+	.no_perf = 0,
 	.debug = 0,
 	.list_counters = 0,
-	.dump_once = 0,
+	.dump_raw = 0,
 	.probe_only = 0,
+	.command_argv = NULL,
 };
 
 /* ============================================================================
  * COMMAND LINE PARSING
  * ============================================================================ */
 
+enum cli_option_value {
+	OPT_PROBE = 256,
+	OPT_QUIET_ALL,
+};
+
 static struct option long_options[] = {
 	{"interval", required_argument, 0, 'i'},
-	{"dump", no_argument, 0, 'D'},
-	{"num-iterations", required_argument, 0, 'n'},
-	{"header-iterations", required_argument, 0, 'N'},
+	{"Dump", no_argument, 0, 'D'},
+	{"num_iterations", required_argument, 0, 'n'},
+	{"header_iterations", required_argument, 0, 'N'},
 	{"cpu", required_argument, 0, 'c'},
 	{"busy-source", required_argument, 0, 'B'},
-	{"output", required_argument, 0, 'o'},
-	{"export", required_argument, 0, 'O'},
+	{"out", required_argument, 0, 'o'},
 	{"quiet", no_argument, 0, 'q'},
+	{"quiet-all", no_argument, 0, OPT_QUIET_ALL},
 	{"show", required_argument, 0, 's'},
 	{"hide", required_argument, 0, 'H'},
 	{"debug", no_argument, 0, 'd'},
@@ -76,11 +84,12 @@ static struct option long_options[] = {
 	{"format", required_argument, 0, 'f'},
 	{"pmu-events", required_argument, 0, 'p'},
 	{"list", no_argument, 0, 'l'},
-	{"summary", no_argument, 0, 'S'},
-	{"joules", no_argument, 0, 'J'},
+	{"Summary", no_argument, 0, 'S'},
+	{"Joules", no_argument, 0, 'J'},
 	{"ipc", no_argument, 0, 'I'},
 	{"all", no_argument, 0, 'a'},
-	{"probe", no_argument, 0, 'P'},
+	{"no-perf", no_argument, 0, 'P'},
+	{"probe", no_argument, 0, OPT_PROBE},
 	{0, 0, 0, 0}
 };
 
@@ -96,35 +105,41 @@ static void print_version(void)
 
 static void print_help(void)
 {
-	printf("Usage: armstat [options]\n");
+	printf("Usage: armstat [options] [-- command [args...]]\n");
 	printf("\n");
 	printf("Default: SUM. -a: SUM + CPU live metrics. -s all: full base view.\n");
 	printf("These views include IPC when PMU startup succeeds; -H ipc disables it.\n");
 	printf("Package rows require -s pkg/package, a stable package field ID, or -s all.\n");
+	printf("Text headers repeat to fit the terminal height by default.\n");
 	printf("\n");
 	printf("Options:\n");
 	printf("  -i, --interval <sec>   Measurement interval (default: 1.0)\n");
-	printf("  -n, --num-iterations <count> Samples to print (0 = unlimited)\n");
-	printf("  -N, --header-iterations <count> Reprint text header after every N samples (0 = only on startup/layout changes)\n");
+	printf("  -n, --num_iterations <count> Samples to print (0 = unlimited)\n");
+	printf("  -N, --header_iterations <count> Override automatic headers: every N samples (0 = startup/layout changes only)\n");
 	printf("  -c, --cpu <list>       Real CPU IDs to monitor (e.g. 0,1,4-7)\n");
 	printf("  -B, --busy-source <src> Busy/Idle source hint: auto, procstat, schedstat, task-clock\n");
-	printf("  -o, --output <file>    Write output to file\n");
-	printf("  -O, --export <file>    Alias for --output\n");
-	printf("  -q, --quiet            Suppress text banner, headers, timestamps, and markers\n");
-	printf("  -D, --dump             Collect one complete interval and exit\n");
-	printf("  -S, --summary          Summary mode (SUM only)\n");
+	printf("  -o, --out <file>       Write statistics to file\n");
+	printf("  -q, --quiet            Suppress the startup banner\n");
+	printf("      --quiet-all        Also suppress text headers, timestamps, and markers\n");
+	printf("  -D, --Dump             Dump one raw proc/sysfs snapshot in text and exit\n");
+	printf("  -S, --Summary          Summary mode (SUM only)\n");
 	printf("  -a, --all              Expand live metrics with CPU rows (use -s all for configuration and usage)\n");
 	printf("  -f, --format <fmt>     Output format: text, json, csv\n");
 	printf("  -s, --show <items>     Show only selected groups or exact field names\n");
 	printf("  -H, --hide <items>     Hide selected groups or exact field names\n");
 	printf("  -p, --pmu-events <evts> Show raw PMU counters (add -I for IPC)\n");
 	printf("  -I, --ipc              Enable cycles,instructions PMU + IPC columns\n");
-	printf("  -J, --joules           Show interval energy in Joules\n");
+	printf("  -J, --Joules           Show interval energy in Joules alongside power\n");
 	printf("  -l, --list             List groups, exact fields, and PMU events\n");
-	printf("  -P, --probe            Probe current platform capabilities and sources\n");
+	printf("  -P, --no-perf          Disable perf-backed PMU collection\n");
+	printf("      --probe            Probe current platform capabilities and sources\n");
 	printf("  -d, --debug            Enable debug output\n");
 	printf("  -v, --version          Show version\n");
 	printf("  -h, --help             Show help\n");
+	printf("\nCommand mode measures one interval across the command's execution.\n");
+	printf("Statistics go to stderr unless -o is used; the command retains its stdout.\n");
+	printf("Use an explicit -- separator; -i, -n, -D, --probe, and -l cannot be combined with a command.\n");
+	printf("--Dump cannot be combined with -i, -n, --probe, -l, non-text formats, or explicit IPC/PMU requests.\n");
 	printf("\n");
 	printf("Column groups:\n");
 	printf("  cpu\n");
@@ -709,6 +724,11 @@ int parse_column_option(const char *arg, int enable)
 int parse_args(int argc, char *argv[], struct armstat_options *opts)
 {
 	int opt;
+	int option_position;
+	int command_separator = 0;
+	int interval_option_seen = 0;
+	int iterations_option_seen = 0;
+	int explicit_perf_requested = opts->ipc_requested || opts->pmu_events;
 	int energy_requested = 0;
 	int show_option_seen = 0;
 	int view_option_seen = 0;
@@ -718,32 +738,46 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 	set_cpu_inventory_filter(NULL);
 	set_section_summary_mode(0);
 	set_section_default_summary_output(1);
+	set_text_quiet(opts->quiet_all);
 
-	while ((opt = getopt_long(argc, argv, "i:n:N:c:B:o:O:qDSf:s:H:df:p:lJIPv?ah",
-				  long_options, NULL)) != -1) {
+	for (;;) {
+		option_position = optind > 0 ? optind : 1;
+		opt = getopt_long(argc, argv, "+i:n:N:c:B:o:qDSf:s:H:df:p:lJIPv?ah",
+				  long_options, NULL);
+		if (opt == -1) {
+			command_separator = option_position < argc &&
+				!strcmp(argv[option_position], "--");
+			break;
+		}
 		switch (opt) {
 		case 'i':
 			if (parse_positive_double_arg("--interval", optarg,
 						      &opts->interval) < 0)
 				return -1;
+			interval_option_seen = 1;
 			break;
 		case 'n':
-			if (parse_non_negative_int_arg("--num-iterations", optarg,
+			if (parse_non_negative_int_arg("--num_iterations", optarg,
 						       &opts->iterations) < 0)
 				return -1;
+			iterations_option_seen = 1;
 			break;
 		case 'N':
-			if (parse_non_negative_int_arg("--header-iterations", optarg,
+			if (parse_non_negative_int_arg("--header_iterations", optarg,
 						       &opts->header_interval) < 0)
 				return -1;
 			set_text_header_interval(opts->header_interval);
 			break;
 		case 'q':
 			opts->quiet = 1;
+			break;
+		case OPT_QUIET_ALL:
+			opts->quiet = 1;
+			opts->quiet_all = 1;
 			set_text_quiet(1);
 			break;
 		case 'D':
-			opts->dump_once = 1;
+			opts->dump_raw = 1;
 			break;
 		case 'S':
 			opts->summary_mode = 1;
@@ -768,7 +802,6 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 				return -1;
 			break;
 		case 'o':
-		case 'O':
 			opts->output_file = optarg;
 			break;
 		case 's':
@@ -794,6 +827,7 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			}
 			show_option_seen = 1;
 			view_option_seen = 1;
+			explicit_perf_requested |= ipc_selection_explicit || is_pmu_enabled();
 			break;
 		case 'H':
 			if (apply_hide_option(optarg) < 0)
@@ -814,10 +848,14 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 				set_group_field_overrides(FIELD_GROUP_ENERGY, 1, 1);
 			break;
 		case 'I':
+			explicit_perf_requested = 1;
 			apply_ipc_option(opts);
 			set_group_field_overrides(FIELD_GROUP_IPC, 1, view_option_seen);
 			break;
 		case 'P':
+			opts->no_perf = 1;
+			break;
+		case OPT_PROBE:
 			opts->probe_only = 1;
 			break;
 		case 'f':
@@ -828,6 +866,7 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			if (validate_pmu_event_list(optarg) < 0)
 				return -1;
 			opts->pmu_events = optarg;
+			explicit_perf_requested = 1;
 			enable_pmu(1);
 			break;
 		case 'v':
@@ -847,8 +886,31 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 		}
 	}
 
-	if (optind < argc) {
+	if (command_separator) {
+		if (optind >= argc || !argv[optind][0]) {
+			fprintf(stderr, "Error: -- requires a command\n");
+			return -1;
+		}
+		if (interval_option_seen || iterations_option_seen || opts->dump_raw ||
+		    opts->probe_only || opts->list_counters) {
+			fprintf(stderr, "Error: command mode cannot be combined with -i, -n, -D, --probe, or -l\n");
+			return -1;
+		}
+		opts->command_argv = argv + optind;
+	} else if (optind < argc) {
 		fprintf(stderr, "Error: unexpected argument: %s\n", argv[optind]);
+		fprintf(stderr, "  Use -- before a command and its arguments\n");
+		return -1;
+	}
+
+	if (opts->no_perf && explicit_perf_requested) {
+		fprintf(stderr, "Error: --no-perf cannot be combined with explicit IPC or PMU requests\n");
+		return -1;
+	}
+	if (opts->dump_raw && (interval_option_seen || iterations_option_seen ||
+	    opts->probe_only || opts->list_counters || opts->format != FORMAT_TEXT ||
+	    explicit_perf_requested)) {
+		fprintf(stderr, "Error: --Dump requires text and cannot be combined with -i, -n, --probe, -l, or explicit IPC/PMU requests\n");
 		return -1;
 	}
 
@@ -892,6 +954,15 @@ int apply_default_pmu_events(struct armstat_options *opts)
 {
 	int explicit_ipc = opts->ipc_requested || ipc_selection_explicit;
 	int want_ipc;
+
+	if (opts->no_perf || opts->dump_raw) {
+		opts->pmu_auto = 0;
+		opts->pmu_events = NULL;
+		enable_pmu(0);
+		close_pmu_events();
+		set_ipc_field_availability(0);
+		return 0;
+	}
 
 	/* A custom raw event list must not silently acquire additional events. */
 	if (opts->pmu_events && !explicit_ipc)
@@ -956,6 +1027,12 @@ int initialize_selected_pmu(const struct armstat_options *opts,
 			    int (*init_events)(const char *events))
 {
 	int result;
+
+	if (opts->no_perf || opts->dump_raw) {
+		close_pmu_events();
+		set_ipc_field_availability(0);
+		return 0;
+	}
 
 	set_pmu_diagnostics(!opts->pmu_auto);
 	if (!opts->pmu_events || (!is_pmu_enabled() && !selected_ipc_fields()))

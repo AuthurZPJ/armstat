@@ -3,10 +3,10 @@
 """Plot per-CPU time-series data exported by armstat.
 
 Recommended input:
-    armstat -a -f json -O cpus.json
+    armstat -a -f json -o cpus.json
 
 The script can also read per-CPU CSV exported with:
-    armstat -a -f csv -O cpus.csv
+    armstat -a -f csv -o cpus.csv
 
 JSON carries real timestamps. CSV exports now include `timestamp` and
 `timestamp_iso`, so plots can use real time directly.

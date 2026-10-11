@@ -19,6 +19,7 @@ struct armstat_options {
 	/* Output */
 	char *output_file;
 	int quiet;
+	int quiet_all;
 	int summary_mode;
 	int format;  /* FORMAT_TEXT, FORMAT_JSON, FORMAT_CSV */
 
@@ -30,12 +31,14 @@ struct armstat_options {
 	char *pmu_events;
 	int ipc_requested;  /* Track if -I was used (requires PMU) */
 	int pmu_auto;       /* Best-effort IPC collection without raw PMU columns */
+	int no_perf;        /* Disable perf-backed PMU collection */
 
 	/* Other */
 	int debug;
 	int list_counters;
-	int dump_once;
+	int dump_raw;
 	int probe_only;
+	char **command_argv; /* argv after the explicit -- command separator */
 };
 
 extern struct armstat_options default_options;

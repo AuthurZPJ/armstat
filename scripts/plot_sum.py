@@ -3,10 +3,10 @@
 """Plot summary-series data exported by armstat.
 
 Recommended input:
-    armstat -S -f json -O summary.json
+    armstat -S -f json -o summary.json
 
 The script can also read summary CSV exported with:
-    armstat -S -f csv -O summary.csv
+    armstat -S -f csv -o summary.csv
 
 JSON carries real timestamps. CSV exports now include `timestamp` and
 `timestamp_iso`, so plots can use real time directly.

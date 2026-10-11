@@ -1,9 +1,12 @@
-.TH ARMSTAT 8 "October 9, 2026" "armstat" "System Administration"
+.TH ARMSTAT 8 "October 11, 2026" "armstat" "System Administration"
 .SH NAME
 armstat \- ARM64 server interval monitor
 .SH SYNOPSIS
 .B armstat
 .RI [ options ]
+.br
+.B armstat
+.RI [ options ] " -- " command " [" args... "]"
 .SH DESCRIPTION
 .B armstat
 samples CPU frequency, Busy/Idle, idle states, power, temperature, PMU counters,
@@ -24,12 +27,19 @@ initialization succeeds; raw event counters require an explicit request.
 Requested interval, default 1.0. Accepted range: 0.000001 to 31536000 seconds.
 Formulas use the measured duration.
 .TP
-.BI \-n ", " \-\-num-iterations " count"
+.BI \-n ", " \-\-num_iterations " count"
 Number of visible samples. Zero, the default, runs until interrupted.
 .TP
-.BI \-N ", " \-\-header-iterations " count"
-Repeat text headers every N samples. Zero prints them at startup and on
-layout changes.
+.BI \-N ", " \-\-header_iterations " count"
+Override automatic text headers. A positive value repeats them every N
+samples; zero prints them only at startup and on layout changes.
+Without this option, a stdout terminal with a reported height and width
+repeats headers according to its size. When CPU or package rows are shown,
+each section starts with a header per sample, and long CPU/package tables
+repeat headers within the sample.
+Redirected or piped output, or a terminal with no usable dimensions, defaults
+to startup and layout-change headers only. For interval output,
+\fB--quiet-all\fR suppresses headers.
 .TP
 .BI \-c ", " \-\-cpu " list"
 Sample real Linux CPU IDs, for example \fB0,1,4-7\fR. Invalid lists or lists
@@ -39,20 +49,27 @@ matching no online CPU are startup errors.
 Select \fBauto\fR, \fBprocstat\fR, \fBschedstat\fR, or \fBtask-clock\fR.
 Default: auto. See METRICS.
 .TP
-.BI \-o ", " \-\-output " file"
-Write output to a file.
-.TP
-.BI \-O ", " \-\-export " file"
-Alias of \fB-o\fR for text, JSON, or CSV output.
+.BI \-o ", " \-\-out " file"
+Write statistics to a file. Command stdout and stderr retain their destinations.
 .TP
 .B \-q, \-\-quiet
+Omit only the startup banner; keep text headers, timestamps, and interval
+markers.
+.TP
+.B \-\-quiet-all
 Omit the text banner, headers, timestamps, and interval markers.
 .TP
-.B \-D, \-\-dump
-Measure one complete interval and exit. Text retains headers unless
-\fB-q\fR is also specified.
+.B \-D, \-\-Dump
+Immediately print one raw proc/sysfs diagnostic snapshot and exit, without
+waiting for an interval. Counters are cumulative and sensors are current;
+no interval rates or percentages are calculated. Only text is supported.
+CPU filtering applies, but view and field selections do not restrict the dump.
+Cannot be combined with a command, explicit \fB-i\fR or \fB-n\fR,
+\fB--probe\fR, \fB-l\fR, or explicit PMU/IPC requests.
+Quiet and header-repeat options do not alter the diagnostic body.
+Use \fB-n 1\fR for one interval sample.
 .TP
-.B \-S, \-\-summary
+.B \-S, \-\-Summary
 Emit one SUM row or object per interval.
 .TP
 .B \-a, \-\-all
@@ -81,14 +98,19 @@ Suppress automatic IPC; add \fB-I\fR or explicitly select IPC to request it.
 Show raw cycles and instructions counts and IPC. Supplement custom event
 lists with both events.
 .TP
-.B \-J, \-\-joules
-Show interval energy in joules.
+.B \-J, \-\-Joules
+Add estimated interval energy in joules alongside power in mW.
 .TP
 .B \-l, \-\-list
 List groups, field IDs, scopes, types, units, labels, JSON keys, and PMU names.
 Stable field IDs are recommended for scripts.
 .TP
-.B \-P, \-\-probe
+.B \-P, \-\-no-perf
+Disable perf-backed PMU collection and the perf check in \fB--probe\fR.
+Explicit PMU or IPC requests are parameter errors with this option,
+regardless of option order. Busy/Idle source selection is unchanged.
+.TP
+.B \-\-probe
 Report topology, data sources, candidate counts, Busy/Idle policy, idle-state
 names, and basic PMU availability. The key-value contract has
 \fBprobe_schema_version: 1\fR. The PMU check opens cycles on the first selected
@@ -126,7 +148,7 @@ alone or combined with other selections. Default, \fB-S\fR, \fB-a\fR, and
 and temperature without SUM. Combined selections use the requested fields and
 scopes. These defaults preserve explicit \fB-H\fR exclusions.
 Independent \fB-p\fR, \fB-I\fR, and \fB-J\fR requests retain required SUM
-output, subject to CPU-filter rules.
+output.
 The first \fB-s\fR replaces earlier view settings: \fB-a -s cpu\fR selects
 the CPU shortcut; \fB-s cpu -a\fR selects the expanded live view.
 .PP
@@ -139,12 +161,29 @@ no data columns, startup fails.
 .PP
 \fB--cpu\fR filters collection and CPU-derived aggregates, including perf
 resources. Global counters and platform sensors retain their own scope.
-The default summary uses the filtered CPUs. Explicitly expanding CPU rows
-with a CPU filter suppresses implicit aggregate sections; use
-\fB-S --cpu\fR for a filtered summary. Explicit aggregate-only selections
-remain available.
+The summary uses the filtered CPUs and remains visible with expanded CPU rows,
+for example \fB-a -c 0-3\fR. The \fB-s cpu\fR shortcut remains CPU-only;
+package rows follow explicit selection. Use \fB-S --cpu\fR for a filtered
+summary alone.
+.SH COMMAND MODE
+Use an explicit \fB--\fR before the command and its arguments. Initialize
+telemetry, establish the launch baseline, run the command, and emit one
+interval on completion. Statistics cover the selected CPUs and platform
+sources; the window includes small collection, launch, and wait overheads.
+They describe system activity rather than only the command's process.
+They go to stderr by default,
+while the command keeps its original stdout and stderr. Use \fB-o\fR for
+JSON/CSV to prevent command stderr from mixing with machine output.
+Explicit \fB-i\fR, \fB-n\fR, \fB-D\fR, \fB--probe\fR, and \fB-l\fR
+conflict with command mode.
+.PP
+Initialization failure prevents command execution. A successful measurement
+is output even when the command fails. INT, TERM, HUP, and QUIT are forwarded
+to its process group, which is reaped; foreground terminal access and shell
+job control are preserved. If CPU hotplug resets the measurement window,
+monitoring fails instead of emitting an invalid interval. See EXIT STATUS.
 .SH OUTPUT
-The first result follows one complete interval. Sampling uses monotonic
+The first periodic result follows one complete interval. Sampling uses monotonic
 clock deadlines; an overrun skips missed deadlines instead of issuing catch-up
 bursts. CPU hotplug rebuilds dependent state and establishes a new baseline
 before output resumes.
@@ -160,6 +199,16 @@ CPU rows use real Linux IDs and are sorted by ID. Package rows group selected
 CPUs by physical package ID. SUM averages valid CPU frequency and Busy/Idle
 values. Each SUM LPI state requires valid data from every selected CPU; summary
 PMU likewise requires every CPU group and sums their interval counts.
+.SH TURBOSTAT MIGRATION
+Long options use the canonical spellings shown above, including underscores
+and capitalized Summary, Joules, and Dump. Previous spellings and \fB-O\fR
+are not accepted. armstat retains its own field groups, formats, and one-second
+default; it is not fully compatible with turbostat.
+.PP
+Freq is a current sysfs sample, not Avg_MHz or Bzy_MHz. Default Busy% uses
+software procstat accounting, not hardware C0 residency. LPI states are
+independent interval statistics whose sum need not equal Idle%.
+Power is in mW; \fB-J\fR adds estimated Energy[J] alongside power.
 .SH METRICS
 .TP
 .B Frequency
@@ -293,13 +342,23 @@ representable online IDs. Dedicated core aggregate rows are not implemented.
 Hardware telemetry and sustained behavior require validation on the actual
 server; VM execution verifies portability and contracts only.
 .SH EXIT STATUS
-Zero means the operation and checked output flush succeeded. One means invalid
-arguments, initialization or collection failure, an unusable selection, or
-an output write/finalization failure. Closed pipes are handled as EPIPE so
-resources are cleaned up before exit.
+Without a command, zero means the operation and checked output flush succeeded.
+One means invalid arguments, initialization or collection failure, an unusable
+selection, or an output write/finalization failure. Closed pipes are handled
+as EPIPE so resources are cleaned up before exit.
+.PP
+After successful command measurement and output, return the command's exit
+code: 127 for a command not found, 126 for other exec failures, and 128 plus
+the signal number for signal termination. Monitoring or output failure returns
+one, overriding the command status.
 .SH EXAMPLES
 .nf
 armstat --probe
+armstat -P --probe
+armstat -D -c 0-3
+armstat -n 1
+armstat -q -- sleep 2
+armstat -f json -o command.json -- sleep 2
 armstat -i 1 -n 5
 armstat -S -a -i 1 -n 10
 armstat -a --cpu 0-3
@@ -310,8 +369,8 @@ armstat -s idle-usage
 armstat -s all
 armstat -s pkg_freq_mhz
 armstat -I
-armstat -S -a -f json -O summary.json -i 1 -n 60
-armstat -a -f csv -O cpus.csv -i 1 -n 60
+armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --preset freq
 armstat-plot-cpu cpus.csv --preset busy --top 8
 .fi

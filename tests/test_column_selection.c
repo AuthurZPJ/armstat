@@ -9,6 +9,7 @@
 
 #include <assert.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "armstat_cli.h"
 #include "formatter.h"
@@ -458,6 +459,35 @@ static void test_requested_idle_states_exist_before_runtime_discovery(void)
 		FIELD_SERIES_IDLE_STATE_RESIDENCY) == 0U);
 }
 
+static void test_no_perf_hides_ipc_without_narrowing_selected_metrics(void)
+{
+	char *default_view[] = {"armstat", "-P", NULL};
+	char *live[] = {"armstat", "-a", "-P", NULL};
+	char *full[] = {"armstat", "-s", "all", "-P", NULL};
+	char *cpu[] = {"armstat", "-s", "cpu", "-P", NULL};
+	char **views[] = {default_view, live, full, cpu};
+	int counts[] = {2, 3, 4, 4};
+
+	for (int i = 0; i < ARRAY_SIZE(views); i++) {
+		struct armstat_options opts = default_options;
+
+		reset_columns();
+		optind = 1;
+		assert(parse_args(counts[i], views[i], &opts) == 0);
+		assert(apply_default_pmu_events(&opts) == 0);
+		assert(opts.no_perf == 1 && opts.pmu_auto == 0);
+		assert(opts.pmu_events == NULL);
+		assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "ipc"));
+		assert(!scope_has_field(FIELD_SCOPE_CPU, "ipc"));
+		assert(scope_has_field(FIELD_SCOPE_SYSTEM, "freq") == (i != 3));
+		assert(scope_has_field(FIELD_SCOPE_CPU, "freq"));
+		assert(scope_has_field(FIELD_SCOPE_CPU, "busy_percent"));
+		assert(section_emit_cpu() == (i != 0));
+		assert(section_emit_default_summary() == (i != 3));
+		assert(section_emit_package() == (i == 2));
+	}
+}
+
 int main(void)
 {
 	test_field_registry_keys_are_unique();
@@ -480,5 +510,6 @@ int main(void)
 	test_stable_ids_select_one_scope_and_aliases_keep_rows_opt_in();
 	test_residency_and_usage_hiding_preserves_the_other_family();
 	test_requested_idle_states_exist_before_runtime_discovery();
+	test_no_perf_hides_ipc_without_narrowing_selected_metrics();
 	return 0;
 }

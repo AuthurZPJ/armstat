@@ -33,6 +33,7 @@ collect sys_snapshot -> calculate interval_stats -> build interval_record -> ser
 | Module | Owned work |
 |---|---|
 | `app/armstat_cli.c`, `app/armstat.c` | Options, startup, sampling loop, signals, output finalization, cleanup |
+| `app/command.c` | Command process groups, launch gate, terminal access, signal forwarding, wait status |
 | `core/collector.c` | Raw snapshot orchestration and shared accessors |
 | `core/sample_cache.c` | Reusable buffers, cached reads, slow refresh |
 | `core/aggregator.c` | Interval deltas, validity, CPU/package aggregation, baseline commit |
@@ -43,10 +44,24 @@ collect sys_snapshot -> calculate interval_stats -> build interval_record -> ser
 Collection reads raw samples; aggregation derives interval deltas, percentages,
 and rates. Serializers consume one self-contained record rather than retaining
 pointers into mutable snapshot data.
+Raw diagnostics use `output/formatter_raw.c` directly after one snapshot,
+bypassing interval aggregation and the selected display fields.
 
 The first snapshot establishes a baseline. Later samples use monotonic deadlines
 anchored to it; collection/output time reduces the next wait. Fully missed
 deadlines are skipped, and formulas always use measured `interval_delta_us`.
+
+Command mode (`armstat [options] -- command [args...]`) completes initialization
+before launch, then establishes a fresh baseline immediately before releasing
+the child to exec. After wait/reap, one completion snapshot yields one interval.
+The window includes small collection, launch, and wait overheads.
+The child has its own process group; INT/TERM/HUP/QUIT are forwarded, and
+foreground terminal access and shell stop/continue behavior are preserved.
+Initialization failure prevents execution. CPU hotplug that resets the window,
+collection failure, or output failure returns 1 without claiming a valid sample.
+Successful measurement/output preserves the child status, including nonzero
+exits: not found 127, other exec failures 126, signal termination 128+signal.
+Statistics still describe selected CPU/platform activity, not per-process work.
 
 ### CPU identity
 
@@ -151,6 +166,9 @@ without adding raw counter columns or CPU rows. This needs 2N perf descriptors
 for N selected CPUs. If any CPU group fails startup, all automatic counters
 are closed and IPC is hidden; only `-d` reports the failure. `-H ipc` suppresses
 automatic collection. Other whitelists collect IPC only when selected.
+`-P`/`--no-perf` prevents PMU initialization and skips the perf test in
+`--probe`. Explicit PMU/IPC requests conflict with it regardless of option order;
+Busy/Idle source rules remain unchanged.
 
 Explicit `-I`, `-p`, or IPC field/group requests retain diagnostics and
 unavailable columns. `-I` displays raw counts and IPC; an IPC selection alone
@@ -226,8 +244,10 @@ and `lpi0_usage` also enable CPU rows.
 `-s cpu` alone supplies common CPU live metrics without SUM and preserves
 explicit hide exclusions; combined selections use the requested fields and
 scopes. Independent PMU/IPC/energy requests retain their required SUM output.
-Existing CPU-filter rules still suppress implicit aggregate sections when CPU
-rows are expanded. The first `-s` replaces earlier views: `-a -s cpu` selects
+CPU filtering retains the selected-CPU SUM alongside expanded CPU rows;
+the `-s cpu` shortcut stays CPU-only, and package rows follow selection.
+Global counters and platform sensors keep their own scope.
+The first `-s` replaces earlier views: `-a -s cpu` selects
 the CPU shortcut; `-s cpu -a` selects the expanded live view.
 Repeated `-s` extends the whitelist, including the full `-s all` selection,
 without restoring unrelated groups hidden by `-H`, including explicitly
@@ -254,12 +274,39 @@ same end time. Do not use the requested interval as an exported rate denominator
 
 When SUM is the only output scope, text uses a continuous table with one
 timestamped data row per interval, including default, `-S`, and matching `-s`
-selections. Other views
-use interval markers, measured seconds, and blank separators. Text timestamps
-retain the date/timezone and three fractional digits. Headers include units
+selections. Other views use interval markers, measured seconds, and blank
+separators. Text timestamps retain the date/timezone and three fractional
+digits. Headers include units
 and repeat on label, selection, or width changes. Row-key widths accommodate
-sparse package IDs. Quiet text omits
-markers, timestamps, headers, and the banner. Machine keys remain unchanged.
+sparse package IDs. `-q`/`--quiet` hides only the startup banner;
+`--quiet-all` also removes markers, timestamps, and headers. Machine keys
+remain unchanged.
+
+By default, text sent to a terminal with a reported height and width repeats
+headers automatically. SUM-only output uses a screen-line budget across
+intervals; other views start each section with a header every interval and repeat it
+within long CPU/package tables. Terminal dimensions are read each interval
+to follow resizing. Selected field, PMU, row-key, and SUM-only timestamp
+widths estimate line wrapping; two screen lines are reserved. If one header
+plus a data row cannot fit, automatic rolling repeats stop; startup, layout
+changes, and section starts still print headers.
+This controls header placement, without dropping columns, paging, or
+redrawing the screen. Explicit `-N N` replaces this policy: positive N repeats
+every N samples, while `-N 0` prints only at startup and on layout changes.
+Pipes, redirection, and terminals without usable dimensions use that latter
+behavior by default. `--quiet-all` suppresses interval headers in all cases.
+
+`-D`/`--Dump` is a separate diagnostic text format. It collects the backend's
+available proc/sysfs sources once without sleeping, ignoring view/field
+selection; `-c` still limits CPUs. It includes cumulative procstat/schedstat
+and cpuidle counters, CPU configuration, memory-read bytes, and current
+sensors with labelled units. Dump reads schedstat without a source override
+and includes up to 16 cpuidle states, beyond the regular eight LPI columns.
+It calculates no interval delta, rate, percentage,
+or energy, and opens no perf events. Its explanatory body remains visible with
+quiet options; `-N` has no effect. Dump conflicts with explicit `-i`/`-n`,
+a command, `--probe`, `-l`, non-text formats, and explicit PMU/IPC requests.
+Use `-n 1` for a single measured interval.
 
 ### JSON
 
@@ -299,11 +346,32 @@ can change.
 
 ### Output lifecycle
 
-Existing targets are opened only after initialization, baseline collection,
-and formatter allocation succeed. After startup, output streams progressively;
+`-o`/`--out` chooses the statistics file. Periodic statistics use stdout by
+default; command statistics use stderr while the child retains its original
+stdout/stderr. Child stderr and statistics therefore share a stream by default;
+use a file for command JSON/CSV. Command mode requires an explicit `--` and
+rejects explicit `-i`/`-n`, `-D`, `--probe`, and `-l`.
+
+Existing targets are opened only after initialization and baseline collection
+succeed, with formatter allocation also required for interval output.
+After startup, output streams progressively;
 later failures retain the written prefix and return nonzero. All successful
 operations, including help/list/probe, require a checked stdout flush. SIGPIPE
 is handled as EPIPE, allowing resource cleanup before exit.
+
+### CLI migration
+
+Canonical aliases are `-n`/`--num_iterations`, `-N`/`--header_iterations`,
+`-S`/`--Summary`, `-J`/`--Joules`, `-o`/`--out`, and `-D`/`--Dump`.
+Long names are case-sensitive; previous spellings and `-O` are not accepted.
+Probe is only `--probe`, and `-P` now disables perf. `-q` keeps the text table;
+use `--quiet-all` for the former undecorated text output.
+
+The CLI adopts selected turbostat conventions while retaining native views,
+formats, and the one-second interval. `Freq` is a sysfs point sample, not
+Avg_MHz/Bzy_MHz; default Busy is software procstat accounting, not hardware C0.
+LPI columns remain independent of Idle%. Power is mW and `-J` adds estimated
+interval joules alongside it. The README contains the compact migration table.
 
 ## Plotting exports
 
@@ -313,8 +381,8 @@ Plotting needs Python 3 and matplotlib, for example in an activated environment:
 python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install matplotlib
-armstat -S -a -f json -O summary.json -i 1 -n 60
-armstat -a -f csv -O cpus.csv -i 1 -n 60
+armstat -S -a -f json -o summary.json -i 1 -n 60
+armstat -a -f csv -o cpus.csv -i 1 -n 60
 armstat-plot-summary summary.json --y power --y2 temp0
 armstat-plot-cpu cpus.csv --preset busy --top 8
 ```

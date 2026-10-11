@@ -198,6 +198,144 @@ test "$online_cpus" -gt 0
 test "$tracked_cpus" -gt 0
 test "$tracked_cpus" -le "$online_cpus"
 
+# New command and raw modes must work without perf access.
+python3 - "$armstat_bin" "$tmp_dir" "$sample_interval" <<'PY'
+import csv
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+binary, directory, interval = sys.argv[1:]
+root = Path(directory)
+cpu = int(Path("/sys/devices/system/cpu/online").read_text().split(",")[0].split("-")[0])
+
+def run(options, command=None, env=None, pass_fds=()):
+    argv = [binary, *options]
+    if command is not None:
+        argv += ["--", *command]
+    return subprocess.run(argv, capture_output=True, text=True, env=env,
+                          pass_fds=pass_fds, timeout=30)
+
+child = ["/bin/sh", "-c",
+         "printf 'command-stdout\\n'; printf 'command-stderr\\n' >&2; sleep 0.02"]
+text = run(["-P", "-q", "-c", str(cpu)], child)
+assert text.returncode == 0, text.stderr
+assert text.stdout == "command-stdout\n", text.stdout
+assert "command-stderr\n" in text.stderr
+assert "Timestamp" in text.stderr and "SUM" in text.stderr, text.stderr
+assert "ARM Server Performance Monitor" not in text.stderr, text.stderr
+
+fd_check = """
+import os
+import sys
+assert os.read(int(sys.argv[1]), 64) == b'kept-user-fd'
+for entry in os.listdir('/proc/self/fd'):
+    if int(entry) <= 2:
+        continue
+    try:
+        target = os.readlink('/proc/self/fd/' + entry)
+    except FileNotFoundError:
+        continue
+    assert not (target.startswith('/sys/') or
+                target in ('/proc/stat', '/proc/schedstat') or
+                'perf_event' in target), (entry, target)
+print('command-stdout')
+sys.stderr.write('command-stderr\\n')
+"""
+user_path = root / "command-user-fd"
+user_path.write_bytes(b"kept-user-fd")
+for fmt in ("json", "csv"):
+    path = root / f"command.{fmt}"
+    options = ["-P", "-q", "-c", str(cpu), "-f", fmt, "--out", str(path)]
+    if fmt == "json":
+        with user_path.open("rb") as user_stream:
+            fd = user_stream.fileno()
+            result = run(options, [sys.executable, "-c", fd_check, str(fd)],
+                         pass_fds=(fd,))
+    else:
+        result = run(options, child)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "command-stdout\n", result.stdout
+    assert "command-stderr\n" in result.stderr, result.stderr
+    assert "schema_version" not in result.stderr and "Timestamp" not in result.stderr
+    if fmt == "json":
+        sample, = json.loads(path.read_text())
+        assert sample["schema_version"] == 9 and sample["interval"] == 1
+        assert sample["duration_us"] > 0
+        assert isinstance(sample["summary"], dict)
+        assert "cpus" not in sample and "packages" not in sample
+        assert "ipc" not in sample["summary"] and "pmu" not in sample["summary"]
+    else:
+        with path.open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        assert len(rows) == 1 and rows[0]["Scope"] == "SUM", rows
+        assert all(row["schema_version"] == "9" and row["interval"] == "1"
+                   and int(row["duration_us"]) > 0 for row in rows)
+
+# A numeric CPU filter keeps SUM in the periodic live view too.
+for fmt in ("json", "csv"):
+    path = root / f"filtered.{fmt}"
+    result = run(["-P", "-a", "-c", str(cpu), "-f", fmt, "--out", str(path),
+                  "-i", interval, "--num_iterations", "1"])
+    assert result.returncode == 0, result.stderr
+    if fmt == "json":
+        sample, = json.loads(path.read_text())
+        assert sample["interval"] == 1 and isinstance(sample["summary"], dict)
+        assert [row["cpu"] for row in sample["cpus"]] == [cpu]
+        assert "packages" not in sample
+    else:
+        with path.open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        assert {row["Scope"] for row in rows} == {"SUM", "CPU"}, rows
+        assert len(rows) == 2 and all(row["interval"] == "1" for row in rows)
+        assert [int(row["CPU"]) for row in rows if row["Scope"] == "CPU"] == [cpu]
+
+failed = run(["-P", "-q", "-c", str(cpu)],
+             ["/bin/sh", "-c", "sleep 0.02; exit 7"])
+assert failed.returncode == 7, failed.stderr
+assert "Timestamp" in failed.stderr and "SUM" in failed.stderr, failed.stderr
+missing = run(["-P", "-q", "-c", str(cpu)], [str(root / "nonexistent-command")])
+assert missing.returncode == 127, missing.stderr
+assert "cannot execute" in missing.stderr and "SUM" in missing.stderr, missing.stderr
+
+marker = root / "command-started"
+mark = ["/bin/sh", "-c", 'touch "$1"', "sh", str(marker)]
+previous = root / "command-init.out"
+previous.write_text("previous-valid-output\n")
+invalid_env = dict(os.environ, ARMSTAT_TEMP_POLICY="invalid")
+init = run(["-P", "-c", str(cpu), "--out", str(previous)], mark, invalid_env)
+assert init.returncode == 1 and not marker.exists(), init.stderr
+assert "unknown ARMSTAT_TEMP_POLICY" in init.stderr, init.stderr
+assert previous.read_text() == "previous-valid-output\n"
+output = run(["-P", "-c", str(cpu), "--out", str(root)], mark)
+assert output.returncode == 1 and not marker.exists(), output.stderr
+assert "cannot open output file" in output.stderr, output.stderr
+
+# Raw diagnostics retain their body despite quiet/header/field selections.
+raw = run(["-P", "-D", "-q", "-N", "1", "-s", "freq", "-c", str(cpu)])
+assert raw.returncode == 0, raw.stderr
+assert raw.stdout.startswith("armstat raw snapshot\n"), raw.stdout
+for label in ("/proc/stat", "/proc/schedstat", "Idle+IOWait[jiffies]",
+              "Runtime[ns]", "memory_read[bytes]", "package_power[mW]"):
+    assert label in raw.stdout, (label, raw.stdout)
+assert "tracked_cpus: 1" in raw.stdout
+assert "--- interval" not in raw.stdout and "duration_us" not in raw.stdout
+assert "Busy%" not in raw.stdout and "schema_version" not in raw.stdout
+try:
+    json.loads(raw.stdout)
+except json.JSONDecodeError:
+    pass
+else:
+    raise AssertionError("raw Dump unexpectedly emitted interval JSON")
+
+probe = run(["-P", "--probe"])
+assert probe.returncode == 0, probe.stderr
+assert "pmu_cycles: no" in probe.stdout
+assert "pmu_note: disabled by --no-perf; perf was not probed" in probe.stdout
+PY
+
 # Two explicitly required IPC events need two perf fds per tracked CPU.
 # Automatic IPC receives this budget only after the default capture shows IPC.
 # An explicit ARMSTAT_MAX_OPEN_FDS always wins.
@@ -662,7 +800,7 @@ PY
 
 printf '%s\n' 'previous-valid-export' >"$tmp_dir/option-output.json"
 "$armstat_bin" -S -s ctx_switches -f json -i "$sample_interval" -n 1 \
-	--output "$tmp_dir/option-output.json"
+	--out "$tmp_dir/option-output.json"
 python3 - "$tmp_dir/option-output.json" <<'PY'
 import json
 import sys
@@ -675,11 +813,11 @@ assert samples[0].get("schema_version") == 9
 assert isinstance(samples[0].get("summary", {}).get("ctx_switches"), int)
 PY
 
-"$armstat_bin" --probe --export "$tmp_dir/probe-option-output.txt"
+"$armstat_bin" --probe --out "$tmp_dir/probe-option-output.txt"
 grep -F 'probe_schema_version: 1' "$tmp_dir/probe-option-output.txt" >/dev/null
 
 if "$armstat_bin" -S -s ctx_switches -f json -i "$sample_interval" -n 1 \
-	--output "$tmp_dir" 2>"$tmp_dir/output-directory.stderr"; then
+	--out "$tmp_dir" 2>"$tmp_dir/output-directory.stderr"; then
 	echo "target-test writing to a directory unexpectedly succeeded" >&2
 	exit 1
 fi

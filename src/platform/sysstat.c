@@ -20,6 +20,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <fcntl.h>
 
 #include "sysstat.h"
 #include "collector.h"
@@ -62,6 +63,12 @@ static FILE *get_sysstat_fp(const char *path)
 			/* Open and cache */
 			sysstat_fds[i].fp = fopen(path, "r");
 			if (sysstat_fds[i].fp) {
+				if (fcntl(fileno(sysstat_fds[i].fp), F_SETFD,
+					  FD_CLOEXEC) < 0) {
+					fclose(sysstat_fds[i].fp);
+					sysstat_fds[i].fp = NULL;
+					return NULL;
+				}
 				sysstat_fds[i].valid = 1;
 				return sysstat_fds[i].fp;
 			}

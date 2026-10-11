@@ -8,8 +8,7 @@
  *   - default mode: SUM only, with CPU package topology retained
  *   - explicit full selection: SUM + package + CPU sections
  *   - -S: summary-only mode
- *   - --cpu filter: suppresses implicit aggregation beside CPU rows, while
- *     preserving explicitly selected aggregate-only output
+ *   - --cpu filter: preserves selected SUM/package/CPU sections
  *   - clear_columns: no sections
  */
 
@@ -136,7 +135,7 @@ static void test_summary_mode(void)
 	CHECK(section_emit_mixed_csv() == 0);
 }
 
-static void test_cpu_filter_suppresses_aggregation(void)
+static void test_cpu_filter_preserves_selected_aggregation(void)
 {
 	reset_policy_state();
 	set_all_columns_enabled(1);
@@ -146,10 +145,18 @@ static void test_cpu_filter_suppresses_aggregation(void)
 	CHECK(section_emit_default_summary() == 1);
 
 	CHECK(set_cpu_inventory_filter("0") == 0);
-	CHECK(section_emit_package() == 0);
-	CHECK(section_emit_default_summary() == 0);
-	/* Per-CPU rows survive the filter. */
+	CHECK(section_emit_package() == 1);
+	CHECK(section_emit_default_summary() == 1);
 	CHECK(section_emit_cpu() == 1);
+	CHECK(section_emit_mixed_csv() == 1);
+
+	/* A filter does not override an explicit CPU-only view. */
+	set_section_default_summary_output(0);
+	enable_package(0);
+	CHECK(section_emit_default_summary() == 0);
+	CHECK(section_emit_package() == 0);
+	CHECK(section_emit_cpu() == 1);
+	CHECK(section_emit_mixed_csv() == 0);
 }
 
 static void test_cpu_filter_keeps_explicit_aggregate_only_output(void)
@@ -289,7 +296,7 @@ int main(void)
 	test_all_columns_mode();
 	test_package_and_cpu_use_mixed_csv();
 	test_summary_mode();
-	test_cpu_filter_suppresses_aggregation();
+	test_cpu_filter_preserves_selected_aggregation();
 	test_cpu_filter_keeps_explicit_aggregate_only_output();
 	test_clear_columns();
 	test_pmu_summary_survives_empty_registry_field_selection();

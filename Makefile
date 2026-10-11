@@ -58,7 +58,7 @@ BUILD_CONFIG_KEY := $(shell printf '%s\n' "$(BUILD_CONFIG_INPUT)" | \
 	cksum | awk '{print $$1 "-" $$2}')
 BUILD_CONFIG_STAMP := $(BUILD_CONFIG).$(BUILD_CONFIG_KEY)
 
-SRCS = app/armstat.c app/armstat_cli.c \
+SRCS = app/armstat.c app/armstat_cli.c app/command.c \
 	core/aggregator.c core/collector.c core/cpu_inventory.c \
 	core/sample_cache.c core/sampling_deadline.c \
 	platform/cpufreq.c platform/cpuidle.c platform/idle_backend.c \
@@ -67,7 +67,7 @@ SRCS = app/armstat.c app/armstat_cli.c \
 	platform/sysfs_util.c platform/sysstat.c platform/topology.c \
 	output/columns.c output/formatter_csv.c output/formatter_json.c \
 	output/formatter_machine.c output/formatter_record.c \
-	output/formatter_section.c output/formatter_text.c \
+	output/formatter_section.c output/formatter_text.c output/formatter_raw.c \
 	output/formatter_values.c
 ANALYZE_SRCS = $(addprefix $(CODE_DIR)/,$(SRCS))
 OBJ_NAMES = $(SRCS:.c=.o)
@@ -83,7 +83,7 @@ LEGACY_OBJS = $(addprefix $(BUILD_OUTPUT)/,$(LEGACY_OBJ_NAMES))
 LEGACY_DEP_FILES = $(LEGACY_OBJS:.o=.d)
 
 TEST_NAMES = test_core_logic test_column_selection test_runtime_smoke \
-	     test_cpu_inventory test_section_policy
+	     test_cpu_inventory test_section_policy test_command test_raw_snapshot
 TEST_BINS = $(addprefix $(BUILD_OUTPUT)/tests/,$(TEST_NAMES))
 TEST_WRAPPERS = $(addprefix tests/,$(TEST_NAMES))
 TEST_DEP_FILES = $(TEST_BINS:%=%.d)
@@ -202,8 +202,14 @@ test: $(TARGET) $(TEST_BINS)
 	$(BUILD_OUTPUT)/tests/test_core_logic
 	$(BUILD_OUTPUT)/tests/test_column_selection
 	$(BUILD_OUTPUT)/tests/test_runtime_smoke
+	ARMSTAT_TEST_BIN=$(BUILD_OUTPUT)/tests/test_runtime_smoke \
+		PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_text_terminal.py
 	$(BUILD_OUTPUT)/tests/test_cpu_inventory
 	$(BUILD_OUTPUT)/tests/test_section_policy
+	$(BUILD_OUTPUT)/tests/test_command
+	ARMSTAT_COMMAND_TEST_BIN=$(BUILD_OUTPUT)/tests/test_command \
+		PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_command_terminal.py
+	$(BUILD_OUTPUT)/tests/test_raw_snapshot
 	ARMSTAT_BIN=$(TARGET) sh $(SRC_DIR)/tests/test_cli_smoke.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_loaders.py
 	PYTHONDONTWRITEBYTECODE=1 python3 $(SRC_DIR)/tests/test_plot_render.py
