@@ -44,8 +44,11 @@ int show_membw = 0;
 int show_package = 1;
 int show_core = 0;
 int show_numa = 0;
-int show_ipc = 0;
+int show_ipc = 1;
 int show_energy = 0;
+
+/* Startup availability is separate from explicit field selection. */
+static int ipc_field_availability = 1;
 
 /* Idle state visibility - dynamically set based on actual state count */
 int show_idle_state[8] = {1, 1, 0, 0, 0, 0, 0, 0};
@@ -343,6 +346,9 @@ static int field_is_effectively_enabled(int field_index)
 
 	field = &all_fields[field_index];
 
+	if ((field->group_mask & FIELD_GROUP_IPC) && !ipc_field_availability)
+		return 0;
+
 	/*
 	 * Uncore frequency is part of the frequency group, but it should only
 	 * take a default column slot when the platform actually exposes a usable
@@ -395,18 +401,23 @@ void set_field_override_by_index(int field_index, int enable, int whitelist)
 {
 	uint64_t bit;
 
-	(void)whitelist;
 	if (field_index < 0 || field_index >= NUM_FIELDS)
 		return;
 
 	bit = 1ULL << field_index;
 	if (enable) {
-		field_show_mask |= bit;
+		if (whitelist || field_show_mask)
+			field_show_mask |= bit;
 		field_hide_mask &= ~bit;
 	} else {
 		field_hide_mask |= bit;
 		field_show_mask &= ~bit;
 	}
+}
+
+void set_ipc_field_availability(int available)
+{
+	ipc_field_availability = !!available;
 }
 
 void select_default_cpu_fields(void)
@@ -417,7 +428,8 @@ void select_default_cpu_fields(void)
 
 		if (field->scope == FIELD_SCOPE_CPU &&
 		    (field->group_mask & (FIELD_GROUP_FREQ | FIELD_GROUP_IDLE |
-				  FIELD_GROUP_TEMP)) && !(field_hide_mask & bit))
+				  FIELD_GROUP_TEMP | FIELD_GROUP_IPC)) &&
+		    !(field_hide_mask & bit))
 			field_show_mask |= bit;
 	}
 }
@@ -621,8 +633,9 @@ static void set_all_show_flags(int val)
 	show_package= 0;
 	show_core   = 0;
 	show_numa   = 0;
-	show_ipc    = 0;
+	show_ipc    = val;
 	show_energy = 0;
+	ipc_field_availability = 1;
 }
 
 void reset_columns(void)

@@ -46,7 +46,7 @@ the collector itself has no Python dependency. See the reference for
 | Default | One `SUM` row |
 | `-a` | `SUM` and per-CPU live metrics, including CPU topology |
 | `-S` | One `SUM` row |
-| `-s cpu` | Per-CPU frequency, Busy/Idle/IOWait, LPI residency, and temperature |
+| `-s cpu` | Per-CPU frequency, Busy/Idle/IOWait, LPI residency, temperature, and available IPC |
 | `-s all` | Full base view, including package rows, configuration, and LPI usage |
 | Explicit `-s` | Scopes requested by the selected groups or fields |
 
@@ -139,9 +139,12 @@ armstat -s cpu,freq,idle                # SUM and CPU rows for chosen metrics
 armstat -s freq-config                 # CPU frequency limits, governor, boost
 armstat -s idle-usage                  # CPU idle-state entries per second
 armstat -s all                         # Full base view
+armstat -s all,membw                   # Also request memory-read bandwidth
 armstat -s pkg_freq_mhz                 # Package frequency only
 armstat -s power,temp                   # Power and temperature
 armstat -H temp                         # Hide temperature
+armstat -H ipc                          # Skip automatic IPC collection
+armstat -s ipc                          # IPC summary, with explicit diagnostics
 armstat -I                             # Cycles, instructions, and IPC
 armstat -J                             # Interval energy
 ```
@@ -156,6 +159,8 @@ expanded with a CPU filter, implicit aggregate rows are suppressed; use
 and Busy/Idle/IOWait. `freq-config` and `idle-usage` separately select CPU
 configuration and state-entry rates. `-a` omits those two groups and package
 rows; its CPU `Pkg`, `Core`, and `Node` columns support identification and grouping.
+`MemBW` is opt-in: use `-s membw` (or `mem`) or `-s mem_bw`, alone or combined
+with other selections. Default, `-S`, `-a`, and `-s all` do not enable it.
 
 Group names are case-insensitive: `Freq` and `freq` select the same group.
 Groups take precedence, then exact stable field IDs, then text/JSON aliases.
@@ -189,9 +194,20 @@ armstat -p cache-misses,branches
 armstat -p 0x11
 ```
 
-`-p` selects event counts without automatically adding IPC; `-I` selects
-`cycles,instructions` and IPC. An explicit PMU/IPC request without an event
-list defaults to those two events. Neither `-a` nor `-s all` enables PMU/IPC.
+Default, `-S`, `-a`, `-s all`, and `-s cpu` views attempt IPC using
+`cycles,instructions`. This adds neither raw counters nor CPU rows. With N
+selected CPUs it needs 2N perf file descriptors. If any CPU event group cannot
+initialize, automatic IPC is hidden and its counters are closed, silently
+unless `-d` is enabled. `-H ipc` disables this automatic collection. Other
+`-s` whitelists collect IPC only when requested.
+
+`-p` selects raw event counts and suppresses automatic IPC; add `-I` or an
+explicit IPC selection to request it. `-I` shows raw `cycles,instructions`
+and IPC; `-s ipc` or `-s cpu_ipc` requests IPC without raw counts. Explicit IPC
+requests add the required event pair to custom lists. These explicit requests
+report initialization failures and retain unavailable columns. After successful
+automatic initialization, later invalid reads likewise retain IPC as `-`,
+`null`, or empty cells, preserving the CSV layout.
 
 Raw events require a `0x` or `0X` prefix and hexadecimal digits within 64 bits.
 Unknown or duplicate names and lists over 16 events are rejected. Known events

@@ -173,7 +173,8 @@ int rebuild_hotplug_dependent_state(void)
 	}
 
 	sync_cpuidle_runtime_state(1);
-	if (get_pmu_event_count() > 0 && rebuild_pmu_events() < 0)
+	if (get_pmu_event_count() > 0 && rebuild_pmu_events() < 0 &&
+	    pmu_diagnostics_enabled())
 		fprintf(stderr, "Warning: PMU rebuild failed after CPU topology change; PMU columns will be unavailable\n");
 
 	/*

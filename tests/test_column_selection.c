@@ -48,6 +48,7 @@ static void test_static_default_column_state_inherits_group_visibility(void)
 	assert(!scope_has_field(FIELD_SCOPE_CPU, "min"));
 	assert(!scope_has_field(FIELD_SCOPE_CPU, "governor"));
 	assert(!scope_has_field(FIELD_SCOPE_CPU, "lpi0_usage"));
+	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "mem_bw"));
 	assert(section_emit_package() == 0);
 	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "uncore_freq"));
 	assert(power->scope == FIELD_SCOPE_SYSTEM);
@@ -220,7 +221,7 @@ static void test_idle_residency_and_usage_are_independently_selectable(void)
 		FIELD_SCOPE_CPU, FIELD_SERIES_IDLE_STATE_USAGE) == 0U);
 }
 
-static void test_all_columns_enable_base_groups_but_not_pmu_or_ipc(void)
+static void test_all_columns_include_ipc_without_raw_pmu(void)
 {
 	clear_columns();
 	set_all_columns_enabled(1);
@@ -233,13 +234,16 @@ static void test_all_columns_enable_base_groups_but_not_pmu_or_ipc(void)
 	assert(show_power == 1);
 	assert(show_temp == 1);
 	assert(show_sysstat == 1);
-	assert(show_membw == 1);
+	assert(show_membw == 0);
+	assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "mem_bw"));
 	assert(show_package == 1);
 	assert(show_core == 1);
 	assert(show_numa == 1);
 	assert(show_energy == 1);
 	assert(show_pmu == 0);
-	assert(show_ipc == 0);
+	assert(show_ipc == 1);
+	assert(scope_has_field(FIELD_SCOPE_SYSTEM, "ipc"));
+	assert(scope_has_field(FIELD_SCOPE_CPU, "ipc"));
 }
 
 static void test_show_all_remains_union_with_later_tokens(void)
@@ -266,6 +270,7 @@ static void test_hide_all_turns_off_explicit_pmu_and_ipc(void)
 	clear_columns();
 	enable_pmu(1);
 	enable_ipc(1);
+	assert(parse_column_option("membw", 1) == 0);
 
 	parse_column_option("all", 0);
 
@@ -284,6 +289,37 @@ static void test_hide_all_turns_off_explicit_pmu_and_ipc(void)
 	assert(show_energy == 0);
 	assert(show_pmu == 0);
 	assert(show_ipc == 0);
+}
+
+static void test_membw_requires_explicit_group_or_field_selection(void)
+{
+	const char *selections[] = {"membw", "mem", "mem_bw"};
+	const char *unions[] = {"all,membw", "membw,all", "mem_bw,all"};
+	struct field_desc *field = require_field("mem_bw");
+
+	assert(field->scope == FIELD_SCOPE_SYSTEM);
+	assert(field->group_mask == FIELD_GROUP_MEMBW);
+	assert(strcmp(field->unit, "MiB/s") == 0);
+	for (unsigned int i = 0; i < sizeof(selections) / sizeof(selections[0]); i++) {
+		clear_columns();
+		assert(parse_column_option(selections[i], 1) == 0);
+		assert(show_membw == 1);
+		assert(scope_has_field(FIELD_SCOPE_SYSTEM, "mem_bw"));
+		assert(!any_fields_enabled(FIELD_SCOPE_CPU));
+		assert(show_ipc == 0 && show_pmu == 0);
+	}
+
+	for (unsigned int i = 0; i < sizeof(unions) / sizeof(unions[0]); i++) {
+		clear_columns();
+		assert(parse_column_option(unions[i], 1) == 0);
+		assert(scope_has_field(FIELD_SCOPE_SYSTEM, "mem_bw"));
+		assert(scope_has_field(FIELD_SCOPE_SYSTEM, "ctx_switches"));
+		assert(scope_has_field(FIELD_SCOPE_CPU, "governor"));
+		assert(parse_column_option("membw", 0) == 0);
+		assert(parse_column_option("all", 1) == 0);
+		assert(!scope_has_field(FIELD_SCOPE_SYSTEM, "mem_bw"));
+		assert(scope_has_field(FIELD_SCOPE_SYSTEM, "ctx_switches"));
+	}
 }
 
 static void test_groups_ignore_case_and_separate_frequency_configuration(void)
@@ -436,9 +472,10 @@ int main(void)
 	test_temp_group_whitelist_obeys_runtime_temp_availability();
 	test_temp_and_idle_field_metadata();
 	test_idle_residency_and_usage_are_independently_selectable();
-	test_all_columns_enable_base_groups_but_not_pmu_or_ipc();
+	test_all_columns_include_ipc_without_raw_pmu();
 	test_show_all_remains_union_with_later_tokens();
 	test_hide_all_turns_off_explicit_pmu_and_ipc();
+	test_membw_requires_explicit_group_or_field_selection();
 	test_groups_ignore_case_and_separate_frequency_configuration();
 	test_stable_ids_select_one_scope_and_aliases_keep_rows_opt_in();
 	test_residency_and_usage_hiding_preserves_the_other_family();

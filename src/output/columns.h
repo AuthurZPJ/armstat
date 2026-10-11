@@ -206,6 +206,8 @@ void clear_field_overrides(void);
 void set_field_override_by_index(int field_index, int enable, int whitelist);
 /* Fill a CPU-only view without overriding explicit hide requests. */
 void select_default_cpu_fields(void);
+/* Hide automatic IPC after startup failure; runtime failures retain the layout. */
+void set_ipc_field_availability(int available);
 
 /*
  * Idle-state series visibility + overrides.

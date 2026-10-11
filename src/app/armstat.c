@@ -293,17 +293,7 @@ static int init_modules(struct armstat_options *opts, struct sys_snapshot *snaps
 	update_idle_state_visibility();
 	update_temp_field_visibility();
 
-	/* Initialize PMU if requested */
-	if (opts->pmu_events && (is_pmu_enabled() || is_ipc_enabled())) {
-		if (opts->debug) fprintf(stderr, "Initializing PMU: %s\n", opts->pmu_events);
-		if (init_pmu_events(opts->pmu_events) < 0) {
-			fprintf(stderr, "Warning: PMU init failed; PMU columns will be shown as unavailable\n");
-			fprintf(stderr, "  Events: %s\n", opts->pmu_events);
-			fprintf(stderr, "  Note: check perf permissions, kernel support, or event availability\n");
-		} else {
-			if (opts->debug) fprintf(stderr, "PMU initialized successfully\n");
-		}
-	}
+	initialize_selected_pmu(opts, init_pmu_events);
 
 	if (!section_has_output()) {
 		fprintf(stderr,

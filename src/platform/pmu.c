@@ -104,6 +104,17 @@ static uint64_t pmu_prev_time_enabled[MAX_PRESENT_CPUS];
 static uint64_t pmu_prev_time_running[MAX_PRESENT_CPUS];
 static int pmu_has_baseline[MAX_PRESENT_CPUS];
 static char *pmu_event_spec;
+static int pmu_diagnostics = 1;
+
+void set_pmu_diagnostics(int enable)
+{
+	pmu_diagnostics = !!enable;
+}
+
+int pmu_diagnostics_enabled(void)
+{
+	return pmu_diagnostics;
+}
 
 static char *trim_event_name(char *event)
 {
@@ -570,7 +581,7 @@ static void prepare_pmu_fd_budget(int tracked)
 	    setrlimit(RLIMIT_NOFILE, &updated) == 0)
 		limit.rlim_cur = updated.rlim_cur;
 
-	if (limit.rlim_cur < desired) {
+	if (pmu_diagnostics && limit.rlim_cur < desired) {
 		fprintf(stderr,
 			"Warning: PMU needs up to %llu event fds plus runtime reserve, "
 			"but RLIMIT_NOFILE is %llu; reduce --cpu/events or raise ulimit -n\n",
@@ -600,10 +611,11 @@ static int open_pmu_counters_for_tracked_cpus(void)
 						     group_fd);
 
 			if (fd < 0) {
-				fprintf(stderr,
-					"perf_event_open for '%s' on CPU %d failed: %s\n",
-					pmu_events[event].name ? pmu_events[event].name : "event",
-					cpu_id, strerror(errno));
+				if (pmu_diagnostics)
+					fprintf(stderr,
+						"perf_event_open for '%s' on CPU %d failed: %s\n",
+						pmu_events[event].name ? pmu_events[event].name : "event",
+						cpu_id, strerror(errno));
 				pmu_cpu_count++;
 				clear_pmu_fds();
 				return -1;
@@ -621,9 +633,10 @@ static int open_pmu_counters_for_tracked_cpus(void)
 				  PERF_IOC_FLAG_GROUP) < 0) {
 				int saved_errno = errno;
 
-				fprintf(stderr,
-					"Failed to start PMU group on CPU %d: %s\n",
-					cpu_id, strerror(saved_errno));
+				if (pmu_diagnostics)
+					fprintf(stderr,
+						"Failed to start PMU group on CPU %d: %s\n",
+						cpu_id, strerror(saved_errno));
 				pmu_cpu_count++;
 				clear_pmu_fds();
 				errno = saved_errno;

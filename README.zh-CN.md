@@ -42,7 +42,7 @@ sudo make install
 | 默认 | 一行 `SUM` |
 | `-a` | `SUM` 与每 CPU 动态指标，保留 CPU 拓扑 |
 | `-S` | 一行 `SUM` |
-| `-s cpu` | 每 CPU 频率、Busy/Idle/IOWait、LPI 驻留与温度 |
+| `-s cpu` | 每 CPU 频率、Busy/Idle/IOWait、LPI 驻留、温度与可用 IPC |
 | `-s all` | 完整基础视图，包含插槽行、配置与 LPI usage |
 | 显式 `-s` | 所选列组或字段要求的层级 |
 
@@ -122,9 +122,12 @@ armstat -s cpu,freq,idle                # 指定指标的 SUM 与 CPU 行
 armstat -s freq-config                 # CPU 频率上下限、governor、boost
 armstat -s idle-usage                  # 每 CPU 空闲状态进入次数/秒
 armstat -s all                         # 完整基础视图
+armstat -s all,membw                   # 额外请求内存读取带宽
 armstat -s pkg_freq_mhz                 # 仅插槽频率
 armstat -s power,temp                   # 功耗与温度
 armstat -H temp                         # 隐藏温度
+armstat -H ipc                          # 不自动采集 IPC
+armstat -s ipc                          # 仅汇总 IPC，明确报告采集问题
 armstat -I                             # 周期、指令与 IPC
 armstat -J                             # 区间能量
 ```
@@ -136,6 +139,8 @@ armstat -J                             # 区间能量
 `freq` 选择当前频率与 UncoreFreq，`idle` 选择 LPI 驻留及 Busy/Idle/IOWait。
 `freq-config`、`idle-usage` 分别选择 CPU 配置和状态进入速率。`-a` 省略这两组
 及插槽行，CPU 的 `Pkg`、`Core`、`Node` 列仍用于身份识别与分组。
+`MemBW` 需要显式选择：使用 `-s membw`（或 `mem`）、`-s mem_bw`，可单独请求或
+与其他选择组合。默认、`-S`、`-a` 和 `-s all` 均不会自动启用它。
 
 列组名不区分大小写，`Freq` 与 `freq` 相同。匹配顺序为列组、精确稳定字段 ID、
 文本/JSON 别名。重名别名不会展开行层级；通过 `cpu`、`core`、`numa` 或稳定
@@ -165,9 +170,16 @@ armstat -p cache-misses,branches
 armstat -p 0x11
 ```
 
-`-p` 只选择事件计数，不自动添加 IPC；`-I` 选择 `cycles,instructions` 与 IPC。
-显式请求 PMU/IPC 却未指定事件列表时，默认使用这两个事件。`-a` 与 `-s all`
-都不启用 PMU/IPC。
+默认、`-S`、`-a`、`-s all` 和 `-s cpu` 视图尝试用 `cycles,instructions` 提供
+IPC，不增加原始计数列或 CPU 行。所选 N 个 CPU 需要 2N 个 perf 文件描述符。
+任一 CPU 事件组初始化失败时，隐藏自动 IPC 并关闭其计数器；除 `-d` 外不报
+诊断。`-H ipc` 关闭这项自动采集。其他 `-s` 白名单只有明确选择 IPC 才采集它。
+
+`-p` 选择原始事件计数并抑制自动 IPC；需要 IPC 时加 `-I` 或显式 IPC 选择。
+`-I` 显示原始 `cycles,instructions` 及 IPC，`-s ipc` 或 `-s cpu_ipc` 只请求 IPC。
+显式 IPC 请求会为自定义事件列表补齐所需事件对，并在初始化失败时报告问题、
+保留不可用列。自动初始化成功后，后续读取失效也保留 IPC 列，以 `-`、`null`
+或空单元格表示，保持 CSV 布局。
 
 原始事件要求 `0x` 或 `0X` 前缀，后跟不超过 64 位的十六进制数。未知或重复
 名称、超过 16 个事件的列表会被拒绝。已知事件打不开时仍显示为不可用。

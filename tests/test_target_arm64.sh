@@ -11,6 +11,10 @@ soak_iterations=${ARMSTAT_SOAK_ITERATIONS:-0}
 soak_interval=${ARMSTAT_SOAK_INTERVAL:-1}
 max_rss_kib=${ARMSTAT_MAX_RSS_KIB:-262144}
 max_open_fds=${ARMSTAT_MAX_OPEN_FDS:-}
+max_open_fds_explicit=0
+if [ -n "$max_open_fds" ]; then
+	max_open_fds_explicit=1
+fi
 max_diagnostic_lines=${ARMSTAT_MAX_DIAGNOSTIC_LINES:-16}
 min_valid_percent=${ARMSTAT_MIN_VALID_PERCENT:-95}
 require_freq=${ARMSTAT_REQUIRE_FREQ:-0}
@@ -194,9 +198,9 @@ test "$online_cpus" -gt 0
 test "$tracked_cpus" -gt 0
 test "$tracked_cpus" -le "$online_cpus"
 
-# Two default IPC events require two perf fds per tracked CPU. Keep the soak
-# ceiling useful on large servers without making every operator calculate the
-# minimum budget by hand. An explicit ARMSTAT_MAX_OPEN_FDS always wins.
+# Two explicitly required IPC events need two perf fds per tracked CPU.
+# Automatic IPC receives this budget only after the default capture shows IPC.
+# An explicit ARMSTAT_MAX_OPEN_FDS always wins.
 if [ -z "$max_open_fds" ]; then
 	max_open_fds=256
 	if [ "$require_pmu" -eq 1 ]; then
@@ -364,8 +368,8 @@ fi
 grep -F 'failed to finalize output' "$tmp_dir/probe-full.stderr" >/dev/null
 
 "$armstat_bin" -f json -i "$sample_interval" -n 1 \
-	>"$tmp_dir/default.json"
-python3 - "$tmp_dir/default.json" <<'PY'
+	>"$tmp_dir/default.json" 2>"$tmp_dir/default.stderr"
+default_ipc_visible=$(python3 - "$tmp_dir/default.json" <<'PY'
 import json
 import sys
 
@@ -376,9 +380,24 @@ assert len(samples) == 1
 sample = samples[0]
 assert sample.get("schema_version") == 9
 assert isinstance(sample.get("summary"), dict)
+assert "pmu" not in sample["summary"]
+assert "mem_bw" not in sample["summary"]
 assert "packages" not in sample
 assert "cpus" not in sample
+print(int("ipc" in sample["summary"]))
 PY
+)
+if grep -E 'perf_event_open|PMU init failed|Failed to start PMU|PMU needs' \
+	"$tmp_dir/default.stderr" >/dev/null; then
+	echo "target-test automatic IPC produced a PMU failure diagnostic" >&2
+	exit 1
+fi
+if [ "$max_open_fds_explicit" -eq 0 ] && [ "$default_ipc_visible" -eq 1 ]; then
+	pmu_fd_budget=$((tracked_cpus * 2 + 64))
+	if [ "$pmu_fd_budget" -gt "$max_open_fds" ]; then
+		max_open_fds=$pmu_fd_budget
+	fi
+fi
 
 python3 "$src_dir/scripts/plot_sum.py" "$tmp_dir/default.json" \
 	--list-fields >/dev/null
@@ -398,6 +417,8 @@ assert rows[0][:7] == [
     "timestamp_iso", "Scope",
 ]
 assert "CPU" not in rows[0] and "Package" not in rows[0]
+assert not any(column.startswith("pmu.") for column in rows[0])
+assert "mem_bw" not in rows[0]
 assert not any(column.startswith(("summary.", "package.", "cpu."))
                for column in rows[0])
 assert rows[1][0] == "9" and rows[1][6] == "SUM"
@@ -407,11 +428,79 @@ PY
 python3 "$src_dir/scripts/plot_sum.py" "$tmp_dir/default.csv" \
 	--list-fields >/dev/null
 
+# Rare bandwidth sources remain selectable without starting unrelated PMU.
+for selection in membw mem mem_bw; do
+	"$armstat_bin" -s "$selection" -f json -i "$sample_interval" -n 1 \
+		>"$tmp_dir/explicit-$selection.json" \
+		2>"$tmp_dir/explicit-$selection.stderr"
+	python3 - "$tmp_dir/explicit-$selection.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    sample, = json.load(stream)
+assert set(sample["summary"]) == {"mem_bw"}
+assert "cpus" not in sample and "packages" not in sample
+PY
+	if grep -E 'perf_event_open|PMU init failed' \
+		"$tmp_dir/explicit-$selection.stderr" >/dev/null; then
+		echo "target-test bandwidth-only view attempted PMU initialization" >&2
+		exit 1
+	fi
+done
+
+# Hiding automatic IPC removes its fields without changing the selected rows.
+"$armstat_bin" -H ipc -f json -i "$sample_interval" -n 1 \
+	>"$tmp_dir/hidden-ipc.json" 2>"$tmp_dir/hidden-ipc.stderr"
+python3 - "$tmp_dir/hidden-ipc.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    sample, = json.load(stream)
+assert "ipc" not in sample["summary"] and "pmu" not in sample["summary"]
+assert "cpus" not in sample and "packages" not in sample
+PY
+if grep -E 'perf_event_open|PMU init failed' "$tmp_dir/hidden-ipc.stderr" >/dev/null; then
+	echo "target-test hidden IPC attempted PMU initialization" >&2
+	exit 1
+fi
+
+# Explicit IPC-only selection retains its unavailable column and omits counts.
+"$armstat_bin" -s ipc -f json -i "$sample_interval" -n 1 \
+	>"$tmp_dir/ipc-only.json" 2>"$tmp_dir/ipc-only.stderr"
+"$armstat_bin" -s cpu_ipc -f json -i "$sample_interval" -n 1 \
+	>"$tmp_dir/cpu-ipc-only.json" 2>"$tmp_dir/cpu-ipc-only.stderr"
+"$armstat_bin" -p cache-misses -f json -i "$sample_interval" -n 1 \
+	>"$tmp_dir/custom-pmu.json" 2>"$tmp_dir/custom-pmu.stderr"
+python3 - "$tmp_dir/ipc-only.json" "$tmp_dir/cpu-ipc-only.json" \
+	"$tmp_dir/custom-pmu.json" <<'PY'
+import json
+import sys
+
+def sample(path):
+    with open(path, encoding="utf-8") as stream:
+        record, = json.load(stream)
+    return record
+
+ipc, cpu_ipc, custom = map(sample, sys.argv[1:])
+assert set(ipc["summary"]) == {"ipc"}
+assert "cpus" not in ipc and "packages" not in ipc
+assert "summary" not in cpu_ipc and "packages" not in cpu_ipc
+assert cpu_ipc["cpus"] and all("ipc" in cpu for cpu in cpu_ipc["cpus"])
+assert all("pmu" not in cpu for cpu in cpu_ipc["cpus"])
+assert "ipc" not in custom["summary"]
+assert "pmu" in custom["summary"]
+counts = custom["summary"]["pmu"]
+assert counts is None or set(counts) == {"cache-misses"}
+PY
+
 # Unselected LPI reporting must not generate an unrelated cpuidle warning.
 "$armstat_bin" -s summary_freq_mhz -f json -i "$sample_interval" -n 1 \
 	>"$tmp_dir/frequency-only.json" 2>"$tmp_dir/frequency-only.stderr"
-if grep -F 'cpuidle' "$tmp_dir/frequency-only.stderr" >/dev/null; then
-	echo "target-test frequency-only selection produced a cpuidle diagnostic" >&2
+if grep -E 'cpuidle|perf_event_open|PMU init failed' \
+	"$tmp_dir/frequency-only.stderr" >/dev/null; then
+	echo "target-test frequency-only selection produced an unrelated collector diagnostic" >&2
 	exit 1
 fi
 
@@ -772,6 +861,7 @@ assert {row[header.index("Scope")] for row in rows[1:]} == {"SUM", "CPU"}
 assert {"cpu.package", "cpu.core", "cpu.node", "cpu.freq"}.issubset(header)
 assert not {"cpu.min", "cpu.max", "cpu.governor", "cpu.boost"}.intersection(header)
 assert not any("_usage" in column or column.startswith("package.") for column in header)
+assert "summary.mem_bw" not in header
 assert len({len(row) for row in rows}) == 1
 PY
 
@@ -793,6 +883,7 @@ assert len({len(row) for row in rows}) == 1
 scopes = {row[6] for row in rows[1:]}
 assert {"SUM", "PKG", "CPU"}.issubset(scopes), scopes
 assert {"cpu.min", "cpu.max", "cpu.governor", "cpu.boost"}.issubset(header)
+assert "summary.mem_bw" not in header
 for row in rows[1:]:
     assert row[0] == "9"
     assert int(row[2]) > 0
@@ -864,6 +955,9 @@ PY
 if [ "$soak_iterations" -gt 0 ]; then
 	set -- "$armstat_bin" -S -a -f json -i "$soak_interval" \
 		-n "$soak_iterations"
+	if [ "$require_membw" -eq 1 ]; then
+		set -- "$@" -s all,membw
+	fi
 	if [ "$require_pmu" -eq 1 ]; then
 		set -- "$@" -I
 	fi

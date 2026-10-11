@@ -29,6 +29,7 @@ struct armstat_options {
 	/* PMU */
 	char *pmu_events;
 	int ipc_requested;  /* Track if -I was used (requires PMU) */
+	int pmu_auto;       /* Best-effort IPC collection without raw PMU columns */
 
 	/* Other */
 	int debug;
@@ -41,6 +42,9 @@ extern struct armstat_options default_options;
 
 int parse_args(int argc, char *argv[], struct armstat_options *opts);
 int apply_default_pmu_events(struct armstat_options *opts);
+/* Best-effort startup; callback is normally init_pmu_events(). */
+int initialize_selected_pmu(const struct armstat_options *opts,
+			    int (*init_events)(const char *events));
 
 /* Exposed for regression tests — column selection logic */
 void set_all_columns_enabled(int enable);

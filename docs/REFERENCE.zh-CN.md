@@ -127,6 +127,17 @@ CPU 不按零处理。
 
 ### PMU
 
+PMU 采集与原始计数列显示分开控制。默认、`-S`、`-a`、`-s all` 和 `-s cpu`
+快捷视图用 `cycles,instructions` 尝试提供 IPC，不增加原始计数列或 CPU 行。
+所选 N 个 CPU 需要 2N 个 perf FD。任一 CPU 组启动失败时，关闭全部自动计数器
+并隐藏 IPC，仅 `-d` 输出诊断。`-H ipc` 关闭自动采集，其他白名单只有选择
+IPC 才采集它。
+
+显式 `-I`、`-p` 或 IPC 字段/列组请求保留诊断与不可用列。`-I` 显示原始计数
+及 IPC，单独选择 IPC 不显示原始计数。自定义 `-p` 列表抑制自动 IPC；明确
+请求 IPC 时再补入 cycles/instructions。自动启动成功后，后续无效读取仍保留
+不可用 IPC 列，PMU 有效性变化本身不改变 CSV 列。
+
 每个所选 CPU 打开一个 perf 事件组。区间计数使用精确整数运算计算
 `round(Δcount * Δtime_enabled / Δtime_running)`。首次、失败、短读、回退或
 未运行的读取不可用。时间增量不合法、缩放或每 CPU 累计总量溢出时，整组失效
@@ -138,9 +149,10 @@ IPC 要求命名为 `cycles` 和 `instructions` 的有效计数且 cycles 非零
 
 最多选择 16 个不重复的事件名称。原始配置要求 `0x`/`0X` 后跟不超过 64 位的
 十六进制数，不接受符号或空白。`mem-read` 与 `mem-write` 是退休的加载/存储
-次数，不是字节数；可选缓存事件依赖具体 CPU。完整列表见 `--list`。已知事件
-被 perf 拒绝时仍显示为不可用。FD 用量随 CPU/事件数增长；初始化尝试在硬限制
-内提高软 `RLIMIT_NOFILE`，不足时告警。
+次数，不是字节数；可选缓存事件依赖具体 CPU。完整列表见 `--list`。被 perf
+拒绝的显式事件仍显示为不可用。FD 用量随 CPU/事件数增长；初始化尝试在硬限制
+内提高软 `RLIMIT_NOFILE`。显式请求在预算仍不足时告警；自动 IPC 除 debug 模式
+外静默回退。
 
 ### 传感器映射与缺失数据
 
@@ -164,7 +176,10 @@ JSON/CSV 与随附绘图加载器使用 **schema 第 9 版**。第 8 版 LPI 是
 ### 字段选择
 
 默认输出 SUM，`-a` 增加 CPU 动态指标和 Pkg/Core/Node 拓扑，省略插槽聚合行、
-频率配置与 LPI usage。`-s all` 补入这些列组；PMU/IPC 始终需要显式请求。
+频率配置与 LPI usage。`-s all` 补入这些列组。这些内置视图包含可用 IPC；
+原始 PMU 计数始终需要显式请求。
+`MemBW` 需要显式 `-s membw`（或 `mem`）、`-s mem_bw`，可与其他选择组合，如
+`-s all,membw`。默认、`-S`、`-a` 和 `-s all` 均不会自动启用它。
 `freq` 选择当前频率/UncoreFreq，`freq-config` 选择 Min/Max/Governor/Boost，
 `idle` 选择驻留与 Busy/Idle/IOWait，`idle-usage` 选择每 CPU 状态进入速率。
 
@@ -330,8 +345,10 @@ ARMSTAT_SOAK_ITERATIONS=1000 ARMSTAT_SOAK_INTERVAL=1 make target-test
 目标测试还检查选项、输出失败、探测结构、文本、JSON/CSV、时间戳、缺失值与
 资源用量。稳定性采样检查 Busy/Idle 和所有强制能力的有效样本比例，默认至少 95%。
 可调整 `ARMSTAT_MIN_VALID_PERCENT`、`ARMSTAT_MAX_RSS_KIB`、`ARMSTAT_MAX_OPEN_FDS`
-和 `ARMSTAT_MAX_DIAGNOSTIC_LINES`。强制 PMU 且未设 FD 上限时，默认预算覆盖
-每 CPU 两个 FD 和额外余量。
+和 `ARMSTAT_MAX_DIAGNOSTIC_LINES`。未设 FD 上限时默认为 256；强制 PMU 或首次
+默认采样实际包含 IPC 时，使用 `max(256, tracked_cpus * 2 + 64)`，覆盖事件对
+及其他运行 FD。未强制 PMU 且自动 IPC 不可用时仍保留 256，显式
+`ARMSTAT_MAX_OPEN_FDS` 始终优先。
 
 发布验收要求主机测试、静态分析、ASan/UBSan 检查、真实绘图、能力强制目标测试、人工
 检视文本/汇总/JSON/CSV，以及物理服务器上的持续运行。VM/容器只能证明可移植性

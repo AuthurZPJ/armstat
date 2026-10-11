@@ -21,6 +21,10 @@ struct pmu_event {
 	uint64_t prev_value;
 };
 
+/* Runtime diagnostics default on; the setting survives init/rebuild/close. */
+void set_pmu_diagnostics(int enable);
+int pmu_diagnostics_enabled(void);
+
 /* Initialize PMU events */
 int init_pmu_events(const char *events);
 

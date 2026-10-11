@@ -1,4 +1,4 @@
-.TH ARMSTAT 8 "October 8, 2026" "armstat" "System Administration"
+.TH ARMSTAT 8 "October 9, 2026" "armstat" "System Administration"
 .SH NAME
 armstat \- ARM64 server interval monitor
 .SH SYNOPSIS
@@ -16,7 +16,8 @@ Default output contains one \fBSUM\fR row.
 \fB-s all\fR selects the full base view with package rows, configuration,
 and idle-state usage rates.
 \fB-S\fR emits only the summary. Explicit \fB-s\fR selection determines
-which scopes are emitted. PMU and IPC require an explicit request.
+which scopes are emitted. Built-in views include IPC when automatic PMU
+initialization succeeds; raw event counters require an explicit request.
 .SH OPTIONS
 .TP
 .BI \-i ", " \-\-interval " seconds"
@@ -57,7 +58,7 @@ Emit one SUM row or object per interval.
 .B \-a, \-\-all
 Expand live metrics with CPU rows and Pkg/Core/Node topology. Omit package
 aggregate rows, Min/Max/Governor/Boost, and LPI usage rates; use \fB-s all\fR
-for the full base view. Neither view enables PMU or IPC.
+for the full base view. Both attempt IPC without displaying raw event counters.
 .TP
 .BI \-f ", " \-\-format " format"
 Output format: \fBtext\fR (default), \fBjson\fR, or \fBcsv\fR.
@@ -74,9 +75,11 @@ Hide comma-separated groups or exact fields.
 .BI \-p ", " \-\-pmu-events " events"
 Select comma-separated PMU events. Unknown or duplicate names and lists over
 16 events are startup errors. Unavailable known events remain visible.
+Suppress automatic IPC; add \fB-I\fR or explicitly select IPC to request it.
 .TP
 .B \-I, \-\-ipc
-Select cycles and instructions and enable IPC.
+Show raw cycles and instructions counts and IPC. Supplement custom event
+lists with both events.
 .TP
 .B \-J, \-\-joules
 Show interval energy in joules.
@@ -116,6 +119,9 @@ Use \fB--list\fR for the complete registry and stable IDs such as
 Min/Max/Governor/Boost. \fBidle\fR selects LPI residency and Busy/Idle/IOWait;
 \fBidle-usage\fR selects state-entry rates. Core, numa, freq-config, and
 idle-usage automatically enable CPU rows.
+\fBMemBW\fR is opt-in: use \fB-s membw\fR (or \fBmem\fR) or \fB-s mem_bw\fR,
+alone or combined with other selections. Default, \fB-S\fR, \fB-a\fR, and
+\fB-s all\fR do not enable it; use \fB-s all,membw\fR to include it.
 \fB-s cpu\fR alone supplies common per-CPU frequency, utilization, LPI residency,
 and temperature without SUM. Combined selections use the requested fields and
 scopes. These defaults preserve explicit \fB-H\fR exclusions.
@@ -199,6 +205,21 @@ Celsius; this backend does not provide per-core temperature or power.
 counts, not per-second rates. \fBIPC\fR is instructions divided by cycles,
 requiring valid named events and a nonzero cycle count.
 .SH PMU EVENTS
+Default, \fB-S\fR, \fB-a\fR, \fB-s all\fR, and \fB-s cpu\fR views attempt
+IPC using cycles and instructions, without enabling raw counter columns or
+additional CPU rows. With N selected CPUs this needs 2N perf file descriptors.
+If any CPU event group fails initialization, automatic IPC is hidden and its
+counters are closed. This fallback is silent unless \fB-d\fR is enabled.
+\fB-H ipc\fR suppresses automatic collection; other \fB-s\fR whitelists
+collect IPC only when selected.
+.PP
+Explicit \fB-I\fR, \fB-p\fR, and IPC field/group requests report failures
+and retain unavailable columns. \fB-s ipc\fR or \fB-s cpu_ipc\fR collects
+the required pair without displaying raw counters. \fB-p\fR alone keeps
+only its requested event list; an explicit IPC request supplements that list
+with cycles and instructions. After automatic initialization succeeds, later
+invalid reads retain the IPC column as unavailable, preserving CSV layout.
+.PP
 Built-in names are:
 .nf
 cycles, instructions, cache-references, cache-misses,

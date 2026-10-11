@@ -47,6 +47,7 @@ struct armstat_options default_options = {
 	.busy_source = NULL,
 	.pmu_events = NULL,
 	.ipc_requested = 0,
+	.pmu_auto = 0,
 	.debug = 0,
 	.list_counters = 0,
 	.dump_once = 0,
@@ -83,6 +84,8 @@ static struct option long_options[] = {
 	{0, 0, 0, 0}
 };
 
+static int ipc_selection_explicit;
+
 static void print_version(void)
 {
 	printf("armstat version %s\n", ARMSTAT_VERSION);
@@ -96,6 +99,7 @@ static void print_help(void)
 	printf("Usage: armstat [options]\n");
 	printf("\n");
 	printf("Default: SUM. -a: SUM + CPU live metrics. -s all: full base view.\n");
+	printf("These views include IPC when PMU startup succeeds; -H ipc disables it.\n");
 	printf("Package rows require -s pkg/package, a stable package field ID, or -s all.\n");
 	printf("\n");
 	printf("Options:\n");
@@ -113,7 +117,7 @@ static void print_help(void)
 	printf("  -f, --format <fmt>     Output format: text, json, csv\n");
 	printf("  -s, --show <items>     Show only selected groups or exact field names\n");
 	printf("  -H, --hide <items>     Hide selected groups or exact field names\n");
-	printf("  -p, --pmu-events <evts> Enable PMU events\n");
+	printf("  -p, --pmu-events <evts> Show raw PMU counters (add -I for IPC)\n");
 	printf("  -I, --ipc              Enable cycles,instructions PMU + IPC columns\n");
 	printf("  -J, --joules           Show interval energy in Joules\n");
 	printf("  -l, --list             List groups, exact fields, and PMU events\n");
@@ -334,25 +338,16 @@ void set_all_columns_enabled(int enable)
 	enable_power(enable);
 	enable_temp(enable);
 	enable_sysstat(enable);
-	enable_membw(enable);
 	enable_numa(enable);
 	enable_package(enable);
 	enable_core(enable);
 	enable_energy(enable);
+	enable_ipc(enable);
 
-	/*
-	 * PMU/IPC are intentionally excluded from the implicit "all columns"
-	 * toggle. Unlike the other groups they are not just display choices:
-	 * enabling them starts perf-based runtime collection, changes failure
-	 * modes, and may require additional privileges. Keep them explicit via
-	 * -p or -I so "-a" remains a safe "show the normal data surface" option.
-	 *
-	 * When disabling all groups (for example via -H all), still turn PMU/IPC
-	 * off so the blacklist semantics stay intuitive.
-	 */
+	/* Broad views include IPC; raw PMU and rare bandwidth sources are opt-in. */
 	if (!enable) {
 		enable_pmu(0);
-		enable_ipc(0);
+		enable_membw(0);
 	}
 }
 
@@ -372,6 +367,8 @@ static void select_view_fields(int live_only)
 	/* Keep broad views explicit so later -s additions remain a union. */
 	for (int i = 0; i < field_count; i++) {
 		if ((fields[i].group_mask & FIELD_GROUP_IPC) && !is_ipc_enabled())
+			continue;
+		if ((fields[i].group_mask & FIELD_GROUP_MEMBW) && !is_membw_enabled())
 			continue;
 		if (live_only && (fields[i].group_mask &
 		    (FIELD_GROUP_FREQ_CONFIG | FIELD_GROUP_IDLE_USAGE)))
@@ -467,8 +464,10 @@ static int apply_show_option(const char *arg, int reset_selection)
 		fprintf(stderr, "Error: --show requires at least one column group or field name\n");
 		return -1;
 	}
-	if (reset_selection)
+	if (reset_selection) {
 		clear_columns();
+		ipc_selection_explicit = 0;
+	}
 	unknown_column_count = 0;
 	if (parse_column_option(arg, 1) < 0)
 		return -1;
@@ -631,6 +630,8 @@ int parse_column_option(const char *arg, int enable)
 		for (int i = 0; i < ARRAY_SIZE(groups); i++) {
 			if (option_matches_alias_group(token, &groups[i])) {
 				groups[i].set_visible(enable);
+				if (enable && (groups[i].field_group_mask & FIELD_GROUP_IPC))
+					ipc_selection_explicit = 1;
 				if (enable && (groups[i].field_group_mask &
 				    (FIELD_GROUP_FREQ_CONFIG | FIELD_GROUP_IDLE_USAGE)))
 					enable_cpu(1);
@@ -671,6 +672,8 @@ int parse_column_option(const char *arg, int enable)
 			 */
 			if (enable)
 				*fields[i].enabled_ptr = 1;
+			if (enable && (fields[i].group_mask & FIELD_GROUP_IPC))
+				ipc_selection_explicit = 1;
 			if (enable && exact_id && fields[i].scope == FIELD_SCOPE_PACKAGE)
 				enable_package(1);
 			if (enable && fields[i].scope == FIELD_SCOPE_CPU &&
@@ -711,6 +714,7 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 	int view_option_seen = 0;
 	int cpu_only_selection = 1;
 
+	ipc_selection_explicit = 0;
 	set_cpu_inventory_filter(NULL);
 	set_section_summary_mode(0);
 	set_section_default_summary_output(1);
@@ -748,6 +752,7 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 		case 'a':
 			cpu_only_selection = 0;
 			view_option_seen = 1;
+			ipc_selection_explicit = 0;
 			set_live_columns_enabled();
 			clear_field_overrides();
 			select_view_fields(1);
@@ -810,8 +815,7 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 			break;
 		case 'I':
 			apply_ipc_option(opts);
-			if (view_option_seen)
-				set_group_field_overrides(FIELD_GROUP_IPC, 1, 1);
+			set_group_field_overrides(FIELD_GROUP_IPC, 1, view_option_seen);
 			break;
 		case 'P':
 			opts->probe_only = 1;
@@ -854,6 +858,7 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 		enable_idle(1);
 		enable_iowait(1);
 		enable_temp(1);
+		enable_ipc(1);
 		select_default_cpu_fields();
 		set_section_default_summary_output(energy_requested ||
 					   opts->ipc_requested || opts->pmu_events);
@@ -862,22 +867,47 @@ int parse_args(int argc, char *argv[], struct armstat_options *opts)
 	return 0;  /* Continue execution */
 }
 
+static int selected_ipc_fields(void)
+{
+	struct field_desc *fields[64];
+	int count;
+
+	for (int scope = FIELD_SCOPE_SYSTEM; scope <= FIELD_SCOPE_CPU; scope++) {
+		if (scope == FIELD_SCOPE_PACKAGE ||
+		    (scope == FIELD_SCOPE_SYSTEM && !section_is_summary_mode() &&
+		     !section_emit_default_summary()) ||
+		    (scope == FIELD_SCOPE_CPU &&
+		     (section_is_summary_mode() || !section_emit_cpu())))
+			continue;
+		get_enabled_fields(scope, fields, &count);
+		for (int i = 0; i < count; i++) {
+			if (fields[i]->group_mask & FIELD_GROUP_IPC)
+				return 1;
+		}
+	}
+	return 0;
+}
+
 int apply_default_pmu_events(struct armstat_options *opts)
 {
-	/*
-	 * If the user explicitly asked for PMU/IPC columns but did not provide
-	 * an event list, default to the turbostat-like baseline pair so the
-	 * columns are actionable instead of permanently unavailable.
-	 */
-	if (!opts->pmu_events && (is_pmu_enabled() || is_ipc_enabled()))
+	int explicit_ipc = opts->ipc_requested || ipc_selection_explicit;
+	int want_ipc;
+
+	/* A custom raw event list must not silently acquire additional events. */
+	if (opts->pmu_events && !explicit_ipc)
+		set_ipc_field_availability(0);
+	want_ipc = selected_ipc_fields();
+	opts->pmu_auto = want_ipc && !explicit_ipc && !is_pmu_enabled();
+	if (!opts->pmu_events && (is_pmu_enabled() || want_ipc))
 		opts->pmu_events = "cycles,instructions";
 
 	/*
-	 * If -I was used, ensure cycles,instructions are present in the event
+	 * If IPC was explicitly selected, ensure its baseline pair is in the event
 	 * list so IPC can actually be computed.  Merge them in front of any
 	 * existing -p events without duplicating.
 	 */
-	if (opts->ipc_requested && opts->pmu_events) {
+	if ((opts->ipc_requested || (ipc_selection_explicit && want_ipc)) &&
+	    opts->pmu_events) {
 		static char merged[512];
 		int has_cycles = 0, has_instructions = 0;
 		int written = 0;
@@ -885,9 +915,8 @@ int apply_default_pmu_events(struct armstat_options *opts)
 
 		while (*p) {
 			const char *start = p;
-			const char *end = p;
-			while (*end && *end != ',')
-				end++;
+			const char *next = strchr(p, ',');
+			const char *end = next ? next : p + strlen(p);
 			while (start < end && (*start == ' ' || *start == '\t'))
 				start++;
 			while (end > start && (end[-1] == ' ' || end[-1] == '\t'))
@@ -896,7 +925,7 @@ int apply_default_pmu_events(struct armstat_options *opts)
 				has_cycles = 1;
 			if ((end - start) == 12 && strncmp(start, "instructions", 12) == 0)
 				has_instructions = 1;
-			p = (*end == ',') ? end + 1 : end;
+			p = next ? next + 1 : p + strlen(p);
 		}
 
 		if (!has_cycles || !has_instructions) {
@@ -921,4 +950,33 @@ int apply_default_pmu_events(struct armstat_options *opts)
 		return -1;
 
 	return 0;
+}
+
+int initialize_selected_pmu(const struct armstat_options *opts,
+			    int (*init_events)(const char *events))
+{
+	int result;
+
+	set_pmu_diagnostics(!opts->pmu_auto);
+	if (!opts->pmu_events || (!is_pmu_enabled() && !selected_ipc_fields()))
+		return 0;
+	if (opts->debug)
+		fprintf(stderr, "Initializing PMU: %s\n", opts->pmu_events);
+	result = init_events(opts->pmu_events);
+	if (result < 0) {
+		if (opts->pmu_auto) {
+			/* Do not retry an unavailable automatic source during hotplug. */
+			close_pmu_events();
+			set_ipc_field_availability(0);
+			if (opts->debug)
+				fprintf(stderr, "Automatic IPC unavailable; skipping IPC columns\n");
+		} else {
+			fprintf(stderr, "Warning: PMU init failed; PMU columns will be shown as unavailable\n");
+			fprintf(stderr, "  Events: %s\n", opts->pmu_events);
+			fprintf(stderr, "  Note: check perf permissions, kernel support, or event availability\n");
+		}
+	} else if (opts->debug) {
+		fprintf(stderr, "PMU initialized successfully\n");
+	}
+	return result;
 }

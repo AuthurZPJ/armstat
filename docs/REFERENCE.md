@@ -145,6 +145,20 @@ before averaging; missing CPUs are not counted as zero.
 
 ### PMU
 
+PMU collection is independent of raw counter display. Default, `-S`, `-a`,
+`-s all`, and the `-s cpu` shortcut attempt IPC using `cycles,instructions`
+without adding raw counter columns or CPU rows. This needs 2N perf descriptors
+for N selected CPUs. If any CPU group fails startup, all automatic counters
+are closed and IPC is hidden; only `-d` reports the failure. `-H ipc` suppresses
+automatic collection. Other whitelists collect IPC only when selected.
+
+Explicit `-I`, `-p`, or IPC field/group requests retain diagnostics and
+unavailable columns. `-I` displays raw counts and IPC; an IPC selection alone
+does not display raw counts. Custom `-p` lists suppress automatic IPC unless
+it is explicitly requested, in which case cycles/instructions are added.
+After automatic startup succeeds, subsequent invalid reads leave IPC visible
+as unavailable, so PMU validity changes alone do not alter CSV columns.
+
 Perf groups are opened per selected CPU. Each interval count is
 `round(Δcount * Δtime_enabled / Δtime_running)` using exact integer arithmetic.
 First, failed, short, reset, or unscheduled reads are unavailable. Invalid time
@@ -158,10 +172,11 @@ valid and rejecting 64-bit sum overflow. IPC requires valid named `cycles` and
 Event lists allow at most 16 unique names. Raw configs require `0x`/`0X` plus
 hexadecimal digits within 64 bits, without signs or whitespace. `mem-read` and
 `mem-write` are retired load/store counts, not bytes; optional cache events
-depend on the CPU. See `--list` for the catalog. Known events denied by perf
-remain visible as unavailable. FD use grows with CPUs/events; initialization
-attempts to raise soft `RLIMIT_NOFILE` within the hard limit and warns if the
-budget remains insufficient.
+depend on the CPU. See `--list` for the catalog. Explicitly requested events
+denied by perf remain visible as unavailable. FD use grows with CPUs/events;
+initialization attempts to raise soft `RLIMIT_NOFILE` within the hard limit.
+Explicit requests warn if the budget remains insufficient; automatic IPC falls
+back silently except in debug mode.
 
 ### Sensor mapping and missing data
 
@@ -193,7 +208,11 @@ the serializer's field registry. The separate key-value probe contract is
 
 Default output is SUM; `-a` adds CPU live metrics and Pkg/Core/Node topology,
 without package aggregate rows, frequency configuration, or LPI usage.
-`-s all` adds those omitted groups; PMU/IPC always require explicit requests.
+`-s all` adds those omitted groups. These built-in views include available IPC;
+raw PMU counts always require explicit requests.
+`MemBW` requires explicit `-s membw` (or `mem`) or `-s mem_bw`; these can be
+combined with other selections, such as `-s all,membw`. Default, `-S`, `-a`,
+and `-s all` do not enable it.
 `freq` selects current frequency/UncoreFreq, `freq-config` selects
 Min/Max/Governor/Boost, `idle` selects residency and Busy/Idle/IOWait, and
 `idle-usage` selects per-CPU state-entry rates.
@@ -390,8 +409,11 @@ The target test also checks options, output failures, probe structure, text,
 JSON/CSV, timestamps, missing values, and resources. A soak checks Busy/Idle and
 every required capability's valid-sample ratio, defaulting to at least 95%.
 Tune `ARMSTAT_MIN_VALID_PERCENT`, `ARMSTAT_MAX_RSS_KIB`, `ARMSTAT_MAX_OPEN_FDS`,
-and `ARMSTAT_MAX_DIAGNOSTIC_LINES` as needed. If PMU is required without an
-explicit FD ceiling, the default covers two FDs per CPU plus an allowance.
+and `ARMSTAT_MAX_DIAGNOSTIC_LINES` as needed. Without an explicit FD ceiling,
+the default is 256. If PMU is required or the initial default capture contains
+IPC, it becomes `max(256, tracked_cpus * 2 + 64)`, covering the event pair and
+other runtime FDs. When PMU is not required and automatic IPC is unavailable,
+the limit stays at 256; an explicit `ARMSTAT_MAX_OPEN_FDS` always takes precedence.
 
 Release acceptance requires host tests, analysis, sanitizer tests, real plots,
 capability-enforced target tests, inspected text/summary/JSON/CSV samples, and a
